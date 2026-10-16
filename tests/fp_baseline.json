@@ -1,0 +1,8 @@
+{
+  "scanned": 150,
+  "dotnet_assemblies": 139,
+  "errors": 0,
+  "named_fp_pct": 8.63,
+  "verdict_fp_pct": 100.0,
+  "avg_seconds_per_file": 0.339
+}
