@@ -77,6 +77,9 @@ namespace ConfuserExTools.ConstantKiller {
 
 					var originalBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
 					try {
+						int methodCount = 0;
+						var methodRewrittenCounts = new Dictionary<MethodDef, int>();
+
 						method.Body.SimplifyMacros(method.Parameters);
 						for (int i = 1; i < method.Body.Instructions.Count; i++) {
 							var instructions = method.Body.Instructions;
@@ -229,9 +232,15 @@ namespace ConfuserExTools.ConstantKiller {
 								}
 							}
 
-							decrypterRewrittenCounts[operandMethodDef]++;
-							count++;
+							methodRewrittenCounts[operandMethodDef] = methodRewrittenCounts.TryGetValue(operandMethodDef, out int cur) ? cur + 1 : 1;
+							methodCount++;
 						}
+
+						// Commit counts only after method transformation successfully completes
+						foreach (var kvp in methodRewrittenCounts) {
+							decrypterRewrittenCounts[kvp.Key] += kvp.Value;
+						}
+						count += methodCount;
 					}
 					catch (Exception ex) {
 						// True atomic rollback method body on error

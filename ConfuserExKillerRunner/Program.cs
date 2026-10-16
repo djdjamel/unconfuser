@@ -82,6 +82,7 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("===============================================================");
             Console.WriteLine("          ConfuserExKillerRunner - Deobfuscation Engine        ");
             Console.WriteLine("===============================================================");
+            string originalInputPath = assemblyPath;
             Console.WriteLine($"[*] Target: {assemblyPath}");
             Console.WriteLine($"[*] Process Bitness: {(Environment.Is64BitProcess ? "64-bit" : "32-bit")}");
 
@@ -158,7 +159,7 @@ namespace ConfuserExKillerRunner
                 Console.WriteLine("[!] Untrusted target constructors (<Module>.cctor) will NOT be executed.");
                 Console.WriteLine("[!] Running in Pure Static Analysis mode.");
                 Console.WriteLine("[!] To enable runtime AntiTamper and dynamic Constant decryption,");
-                Console.WriteLine("[!] re-run with '--allow-execution' in an isolated sandbox.");
+                Console.WriteLine("[!] re-run with '--allow-execution' (executes target assembly code in the runner process).");
                 Console.WriteLine("[!] =================================================================");
                 Console.WriteLine();
                 Console.ResetColor();
@@ -321,7 +322,6 @@ namespace ConfuserExKillerRunner
 
             // Step 6: Final SwitchKiller pass on intermediate output
             Console.WriteLine("[*] Step 6: Running final cleanup pass...");
-            string originalInputPath = Path.GetFullPath(args[0]);
             string finalDefaultPath = Path.Combine(targetDir, baseName + "_final" + fileExt);
             string finalOutputPath = !string.IsNullOrEmpty(outputPath) ? Path.GetFullPath(outputPath) : finalDefaultPath;
 
@@ -333,7 +333,15 @@ namespace ConfuserExKillerRunner
                 return 1;
             }
 
-            string candidatePath = Path.Combine(targetDir, baseName + ".candidate." + Guid.NewGuid().ToString("N").Substring(0, 8) + fileExt);
+            string finalOutputDir = Path.GetDirectoryName(finalOutputPath);
+            if (!string.IsNullOrEmpty(finalOutputDir) && !Directory.Exists(finalOutputDir))
+            {
+                Directory.CreateDirectory(finalOutputDir);
+            }
+
+            string candidateExt = Path.GetExtension(finalOutputPath);
+            string candidateBase = Path.GetFileNameWithoutExtension(finalOutputPath);
+            string candidatePath = Path.Combine(finalOutputDir, candidateBase + ".candidate." + Guid.NewGuid().ToString("N").Substring(0, 8) + candidateExt);
 
             using (var module2 = ModuleDefMD.Load(currentIntermediate))
             {
@@ -380,23 +388,58 @@ namespace ConfuserExKillerRunner
                 return 1;
             }
 
-            // Audit passed: Promote candidate to final output path
+            // Audit passed: Promote candidate to final output path without deleting existing output before replacement succeeds
             try
             {
-                if (File.Exists(finalOutputPath)) File.Delete(finalOutputPath);
-                File.Move(candidatePath, finalOutputPath);
+                if (File.Exists(finalOutputPath))
+                {
+                    string backupPath = finalOutputPath + ".bak." + Guid.NewGuid().ToString("N").Substring(0, 8);
+                    try
+                    {
+                        File.Replace(candidatePath, finalOutputPath, backupPath, ignoreMetadataErrors: true);
+                        try { File.Delete(backupPath); } catch { }
+                    }
+                    catch (PlatformNotSupportedException)
+                    {
+                        File.Move(finalOutputPath, backupPath);
+                        try
+                        {
+                            File.Move(candidatePath, finalOutputPath);
+                            try { File.Delete(backupPath); } catch { }
+                        }
+                        catch
+                        {
+                            try { File.Move(backupPath, finalOutputPath); } catch { }
+                            throw;
+                        }
+                    }
+                }
+                else
+                {
+                    File.Move(candidatePath, finalOutputPath);
+                }
             }
             catch (Exception ex)
             {
+                try { if (File.Exists(candidatePath)) File.Delete(candidatePath); } catch { }
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine($"[!] Failed to promote candidate to final output path: {ex.Message}");
                 Console.ResetColor();
                 return 1;
             }
 
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"[+] Deobfuscation Verified & Complete! Final output saved to: {finalOutputPath}");
-            Console.ResetColor();
+            if (auditReport.Status == "CLEAN")
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"[+] Deobfuscation Verified & Clean! Final output saved to: {finalOutputPath}");
+                Console.ResetColor();
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"[!] Deobfuscation Completed with {auditReport.Warnings.Count} Structural Warning(s) (Candidate Promoted). Output saved to: {finalOutputPath}");
+                Console.ResetColor();
+            }
 
             // NetDetect Post-Scan Reduction Audit
             if (!skipNetDetect && preScan != null && preScan.Available)

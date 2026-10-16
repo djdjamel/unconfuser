@@ -109,6 +109,9 @@ namespace ConfuserExTools.ProxyKiller
 					var originalBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
 					try
 					{
+						int methodRestored = 0;
+						var methodRewrittenCounts = new Dictionary<MethodDef, int>();
+
 						for (int i = 0; i < method.Body.Instructions.Count; i++)
 						{
 							var instruction = method.Body.Instructions[i];
@@ -122,11 +125,18 @@ namespace ConfuserExTools.ProxyKiller
 								{
 									instruction.OpCode = realCall.OpCode;
 									instruction.Operand = realCall.Operand;
-									proxyRewrittenCounts[targetDef]++;
-									totalRestored++;
+									methodRewrittenCounts[targetDef] = methodRewrittenCounts.TryGetValue(targetDef, out int cur) ? cur + 1 : 1;
+									methodRestored++;
 								}
 							}
 						}
+
+						// Commit counts only after method transformation successfully completes
+						foreach (var kvp in methodRewrittenCounts)
+						{
+							proxyRewrittenCounts[kvp.Key] += kvp.Value;
+						}
+						totalRestored += methodRestored;
 					}
 					catch (Exception ex)
 					{

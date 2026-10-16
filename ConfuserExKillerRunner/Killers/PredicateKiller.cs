@@ -37,6 +37,9 @@ namespace ConfuserExKillerRunner.Killers
                         bool modified = false;
                         bool passChanged;
                         int iterations = 0;
+                        int methodConstantsFolded = 0;
+                        int methodIdentitiesSimplified = 0;
+                        int methodBranchesResolved = 0;
 
                         // Iterative simplification loop (folds constants then evaluates branches)
                         do
@@ -47,7 +50,7 @@ namespace ConfuserExKillerRunner.Killers
                             int foldedConsts = FoldConstants(method.Body.Instructions);
                             if (foldedConsts > 0)
                             {
-                                result.ConstantsFolded += foldedConsts;
+                                methodConstantsFolded += foldedConsts;
                                 passChanged = true;
                                 modified = true;
                             }
@@ -55,7 +58,7 @@ namespace ConfuserExKillerRunner.Killers
                             int simplifiedIdents = FoldAlgebraicIdentities(method.Body.Instructions);
                             if (simplifiedIdents > 0)
                             {
-                                result.IdentitiesSimplified += simplifiedIdents;
+                                methodIdentitiesSimplified += simplifiedIdents;
                                 passChanged = true;
                                 modified = true;
                             }
@@ -63,7 +66,7 @@ namespace ConfuserExKillerRunner.Killers
                             int resolvedBranches = EvaluateConstantBranches(method.Body.Instructions);
                             if (resolvedBranches > 0)
                             {
-                                result.BranchesResolved += resolvedBranches;
+                                methodBranchesResolved += resolvedBranches;
                                 passChanged = true;
                                 modified = true;
                             }
@@ -76,6 +79,11 @@ namespace ConfuserExKillerRunner.Killers
                             method.Body.OptimizeBranches();
                             result.MethodsOptimized++;
                         }
+
+                        // Commit counters only after method transformation successfully completes
+                        result.ConstantsFolded += methodConstantsFolded;
+                        result.IdentitiesSimplified += methodIdentitiesSimplified;
+                        result.BranchesResolved += methodBranchesResolved;
                     }
                     catch (Exception ex)
                     {

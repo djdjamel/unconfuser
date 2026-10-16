@@ -109,6 +109,7 @@ namespace ConfuserExKillerRunner.Killers
             var originalAsmName = module.Assembly.Name;
             var cctor = module.GlobalType?.FindStaticConstructor();
             var originalCctorBody = cctor?.HasBody == true ? ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(cctor.Body) : null;
+            var originalResources = module.Resources.ToList();
 
             void Rollback()
             {
@@ -117,6 +118,14 @@ namespace ConfuserExKillerRunner.Killers
                 decrypterMethod.Body = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(originalBody);
                 if (cctor != null && originalCctorBody != null)
                     cctor.Body = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(originalCctorBody);
+
+                module.Resources.Clear();
+                foreach (var r in originalResources)
+                    module.Resources.Add(r);
+
+                result.DecryptedResourcesCount = 0;
+                result.ExtractedResourcesCount = 0;
+                result.ResourcesDecrypted = false;
             }
 
             try
@@ -212,11 +221,12 @@ namespace ConfuserExKillerRunner.Killers
                     using (var resModule = ModuleDefMD.Load(decryptedBytes))
                     {
                         int count = 0;
+                        var stagedAdditions = new List<Resource>();
+                        var stagedRemovalNames = new HashSet<UTF8String>();
+
                         foreach (var res in resModule.Resources)
                         {
-                            var existing = module.Resources.Find(res.Name);
-                            if (existing != null)
-                                module.Resources.Remove(existing);
+                            stagedRemovalNames.Add(res.Name);
 
                             var er = res as EmbeddedResource;
                             if (er != null)
@@ -224,14 +234,27 @@ namespace ConfuserExKillerRunner.Killers
                                 // Deep copy resource data into managed byte array so disposed resModule does not invalidate the stream
                                 byte[] data = er.GetResourceData();
                                 var copy = new EmbeddedResource(er.Name, data, er.Attributes);
-                                module.Resources.Add(copy);
+                                stagedAdditions.Add(copy);
                             }
                             else
                             {
-                                module.Resources.Add(res);
+                                stagedAdditions.Add(res);
                             }
                             count++;
                         }
+
+                        // Atomic commit: stage resource changes before committing
+                        foreach (var name in stagedRemovalNames)
+                        {
+                            var existing = module.Resources.Find(name);
+                            if (existing != null)
+                                module.Resources.Remove(existing);
+                        }
+                        foreach (var res in stagedAdditions)
+                        {
+                            module.Resources.Add(res);
+                        }
+
                         result.DecryptedResourcesCount = count;
                         result.ExtractedResourcesCount = count;
                         result.ResourcesDecrypted = true;

@@ -84,5 +84,101 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(OpCodes.Ldtoken, instructions[6].OpCode);
             Assert.Equal(OpCodes.Call, instructions[7].OpCode);
         }
+
+        [Fact]
+        public void ConstantKiller_Execute_RewritesConstantArrayCallEndToEnd()
+        {
+            var module = new ModuleDefUser("TestArrayMod");
+            var asm = new AssemblyDefUser("TestArrayAsm");
+            asm.Modules.Add(module);
+
+            // 1. Define ConfuserEx constant decrypter in GlobalType: static T Decrypter<T>(uint key)
+            var decrypterDef = new MethodDefUser(
+                "Decrypter",
+                MethodSig.CreateStaticGeneric(1, new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            decrypterDef.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+
+            // IL implementation of Decrypter: returns new byte[] { 10, 20, 30, 40 }
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_4));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Newarr, module.CorLibTypes.Byte.TypeDefOrRef));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Dup));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 10));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Stelem_I1));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Dup));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 20));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Stelem_I1));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Dup));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_2));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 30));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Stelem_I1));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Dup));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_3));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 40));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Stelem_I1));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            module.GlobalType.Methods.Add(decrypterDef);
+
+            // 2. Define calling method in a user type: calls Decrypter<byte[]>(12345)
+            var userType = new TypeDefUser("CallerType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+
+            var runMethod = new MethodDefUser("Run", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            userType.Methods.Add(runMethod);
+
+            var genMethodSig = new GenericInstMethodSig(new SZArraySig(module.CorLibTypes.Byte));
+            var methodSpec = new MethodSpecUser(decrypterDef, genMethodSig);
+
+            runMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 12345)); // key expression
+            runMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, methodSpec));
+            runMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            runMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            // 3. Emit assembly to memory and load into reflection context
+            using (var ms = new System.IO.MemoryStream())
+            {
+                module.Write(ms);
+                byte[] rawAsm = ms.ToArray();
+
+                var reflAsm = System.Reflection.Assembly.Load(rawAsm);
+                using (var modMD = ModuleDefMD.Load(rawAsm))
+                {
+                    // 4. Execute actual ConstantKillerImpl.Execute integration path
+                    int count = ConstantKillerImpl.Execute(modMD, reflAsm.ManifestModule);
+
+                    Assert.Equal(1, count);
+
+                    // Verify in CallerType.Run that the call to Decrypter has been replaced by array initializer
+                    var targetMethod = modMD.Find("CallerType", false).FindMethod("Run");
+                    Assert.NotNull(targetMethod);
+
+                    var instrs = targetMethod.Body.Instructions;
+                    // Preceding key expression is nopped
+                    Assert.Equal(OpCodes.Nop, instrs[0].OpCode);
+
+                    // Array initializer instructions inserted
+                    Assert.Equal(OpCodes.Ldc_I4, instrs[1].OpCode);
+                    Assert.Equal(4, (int)instrs[1].Operand);
+                    Assert.Equal(OpCodes.Newarr, instrs[2].OpCode);
+                    Assert.Equal(OpCodes.Dup, instrs[3].OpCode);
+                    Assert.Equal(OpCodes.Ldtoken, instrs[4].OpCode);
+                    Assert.Equal(OpCodes.Call, instrs[5].OpCode);
+
+                    // Verify static field RVA data was created with expected contents [10, 20, 30, 40]
+                    var rvaField = instrs[4].Operand as FieldDef;
+                    Assert.NotNull(rvaField);
+                    Assert.Equal(new byte[] { 10, 20, 30, 40 }, rvaField.InitialValue);
+                }
+            }
+        }
     }
 }

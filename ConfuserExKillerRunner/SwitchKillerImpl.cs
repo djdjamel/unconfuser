@@ -59,13 +59,12 @@ namespace ConfuserExKillerRunner
                     CollectMethods(nested, methods);
         }
 
-        static void RunCflow(List<MethodDef> methods, BlocksCflowDeobfuscator deobfuscator)
+        internal static void RunCflow(List<MethodDef> methods, BlocksCflowDeobfuscator deobfuscator)
         {
             foreach (var method in methods)
             {
                 if (!method.HasBody) continue;
-                var origInstrs = method.Body.Instructions.ToList();
-                var origHandlers = method.Body.ExceptionHandlers.ToList();
+                var origBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
                 try
                 {
                     var blocks = new Blocks(method);
@@ -77,10 +76,7 @@ namespace ConfuserExKillerRunner
                 }
                 catch (Exception ex)
                 {
-                    method.Body.Instructions.Clear();
-                    foreach (var inst in origInstrs) method.Body.Instructions.Add(inst);
-                    method.Body.ExceptionHandlers.Clear();
-                    foreach (var h in origHandlers) method.Body.ExceptionHandlers.Add(h);
+                    method.Body = origBody;
                     Tool.Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] RunCflow failed on {method}: {ex.Message}. Rolled back.");
                 }
             }
@@ -119,7 +115,7 @@ namespace ConfuserExKillerRunner
             }
         }
 
-        static void ResolveSimpleSwitch(List<MethodDef> methods)
+        internal static void ResolveSimpleSwitch(List<MethodDef> methods)
         {
             foreach (var method in methods)
             {
@@ -224,7 +220,7 @@ namespace ConfuserExKillerRunner
             }
         }
 
-        static int ResolveComplexSwitch(List<MethodDef> methods, BlocksCflowDeobfuscator deobfuscator)
+        internal static int ResolveComplexSwitch(List<MethodDef> methods, BlocksCflowDeobfuscator deobfuscator)
         {
             int total = 0;
             foreach (var method in methods)
@@ -240,6 +236,7 @@ namespace ConfuserExKillerRunner
                     var forRem        = new List<int>();
                     var switchInstrs  = new List<Instruction>();
                     Local localVar    = null;
+                    int methodTotal   = 0;
 
                     for (int j = 0; j + 6 < instrs.Count; j++)
                     {
@@ -260,7 +257,7 @@ namespace ConfuserExKillerRunner
                     {
                         var state = new SwitchState(instrs, method, toberemoved, intValues, forRem, switchInstrs, localVar);
                         state.Parse(0, 0u);
-                        total += state.Apply();
+                        methodTotal += state.Apply();
                     }
 
                     // Second pattern: ldc xor ldc [rem_un] switch (4-instr variant)
@@ -281,7 +278,7 @@ namespace ConfuserExKillerRunner
                     {
                         var state = new SwitchStateNoLocal(instrs, method, toberemoved, intValues, forRem, switchInstrs);
                         state.Parse(0);
-                        total += state.Apply(4);
+                        methodTotal += state.Apply(4);
                     }
 
                     var blocks = new Blocks(method);
@@ -292,6 +289,8 @@ namespace ConfuserExKillerRunner
                     DotNetUtils.RestoreBody(method, list, handlers);
                     method.Body.SimplifyBranches();
                     method.Body.OptimizeBranches();
+
+                    total += methodTotal;
                 }
                 catch (Exception ex)
                 {

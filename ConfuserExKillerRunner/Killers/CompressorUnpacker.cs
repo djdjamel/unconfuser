@@ -256,15 +256,16 @@ namespace ConfuserExKillerRunner.Killers
             return 0;
         }
 
-        private static byte[] TryDynamicMethodRewriteUnpack(ModuleDefMD module)
+        internal static byte[] TryDynamicMethodRewriteUnpack(ModuleDefMD module)
         {
             var ep = module.EntryPoint;
             if (ep == null || !ep.HasBody)
                 return null;
 
-            var corLibByteArr = module.CorLibTypes.Byte.ToSZArraySig();
+            var corLibByteArr = new SZArraySig(module.CorLibTypes.Byte);
             var originalReturnType = ep.ReturnType;
-            var originalInstructions = ep.Body.Instructions.ToList();
+            var originalMethodSig = ep.MethodSig;
+            var originalBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(ep.Body);
 
             try
             {
@@ -279,7 +280,7 @@ namespace ConfuserExKillerRunner.Killers
                         string opStr = inst.Operand.ToString();
                         if (opStr.Contains("GCHandle::get_Target()"))
                         {
-                            ep.Body.Instructions.Insert(i + 1, Instruction.Create(OpCodes.Castclass, module.CorLibTypes.Byte.ToSZArraySig().ToTypeDefOrRef()));
+                            ep.Body.Instructions.Insert(i + 1, Instruction.Create(OpCodes.Castclass, corLibByteArr.ToTypeDefOrRef()));
                             ep.Body.Instructions.Insert(i + 2, Instruction.Create(OpCodes.Ret));
                             patched = true;
                             break;
@@ -312,9 +313,8 @@ namespace ConfuserExKillerRunner.Killers
             finally
             {
                 ep.ReturnType = originalReturnType;
-                ep.Body.Instructions.Clear();
-                foreach (var inst in originalInstructions)
-                    ep.Body.Instructions.Add(inst);
+                ep.MethodSig = originalMethodSig;
+                ep.Body = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(originalBody);
             }
         }
 
