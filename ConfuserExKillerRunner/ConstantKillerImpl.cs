@@ -75,7 +75,7 @@ namespace ConfuserExTools.ConstantKiller {
 					if (decrypters.Contains(method))
 						continue;
 
-					var originalInstructions = method.Body.Instructions.ToList();
+					var originalBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
 					try {
 						method.Body.SimplifyMacros(method.Parameters);
 						for (int i = 1; i < method.Body.Instructions.Count; i++) {
@@ -83,10 +83,13 @@ namespace ConfuserExTools.ConstantKiller {
 							var instruction = instructions[i];
 							if (instruction.OpCode.Code != Code.Call)
 								continue;
+
 							if (!(instruction.Operand is MethodSpec operandMethod))
 								continue;
+
 							if (!(operandMethod.Method is MethodDef operandMethodDef))
 								continue;
+
 							if (!decrypters.Contains(operandMethodDef))
 								continue;
 
@@ -171,6 +174,12 @@ namespace ConfuserExTools.ConstantKiller {
 								default:
 									throw new InvalidOperationException();
 								}
+
+								// Nop out the key expression arguments [exprStart, i - 1]
+								for (int k = exprStart; k < i; k++) {
+									instructions[k].OpCode = OpCodes.Nop;
+									instructions[k].Operand = null;
+								}
 							}
 							else {
 								int elementSize;
@@ -201,25 +210,32 @@ namespace ConfuserExTools.ConstantKiller {
 								byte[] data = new byte[((Array)value).Length * elementSize];
 								Buffer.BlockCopy((Array)value, 0, data, 0, data.Length);
 								var arrayInitializer = CreateArrayInitializer(module, arrayType.ToTypeDefOrRef(), ((Array)value).Length, data);
-								instructions.InsertRange(i, arrayInitializer);
-								instruction.OpCode = OpCodes.Nop;
-								instruction.Operand = null;
-								i += arrayInitializer.Count;
+
+								// Nop out the key expression arguments [exprStart, i - 1]
+								for (int k = exprStart; k < i; k++) {
+									instructions[k].OpCode = OpCodes.Nop;
+									instructions[k].Operand = null;
+								}
+
+								// Replace the call instruction at 'i' with the first array initializer instruction
+								instruction.OpCode = arrayInitializer[0].OpCode;
+								instruction.Operand = arrayInitializer[0].Operand;
+
+								// Insert the remaining initializer instructions after 'i' without overwriting them
+								if (arrayInitializer.Count > 1) {
+									var remaining = arrayInitializer.Skip(1).ToList();
+									instructions.InsertRange(i + 1, remaining);
+									i += remaining.Count;
+								}
 							}
 
-							for (int k = exprStart; k < i; k++) {
-								instructions[k].OpCode = OpCodes.Nop;
-								instructions[k].Operand = null;
-							}
 							decrypterRewrittenCounts[operandMethodDef]++;
 							count++;
 						}
 					}
 					catch (Exception ex) {
-						// Rollback method on error
-						method.Body.Instructions.Clear();
-						foreach (var inst in originalInstructions)
-							method.Body.Instructions.Add(inst);
+						// True atomic rollback method body on error
+						method.Body = originalBody;
 						Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] Constant decryption failed in {method}: {ex.Message}. Rolled back.");
 					}
 				}
@@ -394,10 +410,15 @@ namespace ConfuserExTools.ConstantKiller {
 						int b = stack.Pop(); int a = stack.Pop();
 						stack.Push(a << (b & 31));
 					}
-					else if (instr.OpCode == OpCodes.Shr || instr.OpCode == OpCodes.Shr_Un) {
+					else if (instr.OpCode == OpCodes.Shr) {
 						if (stack.Count < 2) { valid = false; break; }
 						int b = stack.Pop(); int a = stack.Pop();
 						stack.Push(a >> (b & 31));
+					}
+					else if (instr.OpCode == OpCodes.Shr_Un) {
+						if (stack.Count < 2) { valid = false; break; }
+						int b = stack.Pop(); int a = stack.Pop();
+						stack.Push((int)((uint)a >> (b & 31)));
 					}
 					else {
 						valid = false;

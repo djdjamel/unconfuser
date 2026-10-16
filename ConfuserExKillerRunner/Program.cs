@@ -131,7 +131,7 @@ namespace ConfuserExKillerRunner
             {
                 using (var probeMod = ModuleDefMD.Load(peImage))
                 {
-                    var unpackResult = CompressorUnpacker.TryUnpack(probeMod, peImage);
+                    var unpackResult = CompressorUnpacker.TryUnpack(probeMod, peImage, allowExecution);
                     if (unpackResult.SuccessfullyUnpacked)
                     {
                         Console.WriteLine($"[+] CompressorUnpacker: {unpackResult.Message}");
@@ -143,7 +143,10 @@ namespace ConfuserExKillerRunner
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[!] CompressorUnpacker probing failed: {ex.Message}");
+            }
 
             // Step 1: Safety Gate & Anti-Tamper
             if (!allowExecution)
@@ -228,7 +231,7 @@ namespace ConfuserExKillerRunner
                 if (resResult.HandlerStripped)
                     Console.WriteLine("[+] ResourceKiller: Stripped runtime ResourceResolve hook");
                 if (resResult.ResourcesDecrypted)
-                    Console.WriteLine($"[+] ResourceKiller: Extracted & re-embedded {resResult.ExtractedResourcesCount} decrypted resources");
+                    Console.WriteLine($"[+] ResourceKiller: Extracted & re-embedded {resResult.DecryptedResourcesCount} decrypted resources ({resResult.TotalManifestResourcesCount} total in manifest)");
 
                 // Step 2.2: ProxyKiller + ConstantKiller
                 int proxyCount = ProxyKillerImpl.Execute(module, false, true);
@@ -276,6 +279,12 @@ namespace ConfuserExKillerRunner
 
             if (!skipDe4dot && de4dotExecutable != null)
             {
+                // Delete stale output from a previous run to avoid false acceptance
+                if (File.Exists(cleanedPath))
+                {
+                    try { File.Delete(cleanedPath); } catch { }
+                }
+
                 Console.WriteLine($"[*] Step 5: Running de4dot-cex ({de4dotExecutable})...");
                 string de4dotArgs = $"\"{cexkPath}\" -p crx -o \"{cleanedPath}\"";
                 var de4dotResult = ProcessRunner.Run(de4dotExecutable, de4dotArgs, targetDir, timeoutMs: 180000);
@@ -290,7 +299,7 @@ namespace ConfuserExKillerRunner
                     }
                 }
 
-                if (File.Exists(cleanedPath))
+                if (de4dotResult.Success && File.Exists(cleanedPath))
                 {
                     Console.WriteLine($"[+] de4dot-cex completed: {cleanedPath}");
                     currentIntermediate = cleanedPath;
@@ -298,7 +307,7 @@ namespace ConfuserExKillerRunner
                 else
                 {
                     Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine($"[!] de4dot-cex did not produce output. Continuing with {cexkPath}");
+                    Console.WriteLine($"[!] de4dot-cex did not produce fresh output. Continuing with {cexkPath}");
                     Console.ResetColor();
                 }
             }
@@ -360,6 +369,14 @@ namespace ConfuserExKillerRunner
             {
                 var postScan = NetDetectIntegration.RunScan(finalOutputPath);
                 NetDetectIntegration.PrintComparisonReport(preScan, postScan);
+            }
+
+            if (auditReport.Status == "FAILED")
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("[!] Deobfuscation audit reported FAILED. Exiting with error code 1.");
+                Console.ResetColor();
+                return 1;
             }
 
             return 0;

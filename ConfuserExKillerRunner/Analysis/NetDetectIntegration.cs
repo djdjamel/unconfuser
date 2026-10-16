@@ -33,14 +33,27 @@ namespace ConfuserExKillerRunner.Analysis
     {
         public static string ResolveScriptPath()
         {
+            string envPath = Environment.GetEnvironmentVariable("NETDETECT_CLI_PATH");
+            if (!string.IsNullOrEmpty(envPath) && File.Exists(envPath))
+                return Path.GetFullPath(envPath);
+
             string appDir = AppDomain.CurrentDomain.BaseDirectory;
-            string[] candidates = new[]
+            var candidates = new List<string>
             {
                 Path.Combine(Directory.GetCurrentDirectory(), "netdetect_cli.py"),
                 Path.Combine(appDir, "netdetect_cli.py"),
-                Path.Combine(appDir, "..", "..", "..", "netdetect_cli.py"),
-                @"c:\Users\acer\claude\xp_src\netdetect_cli.py"
+                Path.Combine(appDir, "..", "..", "..", "netdetect_cli.py")
             };
+
+            // Search upward parent directories for netdetect_cli.py
+            string current = appDir;
+            for (int i = 0; i < 5; i++)
+            {
+                var parent = Directory.GetParent(current);
+                if (parent == null) break;
+                candidates.Add(Path.Combine(parent.FullName, "netdetect_cli.py"));
+                current = parent.FullName;
+            }
 
             foreach (var candidate in candidates)
             {

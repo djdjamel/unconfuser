@@ -25,7 +25,7 @@ namespace ConfuserExKillerRunner.Killers
     {
         private static readonly string[] KnownFileTableModuleNames = { "koi", "netmodule" };
 
-        public static UnpackResult TryUnpack(ModuleDefMD module, byte[] rawBytes)
+        public static UnpackResult TryUnpack(ModuleDefMD module, byte[] rawBytes, bool allowExecution = false)
         {
             if (module == null) throw new ArgumentNullException(nameof(module));
             var result = new UnpackResult { IsCompressed = false, SuccessfullyUnpacked = false };
@@ -120,15 +120,22 @@ namespace ConfuserExKillerRunner.Killers
             // Stage 2: Dynamic method-rewrite unpacking fallback if static extraction didn't yield a PE
             if (unpackedBytes == null && isPackedByFileTable && module.EntryPoint != null && module.EntryPoint.HasBody)
             {
-                try
+                if (!allowExecution)
                 {
-                    unpackedBytes = TryDynamicMethodRewriteUnpack(module);
-                    if (unpackedBytes != null && IsPeFile(unpackedBytes))
-                        compressorKind = "Dynamic Method-Rewrite Unpacker";
+                    Logger.LogInfo("[CompressorUnpacker] Dynamic execution disabled (omitted --allow-execution); skipping dynamic unpacker fallback.");
                 }
-                catch (Exception ex)
+                else
                 {
-                    Logger.LogWarning($"[CompressorUnpacker] Dynamic rewrite unpack fallback failed: {ex.Message}");
+                    try
+                    {
+                        unpackedBytes = TryDynamicMethodRewriteUnpack(module);
+                        if (unpackedBytes != null && IsPeFile(unpackedBytes))
+                            compressorKind = "Dynamic Method-Rewrite Unpacker";
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogWarning($"[CompressorUnpacker] Dynamic rewrite unpack fallback failed: {ex.Message}");
+                    }
                 }
             }
 

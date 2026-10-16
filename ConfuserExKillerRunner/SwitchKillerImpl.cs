@@ -152,9 +152,15 @@ namespace ConfuserExKillerRunner
                             int si = instrs.IndexOf(switchInstrs[k]);
                             if (si >= 3 && instrs[si - 3] == target)
                             {
+                                if ((uint)xorValues[k] == 0)
+                                    continue;
+
                                 int val = instrs[j].GetLdcI4Value();
                                 uint idx = (uint)(val ^ ldcValues[k]) % (uint)xorValues[k];
                                 var targets = switchInstrs[k].Operand as Instruction[];
+                                if (targets == null || idx >= targets.Length)
+                                    continue;
+
                                 instrs[j].OpCode = OpCodes.Ldc_I4;
                                 instrs[j].Operand = (int)(uint)(val ^ ldcValues[k]);
                                 instrs[j + 1].Operand = targets[(int)idx];

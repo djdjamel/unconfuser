@@ -14,6 +14,8 @@ namespace ConfuserExKillerRunner.Killers
     public sealed class ResourceKillerResult
     {
         public int ExtractedResourcesCount { get; set; }
+        public int DecryptedResourcesCount { get; set; }
+        public int TotalManifestResourcesCount { get; set; }
         public bool HandlerStripped { get; set; }
         public bool ResourcesDecrypted { get; set; }
         public List<string> ResourceNames { get; set; } = new List<string>();
@@ -89,8 +91,8 @@ namespace ConfuserExKillerRunner.Killers
                 result.ResourceNames.Add(res.Name.String);
             }
 
-            result.ExtractedResourcesCount = result.ResourceNames.Count;
-            result.Message = $"Audited {result.ExtractedResourcesCount} resources. Hook stripped: {result.HandlerStripped}, Decrypted: {result.ResourcesDecrypted}";
+            result.TotalManifestResourcesCount = result.ResourceNames.Count;
+            result.Message = $"Audited {result.TotalManifestResourcesCount} manifest resources ({result.DecryptedResourcesCount} decrypted and re-embedded). Hook stripped: {result.HandlerStripped}";
             return result;
         }
 
@@ -210,6 +212,8 @@ namespace ConfuserExKillerRunner.Killers
                                 }
                                 count++;
                             }
+                            result.DecryptedResourcesCount = count;
+                            result.ExtractedResourcesCount = count;
                             result.ResourcesDecrypted = true;
                             Logger.LogInfo($"[ResourceKiller] Successfully extracted and re-embedded {count} decrypted resources from {resModule.Name}.");
                         }

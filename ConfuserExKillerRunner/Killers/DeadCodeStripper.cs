@@ -32,7 +32,7 @@ namespace ConfuserExKillerRunner.Killers
                     if (!method.HasBody || method.Body.Instructions == null || method.Body.Instructions.Count < 2)
                         continue;
 
-                    var originalInstructions = method.Body.Instructions.ToList();
+                    var originalBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
                     try
                     {
                         bool methodModified = false;
@@ -155,9 +155,7 @@ namespace ConfuserExKillerRunner.Killers
                     catch (Exception ex)
                     {
                         // Rollback on any unexpected exception to preserve IL integrity
-                        method.Body.Instructions.Clear();
-                        foreach (var inst in originalInstructions)
-                            method.Body.Instructions.Add(inst);
+                        method.Body = originalBody;
                         Logger.LogWarning($"[DeadCodeStripper] Optimization rollback in {method.FullName}: {ex.Message}");
                     }
                 }

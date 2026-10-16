@@ -31,7 +31,7 @@ namespace ConfuserExKillerRunner.Killers
                     if (!method.HasBody || method.Body.Instructions == null || method.Body.Instructions.Count < 2)
                         continue;
 
-                    var originalInstructions = method.Body.Instructions.ToList();
+                    var originalBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
                     try
                     {
                         bool modified = false;
@@ -79,9 +79,7 @@ namespace ConfuserExKillerRunner.Killers
                     }
                     catch (Exception ex)
                     {
-                        method.Body.Instructions.Clear();
-                        foreach (var inst in originalInstructions)
-                            method.Body.Instructions.Add(inst);
+                        method.Body = originalBody;
                         Logger.LogWarning($"[PredicateKiller] Simplification rollback in {method.FullName}: {ex.Message}");
                     }
                 }

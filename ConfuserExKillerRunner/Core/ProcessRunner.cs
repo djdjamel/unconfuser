@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -96,13 +97,24 @@ namespace ConfuserExKillerRunner.Core
                 return Path.GetFullPath(envPath);
 
             string appDir = AppDomain.CurrentDomain.BaseDirectory;
-            string[] candidatePaths = new[]
+            var candidatePaths = new List<string>
             {
                 Path.Combine(appDir, "de4dot.exe"),
                 Path.Combine(appDir, "tools", "de4dot", "de4dot.exe"),
-                Path.Combine(appDir, "..", "..", "..", "tools", "de4dot", "de4dot.exe"),
-                @"C:\Users\acer\Downloads\de4dot-cex\de4dot.exe"
+                Path.Combine(Directory.GetCurrentDirectory(), "de4dot.exe"),
+                Path.Combine(Directory.GetCurrentDirectory(), "tools", "de4dot", "de4dot.exe")
             };
+
+            // Search upward parent directories for tools/de4dot/de4dot.exe
+            string current = appDir;
+            for (int i = 0; i < 5; i++)
+            {
+                var parent = Directory.GetParent(current);
+                if (parent == null) break;
+                candidatePaths.Add(Path.Combine(parent.FullName, "tools", "de4dot", "de4dot.exe"));
+                candidatePaths.Add(Path.Combine(parent.FullName, "de4dot.exe"));
+                current = parent.FullName;
+            }
 
             foreach (var candidate in candidatePaths)
             {
