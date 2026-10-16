@@ -280,7 +280,7 @@ namespace ConfuserExTools.ConstantKiller {
 			}
 		}
 
-		private static List<Instruction> CreateArrayInitializer(ModuleDef module, ITypeDefOrRef arrayType, int arrayLength, byte[] data) {
+		internal static List<Instruction> CreateArrayInitializer(ModuleDef module, ITypeDefOrRef arrayType, int arrayLength, byte[] data) {
 			return CreateArrayInitializer(module, arrayType, arrayLength, GetOrCreateDataField(module, data));
 		}
 

@@ -123,56 +123,66 @@ namespace ConfuserExKillerRunner
         {
             foreach (var method in methods)
             {
-                var instrs = method.Body.Instructions;
-                var switchInstrs = new List<Instruction>();
-                var ldcValues = new List<int>();
-                var xorValues = new List<int>();
-
-                for (int j = 0; j < instrs.Count; j++)
+                if (!method.HasBody) continue;
+                var origBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
+                try
                 {
-                    if (j + 3 < instrs.Count && instrs[j].IsLdcI4() && instrs[j + 1].IsLdcI4()
-                        && instrs[j + 2].OpCode == OpCodes.Xor && instrs[j + 3].OpCode == OpCodes.Switch)
-                    {
-                        ldcValues.Add(instrs[j].GetLdcI4Value());
-                        xorValues.Add(instrs[j + 1].GetLdcI4Value());
-                        switchInstrs.Add(instrs[j + 3]);
-                    }
-                }
+                    var instrs = method.Body.Instructions;
+                    var switchInstrs = new List<Instruction>();
+                    var ldcValues = new List<int>();
+                    var xorValues = new List<int>();
 
-                if (switchInstrs.Count == 0) continue;
-
-                for (int j = 0; j < instrs.Count; j++)
-                {
-                    if (j + 1 < instrs.Count && instrs[j].IsLdcI4() && instrs[j + 1].IsBr())
+                    for (int j = 0; j < instrs.Count; j++)
                     {
-                        var target = instrs[j + 1].Operand as Instruction;
-                        for (int k = 0; k < switchInstrs.Count; k++)
+                        if (j + 3 < instrs.Count && instrs[j].IsLdcI4() && instrs[j + 1].IsLdcI4()
+                            && instrs[j + 2].OpCode == OpCodes.Xor && instrs[j + 3].OpCode == OpCodes.Switch)
                         {
-                            // find the ldc that precedes this switch
-                            int si = instrs.IndexOf(switchInstrs[k]);
-                            if (si >= 3 && instrs[si - 3] == target)
+                            ldcValues.Add(instrs[j].GetLdcI4Value());
+                            xorValues.Add(instrs[j + 1].GetLdcI4Value());
+                            switchInstrs.Add(instrs[j + 3]);
+                        }
+                    }
+
+                    if (switchInstrs.Count == 0) continue;
+
+                    for (int j = 0; j < instrs.Count; j++)
+                    {
+                        if (j + 1 < instrs.Count && instrs[j].IsLdcI4() && instrs[j + 1].IsBr())
+                        {
+                            var target = instrs[j + 1].Operand as Instruction;
+                            for (int k = 0; k < switchInstrs.Count; k++)
                             {
-                                if ((uint)xorValues[k] == 0)
-                                    continue;
+                                // find the ldc that precedes this switch
+                                int si = instrs.IndexOf(switchInstrs[k]);
+                                if (si >= 3 && instrs[si - 3] == target)
+                                {
+                                    if ((uint)xorValues[k] == 0)
+                                        continue;
 
-                                int val = instrs[j].GetLdcI4Value();
-                                uint idx = (uint)(val ^ ldcValues[k]) % (uint)xorValues[k];
-                                var targets = switchInstrs[k].Operand as Instruction[];
-                                if (targets == null || idx >= targets.Length)
-                                    continue;
+                                    int val = instrs[j].GetLdcI4Value();
+                                    uint idx = (uint)(val ^ ldcValues[k]) % (uint)xorValues[k];
+                                    var targets = switchInstrs[k].Operand as Instruction[];
+                                    if (targets == null || idx >= targets.Length)
+                                        continue;
 
-                                instrs[j].OpCode = OpCodes.Ldc_I4;
-                                instrs[j].Operand = (int)(uint)(val ^ ldcValues[k]);
-                                instrs[j + 1].Operand = targets[(int)idx];
-                                j++;
-                                break;
+                                    instrs[j].OpCode = OpCodes.Ldc_I4;
+                                    instrs[j].Operand = (int)(uint)(val ^ ldcValues[k]);
+                                    instrs[j + 1].Operand = targets[(int)idx];
+                                    j++;
+                                    break;
+                                }
                             }
                         }
                     }
-                }
 
-                method.Body.SimplifyBranches();
-                method.Body.OptimizeBranches();
+                    method.Body.SimplifyBranches();
+                    method.Body.OptimizeBranches();
+                }
+                catch (Exception ex)
+                {
+                    method.Body = origBody;
+                    Tool.Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] ResolveSimpleSwitch failed on {method}: {ex.Message}. Rolled back.");
+                }
             }
         }
 
@@ -180,27 +190,37 @@ namespace ConfuserExKillerRunner
         {
             foreach (var method in methods)
             {
-                var instrs = method.Body.Instructions;
-                var done = new Dictionary<Instruction, Instruction>();
-                for (int j = 0; j < instrs.Count; j++)
+                if (!method.HasBody) continue;
+                var origBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
+                try
                 {
-                    if (!instrs[j].IsConditionalBranch()) continue;
-                    var condInstr = instrs[j];
-                    for (int k = 0; k < instrs.Count; k++)
+                    var instrs = method.Body.Instructions;
+                    var done = new Dictionary<Instruction, Instruction>();
+                    for (int j = 0; j < instrs.Count; j++)
                     {
-                        if (!instrs[k].IsBr()) continue;
-                        var brTarget = instrs[k].Operand as Instruction;
-                        if (brTarget != condInstr) continue;
-                        if (done.ContainsKey(brTarget)) continue;
-                        instrs[k].OpCode = condInstr.GetOpCode();
-                        instrs[k].Operand = condInstr.GetOperand();
-                        instrs.Insert(k + 1, OpCodes.Br.ToInstruction(instrs[j + 1]));
-                        k++;
-                        done.Add(brTarget, instrs[k]);
+                        if (!instrs[j].IsConditionalBranch()) continue;
+                        var condInstr = instrs[j];
+                        for (int k = 0; k < instrs.Count; k++)
+                        {
+                            if (!instrs[k].IsBr()) continue;
+                            var brTarget = instrs[k].Operand as Instruction;
+                            if (brTarget != condInstr) continue;
+                            if (done.ContainsKey(brTarget)) continue;
+                            instrs[k].OpCode = condInstr.GetOpCode();
+                            instrs[k].Operand = condInstr.GetOperand();
+                            instrs.Insert(k + 1, OpCodes.Br.ToInstruction(instrs[j + 1]));
+                            k++;
+                            done.Add(brTarget, instrs[k]);
+                        }
                     }
+                    method.Body.SimplifyBranches();
+                    method.Body.OptimizeBranches();
                 }
-                method.Body.SimplifyBranches();
-                method.Body.OptimizeBranches();
+                catch (Exception ex)
+                {
+                    method.Body = origBody;
+                    Tool.Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] FixConditionalBranches failed on {method}: {ex.Message}. Rolled back.");
+                }
             }
         }
 
@@ -210,8 +230,7 @@ namespace ConfuserExKillerRunner
             foreach (var method in methods)
             {
                 if (!method.HasBody) continue;
-                var origInstrs = method.Body.Instructions.ToList();
-                var origHandlers = method.Body.ExceptionHandlers.ToList();
+                var origBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
 
                 try
                 {
@@ -276,10 +295,7 @@ namespace ConfuserExKillerRunner
                 }
                 catch (Exception ex)
                 {
-                    method.Body.Instructions.Clear();
-                    foreach (var inst in origInstrs) method.Body.Instructions.Add(inst);
-                    method.Body.ExceptionHandlers.Clear();
-                    foreach (var h in origHandlers) method.Body.ExceptionHandlers.Add(h);
+                    method.Body = origBody;
                     Tool.Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] ResolveComplexSwitch failed on {method}: {ex.Message}. Rolled back.");
                 }
             }
@@ -380,9 +396,12 @@ namespace ConfuserExKillerRunner
                               : (instrs[n2 + 1].IsLdcI4() ? (num4 * num3 ^ num) : (num * num3 ^ num4));
                     if (instrs[n2 + 1].OpCode != OpCodes.Xor) localVal = num5 ^ (uint)intValues[j];
                     else localVal = num5;
+                    if ((uint)forRem[j] == 0) continue;
                     uint idx = localVal % (uint)forRem[j];
                     var arr = switchInstrs[j].Operand as Instruction[];
+                    if (arr == null || idx >= arr.Length) continue;
                     var dest = arr[(int)idx];
+                    if (dest == null) continue;
                     if (removedIdx.Contains(i)) return;
                     removedIdx.Add(i); removedVals.Add((int)idx);
                     int bi = brInstrs.IndexOf(dest);
@@ -487,8 +506,12 @@ namespace ConfuserExKillerRunner
                     uint num5 = instrs[n2 + 1].OpCode == OpCodes.Xor ? (num ^ num3)
                               : (instrs[n2 + 1].IsLdcI4() ? (num4 * num3 ^ num) : (num * num3 ^ num4));
                     uint num6 = instrs[n2 + 1].OpCode != OpCodes.Xor ? (num5 ^ (uint)intValues[j]) : num5;
+                    if ((uint)forRem[j] == 0) continue;
                     uint idx = num6 % (uint)forRem[j];
-                    var dest = ((Instruction[])switchInstrs[j].Operand)[(int)idx];
+                    var arr = switchInstrs[j].Operand as Instruction[];
+                    if (arr == null || idx >= arr.Length) continue;
+                    var dest = arr[(int)idx];
+                    if (dest == null) continue;
                     if (removedIdx.Contains(i)) return;
                     removedIdx.Add(i); removedVals.Add((int)idx);
                     if (brInstrs.IndexOf(dest) == -1) { brInstrs.Add(dest); Parse(instrs.IndexOf(dest)); }

@@ -321,8 +321,19 @@ namespace ConfuserExKillerRunner
 
             // Step 6: Final SwitchKiller pass on intermediate output
             Console.WriteLine("[*] Step 6: Running final cleanup pass...");
+            string originalInputPath = Path.GetFullPath(args[0]);
             string finalDefaultPath = Path.Combine(targetDir, baseName + "_final" + fileExt);
-            string finalOutputPath = !string.IsNullOrEmpty(outputPath) ? outputPath : finalDefaultPath;
+            string finalOutputPath = !string.IsNullOrEmpty(outputPath) ? Path.GetFullPath(outputPath) : finalDefaultPath;
+
+            if (string.Equals(finalOutputPath, originalInputPath, StringComparison.OrdinalIgnoreCase))
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("[!] Output destination cannot overwrite the original input assembly.");
+                Console.ResetColor();
+                return 1;
+            }
+
+            string candidatePath = Path.Combine(targetDir, baseName + ".candidate." + Guid.NewGuid().ToString("N").Substring(0, 8) + fileExt);
 
             using (var module2 = ModuleDefMD.Load(currentIntermediate))
             {
@@ -334,19 +345,15 @@ namespace ConfuserExKillerRunner
                 Console.WriteLine($"[+] Final SwitchKiller: {switchCount2} switches resolved");
                 var writerOpts2 = new ModuleWriterOptions(module2) { Logger = DnlibLogger.Instance };
                 writerOpts2.MetaDataOptions.Flags |= MetaDataFlags.KeepOldMaxStack;
-                module2.Write(finalOutputPath, writerOpts2);
+                module2.Write(candidatePath, writerOpts2);
             }
 
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"[+] Deobfuscation Complete! Final output saved to: {finalOutputPath}");
-            Console.ResetColor();
-
-            // Quality Audit
+            // Quality Audit: Validate candidate before promotion
             Console.WriteLine();
             Console.WriteLine("===============================================================");
-            Console.WriteLine("              Assembly Quality Verification Report             ");
+            Console.WriteLine("    Assembly Structural & Control-Flow Integrity Audit Report  ");
             Console.WriteLine("===============================================================");
-            var auditReport = QualityAuditor.Audit(finalOutputPath);
+            var auditReport = QualityAuditor.Audit(candidatePath);
             Console.WriteLine($"[*] Status:                 [{auditReport.Status}]");
             Console.WriteLine($"[*] Types Audited:          {auditReport.TotalTypes}");
             Console.WriteLine($"[*] Methods Audited:        {auditReport.TotalMethods} ({auditReport.MethodsWithBody} with IL bodies)");
@@ -364,19 +371,38 @@ namespace ConfuserExKillerRunner
             }
             Console.WriteLine("===============================================================");
 
+            if (auditReport.Status == "FAILED")
+            {
+                try { if (File.Exists(candidatePath)) File.Delete(candidatePath); } catch { }
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("[!] Deobfuscation audit reported FAILED. Candidate assembly rejected; no corrupt output written.");
+                Console.ResetColor();
+                return 1;
+            }
+
+            // Audit passed: Promote candidate to final output path
+            try
+            {
+                if (File.Exists(finalOutputPath)) File.Delete(finalOutputPath);
+                File.Move(candidatePath, finalOutputPath);
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[!] Failed to promote candidate to final output path: {ex.Message}");
+                Console.ResetColor();
+                return 1;
+            }
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"[+] Deobfuscation Verified & Complete! Final output saved to: {finalOutputPath}");
+            Console.ResetColor();
+
             // NetDetect Post-Scan Reduction Audit
             if (!skipNetDetect && preScan != null && preScan.Available)
             {
                 var postScan = NetDetectIntegration.RunScan(finalOutputPath);
                 NetDetectIntegration.PrintComparisonReport(preScan, postScan);
-            }
-
-            if (auditReport.Status == "FAILED")
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("[!] Deobfuscation audit reported FAILED. Exiting with error code 1.");
-                Console.ResetColor();
-                return 1;
             }
 
             return 0;

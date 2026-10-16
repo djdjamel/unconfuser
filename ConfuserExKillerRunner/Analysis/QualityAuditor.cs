@@ -167,6 +167,22 @@ namespace ConfuserExKillerRunner.Analysis
                     }
                 }
             }
+
+            // Check end-of-method termination
+            if (instructions.Count > 0)
+            {
+                var last = instructions[instructions.Count - 1];
+                if (last != null && !IsTerminatingOpCode(last.OpCode))
+                {
+                    report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} does not terminate with ret/throw/br at IL_{last.Offset:X4} ({last.OpCode})");
+                }
+            }
+        }
+
+        private static bool IsTerminatingOpCode(OpCode op)
+        {
+            return op == OpCodes.Ret || op == OpCodes.Throw || op == OpCodes.Rethrow ||
+                   op == OpCodes.Br || op == OpCodes.Br_S || op == OpCodes.Jmp;
         }
     }
 }

@@ -96,7 +96,7 @@ namespace ConfuserExKillerRunner.Killers
             return result;
         }
 
-        private static void TryDecryptAndReEmbedResources(ModuleDefMD module, ResourceKillerResult result)
+        internal static void TryDecryptAndReEmbedResources(ModuleDefMD module, ResourceKillerResult result)
         {
             var decrypterMethod = FindResourceDecrypterMethod(module);
             if (decrypterMethod == null || !decrypterMethod.HasBody)
@@ -104,11 +104,20 @@ namespace ConfuserExKillerRunner.Killers
 
             Logger.LogInfo($"[ResourceKiller] Found ConfuserEx resource decrypter: {decrypterMethod.FullName}");
 
-            // Rewrite the method in dnlib: return type -> byte[], Assembly.Load -> ret
-            var originalInstructions = decrypterMethod.Body.Instructions.ToList();
-            var originalHandlers = decrypterMethod.Body.ExceptionHandlers.ToList();
+            var originalBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(decrypterMethod.Body);
             var originalMethodSig = decrypterMethod.MethodSig;
             var originalAsmName = module.Assembly.Name;
+            var cctor = module.GlobalType?.FindStaticConstructor();
+            var originalCctorBody = cctor?.HasBody == true ? ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(cctor.Body) : null;
+
+            void Rollback()
+            {
+                module.Assembly.Name = originalAsmName;
+                decrypterMethod.MethodSig = originalMethodSig;
+                decrypterMethod.Body = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(originalBody);
+                if (cctor != null && originalCctorBody != null)
+                    cctor.Body = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(originalCctorBody);
+            }
 
             try
             {
@@ -139,85 +148,101 @@ namespace ConfuserExKillerRunner.Killers
                 }
 
                 if (!patchedLoad)
-                    return;
-
-                // Temporarily neutralize <Module>.cctor to prevent TypeInitializationException when tempAsm is loaded
-                var cctor = module.GlobalType?.FindStaticConstructor();
-                var originalCctorInstructions = cctor?.Body?.Instructions?.ToList();
-
-                if (cctor != null && cctor.HasBody)
                 {
-                    cctor.Body.Instructions.Clear();
-                    cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                    Logger.LogWarning("[ResourceKiller] Could not locate Assembly.Load call in decrypter method. Rolling back.");
+                    Rollback();
+                    return;
                 }
 
-                // Rename assembly to a unique name so the CLR does not return the already-loaded assembly from Step 1
-                string tempName = "TempRes_" + Guid.NewGuid().ToString("N");
-                module.Assembly.Name = (UTF8String)tempName;
-
-                // Write module to memory and invoke the modified decrypter method
-                using (var stream = new MemoryStream())
+                byte[] moduleBytes = null;
+                try
                 {
-                    var writerOpts = new ModuleWriterOptions(module) { Logger = DummyLogger.NoThrowInstance };
-                    module.Write(stream, writerOpts);
-
-                    // Restore module assembly name and cctor in dnlib module immediately
-                    module.Assembly.Name = originalAsmName;
-                    if (cctor != null && originalCctorInstructions != null)
+                    // Temporarily neutralize <Module>.cctor to prevent TypeInitializationException when tempAsm is loaded
+                    if (cctor != null && cctor.HasBody)
                     {
                         cctor.Body.Instructions.Clear();
-                        foreach (var origInst in originalCctorInstructions)
-                            cctor.Body.Instructions.Add(origInst);
+                        cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
                     }
 
-                    var tempAsm = Assembly.Load(stream.ToArray());
-                    var reflMethod = tempAsm.ManifestModule.ResolveMethod(decrypterMethod.MDToken.ToInt32());
+                    // Rename assembly to a unique name so the CLR does not return the already-loaded assembly
+                    string tempName = "TempRes_" + Guid.NewGuid().ToString("N");
+                    module.Assembly.Name = (UTF8String)tempName;
 
-                    if (reflMethod == null)
+                    using (var stream = new MemoryStream())
                     {
-                        Logger.LogWarning($"[ResourceKiller] Could not locate rewritten static decrypter method {decrypterMethod.Name} in memory assembly.");
-                        return;
+                        var writerOpts = new ModuleWriterOptions(module) { Logger = DummyLogger.NoThrowInstance };
+                        module.Write(stream, writerOpts);
+                        moduleBytes = stream.ToArray();
                     }
+                }
+                finally
+                {
+                    // Guarantee that assembly name and cctor are immediately restored in moduleDef
+                    module.Assembly.Name = originalAsmName;
+                    if (cctor != null && originalCctorBody != null)
+                        cctor.Body = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(originalCctorBody);
+                }
 
-                    string retTypeName = reflMethod is MethodInfo mi ? mi.ReturnType.FullName : reflMethod.ToString();
-                    Logger.LogInfo($"[ResourceKiller] Resolved in tempAsm: token=0x{decrypterMethod.MDToken.Raw:X8}, name={reflMethod.Name}, returnType={retTypeName}");
+                if (moduleBytes == null || moduleBytes.Length == 0)
+                {
+                    Rollback();
+                    return;
+                }
 
-                    object invokeResult = reflMethod.Invoke(null, null);
-                    Logger.LogInfo($"[ResourceKiller] Method invoke returned: {invokeResult?.GetType()?.FullName ?? "null"}");
+                var tempAsm = Assembly.Load(moduleBytes);
+                var reflMethod = tempAsm.ManifestModule.ResolveMethod(decrypterMethod.MDToken.ToInt32());
 
-                    byte[] decryptedBytes = invokeResult as byte[];
+                if (reflMethod == null)
+                {
+                    Logger.LogWarning($"[ResourceKiller] Could not locate rewritten static decrypter method {decrypterMethod.Name} in memory assembly. Rolling back.");
+                    Rollback();
+                    return;
+                }
 
-                    if (decryptedBytes != null && decryptedBytes.Length > 0)
+                string retTypeName = reflMethod is MethodInfo mi ? mi.ReturnType.FullName : reflMethod.ToString();
+                Logger.LogInfo($"[ResourceKiller] Resolved in tempAsm: token=0x{decrypterMethod.MDToken.Raw:X8}, name={reflMethod.Name}, returnType={retTypeName}");
+
+                object invokeResult = reflMethod.Invoke(null, null);
+                Logger.LogInfo($"[ResourceKiller] Method invoke returned: {invokeResult?.GetType()?.FullName ?? "null"}");
+
+                byte[] decryptedBytes = invokeResult as byte[];
+
+                if (decryptedBytes != null && decryptedBytes.Length > 0)
+                {
+                    using (var resModule = ModuleDefMD.Load(decryptedBytes))
                     {
-                        using (var resModule = ModuleDefMD.Load(decryptedBytes))
+                        int count = 0;
+                        foreach (var res in resModule.Resources)
                         {
-                            int count = 0;
-                            foreach (var res in resModule.Resources)
-                            {
-                                var existing = module.Resources.Find(res.Name);
-                                if (existing != null)
-                                    module.Resources.Remove(existing);
+                            var existing = module.Resources.Find(res.Name);
+                            if (existing != null)
+                                module.Resources.Remove(existing);
 
-                                var er = res as EmbeddedResource;
-                                if (er != null)
-                                {
-                                    // Deep copy resource data into managed byte array so disposed resModule does not invalidate the stream
-                                    byte[] data = er.GetResourceData();
-                                    var copy = new EmbeddedResource(er.Name, data, er.Attributes);
-                                    module.Resources.Add(copy);
-                                }
-                                else
-                                {
-                                    module.Resources.Add(res);
-                                }
-                                count++;
+                            var er = res as EmbeddedResource;
+                            if (er != null)
+                            {
+                                // Deep copy resource data into managed byte array so disposed resModule does not invalidate the stream
+                                byte[] data = er.GetResourceData();
+                                var copy = new EmbeddedResource(er.Name, data, er.Attributes);
+                                module.Resources.Add(copy);
                             }
-                            result.DecryptedResourcesCount = count;
-                            result.ExtractedResourcesCount = count;
-                            result.ResourcesDecrypted = true;
-                            Logger.LogInfo($"[ResourceKiller] Successfully extracted and re-embedded {count} decrypted resources from {resModule.Name}.");
+                            else
+                            {
+                                module.Resources.Add(res);
+                            }
+                            count++;
                         }
+                        result.DecryptedResourcesCount = count;
+                        result.ExtractedResourcesCount = count;
+                        result.ResourcesDecrypted = true;
+                        Logger.LogInfo($"[ResourceKiller] Successfully extracted and re-embedded {count} decrypted resources from {resModule.Name}.");
                     }
+                }
+                else
+                {
+                    Logger.LogWarning("[ResourceKiller] Decrypter method returned null or empty bytes. Rolling back.");
+                    Rollback();
+                    return;
                 }
 
                 // Restore decrypter method signature (returns void) and stub out body to clean ret
@@ -247,14 +272,7 @@ namespace ConfuserExKillerRunner.Killers
             {
                 string innerDetail = ex.InnerException != null ? $"{ex.Message} -> {ex.InnerException.GetType().Name}: {ex.InnerException.Message}" : ex.Message;
                 Logger.LogWarning($"[ResourceKiller] Method rewrite decryption failed: {innerDetail}. Rolling back decrypter method.");
-                module.Assembly.Name = originalAsmName;
-                decrypterMethod.MethodSig = originalMethodSig;
-                decrypterMethod.Body.Instructions.Clear();
-                foreach (var inst in originalInstructions)
-                    decrypterMethod.Body.Instructions.Add(inst);
-                decrypterMethod.Body.ExceptionHandlers.Clear();
-                foreach (var eh in originalHandlers)
-                    decrypterMethod.Body.ExceptionHandlers.Add(eh);
+                Rollback();
             }
         }
 

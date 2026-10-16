@@ -62,9 +62,16 @@ namespace ConfuserExKillerRunner.Killers
                     var declType = m.DeclaringType;
                     if (declType != null && declType.Methods.Contains(m))
                     {
-                        declType.Methods.Remove(m);
-                        result.RemovedMethodsCount++;
-                        Logger.LogInfo($"[CleanerKiller] Removed protector method {m.Name} from {declType.Name}");
+                        if (!IsReferencedInModule(module, m))
+                        {
+                            declType.Methods.Remove(m);
+                            result.RemovedMethodsCount++;
+                            Logger.LogInfo($"[CleanerKiller] Removed unused protector method {m.Name} from {declType.Name}");
+                        }
+                        else
+                        {
+                            Logger.LogWarning($"[CleanerKiller] Retaining protector method {m.Name} in {declType.Name}: live references remain in module.");
+                        }
                     }
                 }
 
@@ -147,8 +154,9 @@ namespace ConfuserExKillerRunner.Killers
                    string.Equals(name, "OutputDebugStringW", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool IsReferencedInModule(ModuleDef module, MethodDef target)
+        internal static bool IsReferencedInModule(ModuleDef module, MethodDef target)
         {
+            if (module == null || target == null) return false;
             foreach (var type in module.GetTypes())
             {
                 foreach (var method in type.Methods)
@@ -156,7 +164,9 @@ namespace ConfuserExKillerRunner.Killers
                     if (!method.HasBody || method == target) continue;
                     foreach (var inst in method.Body.Instructions)
                     {
-                        if (inst.Operand is IMethod called && called.ResolveMethodDef() == target)
+                        if (inst.Operand is IMethod called && (called.ResolveMethodDef() == target || called == target))
+                            return true;
+                        if (inst.Operand is MethodDef md && md == target)
                             return true;
                     }
                 }
