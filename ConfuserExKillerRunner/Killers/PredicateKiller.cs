@@ -304,7 +304,7 @@ namespace ConfuserExKillerRunner.Killers
                    op == OpCodes.Shl || op == OpCodes.Shr || op == OpCodes.Shr_Un;
         }
 
-        private static bool TryEvaluateBinary(OpCode op, int a, int b, out int result)
+        internal static bool TryEvaluateBinary(OpCode op, int a, int b, out int result)
         {
             result = 0;
             try
@@ -341,7 +341,7 @@ namespace ConfuserExKillerRunner.Killers
                    op == OpCodes.Blt_Un || op == OpCodes.Blt_Un_S;
         }
 
-        private static bool EvaluateTwoOperandCondition(OpCode op, int a, int b)
+        internal static bool EvaluateTwoOperandCondition(OpCode op, int a, int b)
         {
             if (op == OpCodes.Beq || op == OpCodes.Beq_S) return a == b;
             if (op == OpCodes.Bne_Un || op == OpCodes.Bne_Un_S) return a != b;

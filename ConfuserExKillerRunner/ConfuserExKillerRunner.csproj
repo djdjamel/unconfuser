@@ -13,6 +13,9 @@
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="All" />
   </ItemGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="ConfuserExKillerRunner.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <Reference Include="dnlib">
       <HintPath>dnlib.dll</HintPath>
     </Reference>

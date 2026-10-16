@@ -62,7 +62,7 @@ namespace ConfuserExKillerRunner.Analysis
             return report;
         }
 
-        private static void AuditMethod(MethodDef method, AuditReport report)
+        public static void AuditMethod(MethodDef method, AuditReport report)
         {
             var instructions = method.Body.Instructions;
             var instSet = new HashSet<Instruction>(instructions);

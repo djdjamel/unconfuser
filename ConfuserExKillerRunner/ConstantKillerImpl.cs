@@ -347,7 +347,7 @@ namespace ConfuserExTools.ConstantKiller {
 			}
 		}
 
-		private static bool TryEvaluateKey(IList<Instruction> instructions, int callIndex, out int key, out int exprStartIndex) {
+		internal static bool TryEvaluateKey(IList<Instruction> instructions, int callIndex, out int key, out int exprStartIndex) {
 			key = 0;
 			exprStartIndex = -1;
 
