@@ -431,13 +431,13 @@ namespace ConfuserExKillerRunner
             if (auditReport.Status == "CLEAN")
             {
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"[+] Deobfuscation Verified & Clean! Final output saved to: {finalOutputPath}");
+                Console.WriteLine($"[+] Structural integrity audit passed (no structural defects detected). Output saved to: {finalOutputPath}");
                 Console.ResetColor();
             }
             else
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($"[!] Deobfuscation Completed with {auditReport.Warnings.Count} Structural Warning(s) (Candidate Promoted). Output saved to: {finalOutputPath}");
+                Console.WriteLine($"[!] Structural integrity audit completed with {auditReport.Warnings.Count} warning(s) (Candidate Promoted). Output saved to: {finalOutputPath}");
                 Console.ResetColor();
             }
 

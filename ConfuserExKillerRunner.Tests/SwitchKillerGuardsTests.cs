@@ -146,6 +146,7 @@ namespace ConfuserExKillerRunner.Tests
             };
             method.Body.ExceptionHandlers.Add(handler);
 
+            var origInst0 = method.Body.Instructions[0];
             var origInstCount = method.Body.Instructions.Count;
             var origVarCount = method.Body.Variables.Count;
             var origHandlerCount = method.Body.ExceptionHandlers.Count;
@@ -153,37 +154,60 @@ namespace ConfuserExKillerRunner.Tests
             var deobfuscator = new de4dot.blocks.cflow.BlocksCflowDeobfuscator();
             deobfuscator.Add(new MutatingAndFailingDeobfuscator());
 
-            // RunCflow will encounter MutatingAndFailingDeobfuscator, mutate the blocks, throw, and catch
+            // RunCflow will encounter MutatingAndFailingDeobfuscator, mutate method.Body instructions in-place, throw, and catch
             SwitchKillerImpl.RunCflow(new List<MethodDef> { method }, deobfuscator);
 
-            // Assert complete method body is restored
+            // 1. Prove that origInst0 was indeed mutated in-place by the deobfuscator
+            Assert.Equal(OpCodes.Nop, origInst0.OpCode);
+
+            // 2. Prove that the method.Body restored by RunCflow has the unmutated OpCode Ldc_I4_1
             Assert.NotNull(method.Body);
+            Assert.Equal(OpCodes.Ldc_I4_1, method.Body.Instructions[0].OpCode);
+
+            // 3. Prove that method.Body.Instructions[0] is an independent restored instance, NOT the mutated reference (would fail with shallow rollback)
+            Assert.NotSame(origInst0, method.Body.Instructions[0]);
+
+            // 4. Prove that variables, exception handlers, and instructions are fully restored
             Assert.Equal(origInstCount, method.Body.Instructions.Count);
             Assert.Equal(origVarCount, method.Body.Variables.Count);
             Assert.Equal(origHandlerCount, method.Body.ExceptionHandlers.Count);
-            Assert.Equal(OpCodes.Ldc_I4_1, method.Body.Instructions[0].OpCode);
             Assert.Equal(OpCodes.Stloc, method.Body.Instructions[1].OpCode);
             Assert.Equal(OpCodes.Ret, method.Body.Instructions[5].OpCode);
+
+            // 5. Prove that branch targets and exception handler boundaries point to the restored body's instructions
+            Assert.Same(method.Body.Instructions[5], method.Body.Instructions[2].Operand); // leaveTry
+            Assert.Same(method.Body.Instructions[5], method.Body.Instructions[4].Operand); // leaveCatch
             Assert.Same(method.Body.Instructions[0], method.Body.ExceptionHandlers[0].TryStart);
+            Assert.Same(method.Body.Instructions[3], method.Body.ExceptionHandlers[0].TryEnd);
+            Assert.Same(method.Body.Instructions[3], method.Body.ExceptionHandlers[0].HandlerStart);
+            Assert.Same(method.Body.Instructions[5], method.Body.ExceptionHandlers[0].HandlerEnd);
         }
     }
 
     public class MutatingAndFailingDeobfuscator : de4dot.blocks.cflow.IBlocksDeobfuscator
     {
+        private MethodDef _targetMethod;
+
         public bool ExecuteIfNotModified => true;
 
         public void DeobfuscateBegin(de4dot.blocks.Blocks blocks)
         {
+            _targetMethod = blocks.Method;
         }
 
         public bool Deobfuscate(List<de4dot.blocks.Block> blocks)
         {
-            if (blocks != null && blocks.Count > 0 && blocks[0].Instructions.Count > 0)
+            if (_targetMethod?.Body != null && _targetMethod.Body.Instructions.Count > 0)
             {
-                // Mutate the instructions in the block before throwing
-                blocks[0].Instructions.Clear();
+                // Force in-place mutation of an instruction instance belonging to target method.Body
+                var inst = _targetMethod.Body.Instructions[0];
+                inst.OpCode = OpCodes.Nop;
+                inst.Operand = null;
+
+                // Also mutate variables collection to verify complete body restoration
+                _targetMethod.Body.Variables.Clear();
             }
-            throw new InvalidOperationException("Forced failure after block mutation");
+            throw new InvalidOperationException("Forced failure after in-place target method mutation");
         }
     }
 }
