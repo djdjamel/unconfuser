@@ -106,13 +106,13 @@ namespace ConfuserExTools.ProxyKiller
 						continue;
 
 					// Snapshot body in case transformation fails
-					var originalInstructions = method.Body.Instructions.ToList();
+					var originalBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
 					try
 					{
 						for (int i = 0; i < method.Body.Instructions.Count; i++)
 						{
 							var instruction = method.Body.Instructions[i];
-							if (instruction.OpCode.Code != Code.Call)
+							if (instruction.OpCode.Code != Code.Call && instruction.OpCode.Code != Code.Callvirt)
 								continue;
 
 							if (instruction.Operand is IMethod operandMethod)
@@ -130,10 +130,8 @@ namespace ConfuserExTools.ProxyKiller
 					}
 					catch (Exception ex)
 					{
-						// Rollback method on error
-						method.Body.Instructions.Clear();
-						foreach (var inst in originalInstructions)
-							method.Body.Instructions.Add(inst);
+						// Atomic rollback method on error
+						method.Body = originalBody;
 						Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] Proxy inlining failed in {method}: {ex.Message}. Rolled back.");
 					}
 				}
@@ -261,20 +259,49 @@ namespace ConfuserExTools.ProxyKiller
 				}
 			}
 
-			// Clean up delegate fields and types
+			// Clean up delegate fields and types only if no references remain in the module
+			var remainingFieldRefs = new HashSet<FieldDef>();
+			foreach (var m in module.EnumerateMethods())
+			{
+				if (!m.HasBody) continue;
+				foreach (var inst in m.Body.Instructions)
+				{
+					if (inst.Operand is IField f)
+					{
+						var fDef = f.ResolveFieldDef();
+						if (fDef != null) remainingFieldRefs.Add(fDef);
+					}
+				}
+			}
+
 			if (module.GlobalType != null)
 			{
 				foreach (var field in delegateMap.Keys)
 				{
-					module.GlobalType.Fields.Remove(field);
+					if (!remainingFieldRefs.Contains(field))
+						module.GlobalType.Fields.Remove(field);
 				}
 			}
+
+			var remainingTypeRefs = new HashSet<TypeDef>();
+			if (module.GlobalType != null)
+			{
+				foreach (var f in module.GlobalType.Fields)
+				{
+					var td = f.FieldSig?.Type?.ToTypeDefOrRef()?.ResolveTypeDef();
+					if (td != null) remainingTypeRefs.Add(td);
+				}
+			}
+
 			foreach (var delType in delegateTypes)
 			{
-				if (delType.DeclaringType != null)
-					delType.DeclaringType.NestedTypes.Remove(delType);
-				else
-					module.Types.Remove(delType);
+				if (!remainingTypeRefs.Contains(delType))
+				{
+					if (delType.DeclaringType != null)
+						delType.DeclaringType.NestedTypes.Remove(delType);
+					else
+						module.Types.Remove(delType);
+				}
 			}
 
 			return inlinedCount;
