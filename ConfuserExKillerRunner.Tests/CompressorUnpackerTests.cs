@@ -8,6 +8,12 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    public static class CompressorTestSentinel
+    {
+        public static bool EntryPointExecuted { get; set; }
+        public static void SignalExecution() => EntryPointExecuted = true;
+    }
+
     public class CompressorUnpackerTests
     {
         [Fact]
@@ -28,10 +34,12 @@ namespace ConfuserExKillerRunner.Tests
                 MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String),
                 new TypeRefUser(module, "System", "InvalidOperationException", module.CorLibTypes.AssemblyRef));
 
+            var signalRef = module.Import(typeof(CompressorTestSentinel).GetMethod(nameof(CompressorTestSentinel.SignalExecution)));
+
             // Entry point method with:
             // - Signature: static int Main(string arg)
             // - Locals: int, bool
-            // - Instructions: branch target, exception throw, Assembly.Load call
+            // - Instructions: branch target, sentinel invocation, exception throw, Assembly.Load call
             // - Exception handler
             var epMethod = new MethodDefUser("Main",
                 MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.String),
@@ -54,46 +62,65 @@ namespace ConfuserExKillerRunner.Tests
             // Instructions layout:
             // [0] inst0: ldc.i4.0
             // [1] inst1: stloc.0
-            // [2] instBr: br.s targetBranch
+            // [2] instBr: br.s instTarget
             // [3] instDummy: nop
-            // [4] targetBranch: ldstr "Forced reflection failure"
-            // [5] instNewobj: newobj InvalidOperationException(string)
-            // [6] instThrow: throw (forces TargetInvocationException during reflMethod.Invoke)
-            // [7] instLdnull: ldnull
-            // [8] callLoad: call Assembly.Load(byte[]) -> patched to Ret/null operand by TryDynamicMethodRewriteUnpack
-            // [9] instRetVal: ldc.i4.1
-            // [10] instRet: ret
-            var targetBranch = Instruction.Create(OpCodes.Ldstr, "Forced reflection failure");
+            // [4] instTarget: ldc.i4.1
+            // [5] inst2: stloc.1
+            // Try block starts:
+            // [6] instSignal: call CompressorTestSentinel.SignalExecution()
+            // [7] instLdstr: ldstr "Forced failure inside loaded entry point"
+            // [8] instNewobj: newobj InvalidOperationException(string)
+            // [9] instThrow: throw (forces TargetInvocationException during reflMethod.Invoke)
+            // Catch handler starts:
+            // [10] instHandlerStart: pop (catches ArgumentException)
+            // [11] instLeave: leave.s instRetVal
+            // Catch handler ends:
+            // [12] instLdnull: ldnull
+            // [13] callLoad: call Assembly.Load(byte[]) -> patched to Ret/null operand by TryDynamicMethodRewriteUnpack
+            // [14] instRetVal: ldc.i4.0
+            // [15] instRet: ret
             var inst0 = Instruction.Create(OpCodes.Ldc_I4_0);
             var inst1 = Instruction.Create(OpCodes.Stloc, local0);
-            var instBr = Instruction.Create(OpCodes.Br_S, targetBranch);
+            var instTarget = Instruction.Create(OpCodes.Ldc_I4_1);
+            var instBr = Instruction.Create(OpCodes.Br_S, instTarget);
             var instDummy = Instruction.Create(OpCodes.Nop);
+            var inst2 = Instruction.Create(OpCodes.Stloc, local1);
+            var instSignal = Instruction.Create(OpCodes.Call, signalRef);
+            var instLdstr = Instruction.Create(OpCodes.Ldstr, "Forced failure inside loaded entry point");
             var instNewobj = Instruction.Create(OpCodes.Newobj, exceptionCtorRef);
             var instThrow = Instruction.Create(OpCodes.Throw);
+            var instHandlerStart = Instruction.Create(OpCodes.Pop);
+            var instRetVal = Instruction.Create(OpCodes.Ldc_I4_0);
+            var instLeave = Instruction.Create(OpCodes.Leave_S, instRetVal);
             var instLdnull = Instruction.Create(OpCodes.Ldnull);
             var callLoad = Instruction.Create(OpCodes.Call, asmLoadRef);
-            var instRetVal = Instruction.Create(OpCodes.Ldc_I4_1);
             var instRet = Instruction.Create(OpCodes.Ret);
 
             epMethod.Body.Instructions.Add(inst0);
             epMethod.Body.Instructions.Add(inst1);
             epMethod.Body.Instructions.Add(instBr);
             epMethod.Body.Instructions.Add(instDummy);
-            epMethod.Body.Instructions.Add(targetBranch);
+            epMethod.Body.Instructions.Add(instTarget);
+            epMethod.Body.Instructions.Add(inst2);
+            epMethod.Body.Instructions.Add(instSignal);
+            epMethod.Body.Instructions.Add(instLdstr);
             epMethod.Body.Instructions.Add(instNewobj);
             epMethod.Body.Instructions.Add(instThrow);
+            epMethod.Body.Instructions.Add(instHandlerStart);
+            epMethod.Body.Instructions.Add(instLeave);
             epMethod.Body.Instructions.Add(instLdnull);
             epMethod.Body.Instructions.Add(callLoad);
             epMethod.Body.Instructions.Add(instRetVal);
             epMethod.Body.Instructions.Add(instRet);
 
+            var argExRef = new TypeRefUser(module, "System", "ArgumentException", module.CorLibTypes.AssemblyRef);
             var handler = new ExceptionHandler(ExceptionHandlerType.Catch)
             {
-                TryStart = inst0,
-                TryEnd = targetBranch,
-                HandlerStart = targetBranch,
+                TryStart = instSignal,
+                TryEnd = instHandlerStart,
+                HandlerStart = instHandlerStart,
                 HandlerEnd = instLdnull,
-                CatchType = module.CorLibTypes.Object.TypeDefOrRef
+                CatchType = argExRef
             };
             epMethod.Body.ExceptionHandlers.Add(handler);
 
@@ -108,15 +135,23 @@ namespace ConfuserExKillerRunner.Tests
                     var targetEp = modMD.EntryPoint;
                     var origReturnType = targetEp.ReturnType;
                     var origMethodSig = targetEp.MethodSig.ToString();
-                    var origInstCount = targetEp.Body.Instructions.Count;
-                    var origVarCount = targetEp.Body.Variables.Count;
-                    var origHandlerCount = targetEp.Body.ExceptionHandlers.Count;
-                    var origCallInst = targetEp.Body.Instructions[8];
+                    int origInstCount = targetEp.Body.Instructions.Count;
+                    int origVarCount = targetEp.Body.Variables.Count;
+                    int origHandlerCount = targetEp.Body.ExceptionHandlers.Count;
+                    var origCallInst = targetEp.Body.Instructions[13];
                     var origCallOpCode = origCallInst.OpCode;
 
-                    // When invoked, targetEp executes and throws inside tempAsm, forcing an exception inside TryDynamicMethodRewriteUnpack
-                    // The finally block must execute and restore the original method body and signature
-                    Assert.ThrowsAny<Exception>(() => CompressorUnpacker.TryDynamicMethodRewriteUnpack(modMD));
+                    CompressorTestSentinel.EntryPointExecuted = false;
+
+                    // When invoked, targetEp executes and throws inside tempAsm, forcing a TargetInvocationException inside TryDynamicMethodRewriteUnpack
+                    // The test strictly asserts TargetInvocationException wrapping the specific sentinel exception and confirms entry point execution
+                    var ex = Assert.Throws<System.Reflection.TargetInvocationException>(() => CompressorUnpacker.TryDynamicMethodRewriteUnpack(modMD));
+
+                    // Verify that forced failure occurs specifically after assembly load and during entry point invocation
+                    Assert.True(CompressorTestSentinel.EntryPointExecuted);
+                    Assert.NotNull(ex.InnerException);
+                    var innerEx = Assert.IsType<InvalidOperationException>(ex.InnerException);
+                    Assert.Equal("Forced failure inside loaded entry point", innerEx.Message);
 
                     // 1. Verify return type and signature are restored (not SZArray byte[])
                     Assert.Equal(origReturnType.FullName, targetEp.ReturnType.FullName);
@@ -125,7 +160,7 @@ namespace ConfuserExKillerRunner.Tests
 
                     // 2. Verify instruction count and that the patched Call instruction was unpatched (not left as Ret with null operand)
                     Assert.Equal(origInstCount, targetEp.Body.Instructions.Count);
-                    var restoredCall = targetEp.Body.Instructions[8];
+                    var restoredCall = targetEp.Body.Instructions[13];
                     Assert.Equal(origCallOpCode, restoredCall.OpCode);
                     Assert.Equal(OpCodes.Call, restoredCall.OpCode);
                     Assert.NotNull(restoredCall.Operand);
@@ -143,10 +178,10 @@ namespace ConfuserExKillerRunner.Tests
 
                     // 5. Verify exception handler boundaries are remapped to instructions in the restored body
                     Assert.Equal(origHandlerCount, targetEp.Body.ExceptionHandlers.Count);
-                    Assert.Same(targetEp.Body.Instructions[0], targetEp.Body.ExceptionHandlers[0].TryStart);
-                    Assert.Same(targetEp.Body.Instructions[4], targetEp.Body.ExceptionHandlers[0].TryEnd);
-                    Assert.Same(targetEp.Body.Instructions[4], targetEp.Body.ExceptionHandlers[0].HandlerStart);
-                    Assert.Same(targetEp.Body.Instructions[7], targetEp.Body.ExceptionHandlers[0].HandlerEnd);
+                    Assert.Same(targetEp.Body.Instructions[6], targetEp.Body.ExceptionHandlers[0].TryStart);
+                    Assert.Same(targetEp.Body.Instructions[10], targetEp.Body.ExceptionHandlers[0].TryEnd);
+                    Assert.Same(targetEp.Body.Instructions[10], targetEp.Body.ExceptionHandlers[0].HandlerStart);
+                    Assert.Same(targetEp.Body.Instructions[12], targetEp.Body.ExceptionHandlers[0].HandlerEnd);
                 }
             }
         }

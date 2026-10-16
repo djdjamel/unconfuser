@@ -32,7 +32,10 @@ namespace ConfuserExKillerRunner.Tests
                 MethodSig.CreateStatic(module.CorLibTypes.Object, new SZArraySig(module.CorLibTypes.Byte)),
                 new TypeRefUser(module, "System.Reflection", "Assembly", module.CorLibTypes.AssemblyRef));
 
-            var decrypterMethod = new MethodDefUser("ConfuserResourceDecrypter", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            var decrypterMethod = new MethodDefUser("ConfuserResourceDecrypter",
+                MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
             {
                 Body = new CilBody()
             };
@@ -110,23 +113,17 @@ namespace ConfuserExKillerRunner.Tests
             var initialResData = new byte[] { 1, 2, 3 };
             module.Resources.Add(new EmbeddedResource("InitialResource", initialResData));
 
-            var initArrayRef = new MemberRefUser(module, "InitializeArray",
-                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Object, module.CorLibTypes.IntPtr),
-                new TypeRefUser(module, "System.Runtime.CompilerServices", "RuntimeHelpers", module.CorLibTypes.AssemblyRef));
-
             var asmLoadRef = new MemberRefUser(module, "Load",
                 MethodSig.CreateStatic(module.CorLibTypes.Object, new SZArraySig(module.CorLibTypes.Byte)),
                 new TypeRefUser(module, "System.Reflection", "Assembly", module.CorLibTypes.AssemblyRef));
 
-            var decrypterMethod = new MethodDefUser("ConfuserResourceDecrypter", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            var decrypterMethod = new MethodDefUser("ConfuserResourceDecrypter",
+                MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
             {
                 Body = new CilBody()
             };
-
-            // Satisfy InitializeArray
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, initArrayRef));
 
             // Push payloadBytes onto stack using array initializer
             var arrayInitInstrs = ConfuserExTools.ConstantKiller.ConstantKillerImpl.CreateArrayInitializer(
@@ -169,27 +166,34 @@ namespace ConfuserExKillerRunner.Tests
                     var throwingRef = new ThrowingMemberRef(modMD, "ThrowingCall", MethodSig.CreateStatic(modMD.CorLibTypes.Void), modMD.CorLibTypes.Object.TypeDefOrRef);
                     targetCctor.Body.Instructions.Insert(1, Instruction.Create(OpCodes.Call, throwingRef));
 
+                    ThrowingMemberRef.SignalTriggered = false;
+                    ThrowingMemberRef.ResourceCommittedBeforeFailure = false;
+
                     var result = new ResourceKillerResult();
                     ResourceKiller.TryDecryptAndReEmbedResources(modMD, result);
 
-                    // 1. Verify that rollback cleared result counters
+                    // 1. Verify that the failure injection signal was triggered and that the decrypted resource had been committed before failure
+                    Assert.True(ThrowingMemberRef.SignalTriggered);
+                    Assert.True(ThrowingMemberRef.ResourceCommittedBeforeFailure);
+
+                    // 2. Verify that rollback cleared result counters
                     Assert.False(result.ResourcesDecrypted);
                     Assert.Equal(0, result.DecryptedResourcesCount);
                     Assert.Equal(0, result.ExtractedResourcesCount);
 
-                    // 2. Verify that injected resource was discarded and original resource was restored
+                    // 3. Verify that injected resource was discarded and original resource was restored
                     Assert.Equal(origResourceCount, modMD.Resources.Count);
                     Assert.Equal("InitialResource", modMD.Resources[0].Name.String);
                     Assert.DoesNotContain(modMD.Resources, r => r.Name.String == "DecryptedExtractedResource");
 
-                    // 3. Verify that decrypter method signature and body are restored
+                    // 4. Verify that decrypter method signature and body are restored
                     Assert.Equal(origSig, origTarget.MethodSig.ToString());
                     Assert.Equal(origInstCount, origTarget.Body.Instructions.Count);
 
-                    // 4. Verify assembly name is restored
+                    // 5. Verify assembly name is restored
                     Assert.Equal(originalAsmName, modMD.Assembly.Name.String);
 
-                    // 5. Verify cctor is restored from original snapshot
+                    // 6. Verify cctor is restored from original snapshot
                     Assert.NotNull(modMD.GlobalType.FindStaticConstructor());
                     Assert.Equal(origCctorInstCount + 1, modMD.GlobalType.FindStaticConstructor().Body.Instructions.Count);
                 }
@@ -199,14 +203,25 @@ namespace ConfuserExKillerRunner.Tests
 
     internal class ThrowingMemberRef : MemberRefUser, dnlib.DotNet.IFullName
     {
+        private readonly ModuleDef _targetModule;
+        public static bool SignalTriggered { get; set; }
+        public static bool ResourceCommittedBeforeFailure { get; set; }
+
         public ThrowingMemberRef(ModuleDef module, UTF8String name, MethodSig sig, IMemberRefParent parent)
             : base(module, name, sig, parent)
         {
+            _targetModule = module;
         }
 
         UTF8String dnlib.DotNet.IFullName.Name
         {
-            get => throw new System.InvalidOperationException("Forced failure after resource extraction in cctor cleanup");
+            get
+            {
+                SignalTriggered = true;
+                ResourceCommittedBeforeFailure = _targetModule != null &&
+                    _targetModule.Resources.Any(r => r.Name == "DecryptedExtractedResource");
+                throw new System.InvalidOperationException("Forced failure after resource extraction in cctor cleanup");
+            }
             set => base.Name = value;
         }
     }
