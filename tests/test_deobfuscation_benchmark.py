@@ -18,8 +18,10 @@ from benchmarks.run_benchmark import (
     get_benign_baseline,
     run_benchmark_case,
     run_all_benchmarks,
+    verify_structural_transformations,
     FIXTURES_DIR,
     BENIGN_DLL,
+    CONFUSEREX_EXPECTED_SHA256,
 )
 
 
@@ -211,4 +213,119 @@ def test_real_protector_integration_and_skip_logic(runner_path, expected_baselin
         assert v_data.get("verified") is True, f"Real ConfuserEx structural verification failed: {v_data}"
     else:
         pytest.fail(f"Real ConfuserEx protector integration failed with verdict {real_case['verdict']}: {real_case.get('error')}")
+
+
+def test_missing_baseline_fails_closed_and_unverified(tmp_path, runner_path, expected_baseline):
+    """
+    Validates that missing baseline fails closed, does not leave baselineMatched=true,
+    and returns UNVERIFIED with exit code 3.
+    """
+    clean_path = FIXTURES_DIR / "fixture_edge_cases_clean.dll"
+    if not clean_path.exists():
+        run_benchmark_case(
+            "Generics & Exception Edges",
+            FIXTURES_DIR / "fixture_edge_cases.dll",
+            "edge_cases",
+            runner_path,
+            expected_baseline,
+            baseline_dll_path=BENIGN_DLL,
+        )
+
+    fake_baseline = tmp_path / "non_existent_baseline.dll"
+    res = verify_structural_transformations(clean_path, "edge_cases", baseline_path=fake_baseline)
+    assert res.get("verified") is False
+    assert res.get("status") == "UNVERIFIED"
+    assert "baseline_exception_handlers_matched" in res.get("unverified_transformations", [])
+
+    # Also test compressor scenario with missing baseline
+    comp_clean = FIXTURES_DIR / "fixture_compressor_clean.dll"
+    if not comp_clean.exists():
+        run_benchmark_case(
+            "Deflate Compressor Unpacker",
+            FIXTURES_DIR / "fixture_compressor.dll",
+            "compressor",
+            runner_path,
+            expected_baseline,
+            baseline_dll_path=BENIGN_DLL,
+        )
+    comp_res = verify_structural_transformations(comp_clean, "compressor", baseline_path=fake_baseline)
+    assert comp_res.get("verified") is False
+    assert comp_res.get("status") == "UNVERIFIED"
+    assert "payload_types_entrypoint_and_required_resources_matched_baseline" in comp_res.get("unverified_transformations", [])
+
+
+def test_altered_exception_handler_ranges_detected(tmp_path, runner_path, expected_baseline):
+    """
+    Validates that altered exception-handler boundary targets or instruction bodies
+    fail verification rather than passing due to superficial range checks.
+    """
+    generator = find_generator()
+    clean_path = FIXTURES_DIR / "fixture_edge_cases_clean.dll"
+    if not clean_path.exists():
+        run_benchmark_case(
+            "Generics & Exception Edges",
+            FIXTURES_DIR / "fixture_edge_cases.dll",
+            "edge_cases",
+            runner_path,
+            expected_baseline,
+            baseline_dll_path=BENIGN_DLL,
+        )
+
+    tampered_dll = tmp_path / "tampered_eh.dll"
+    tamper_cmd = get_exec_command(generator) + ["--tamper-eh", str(clean_path), str(tampered_dll)]
+    t_res = subprocess.run(tamper_cmd, capture_output=True, text=True)
+    assert t_res.returncode == 0, f"Tamper command failed: {t_res.stderr}"
+
+    verify_res = verify_structural_transformations(tampered_dll, "edge_cases", baseline_path=BENIGN_DLL)
+    assert verify_res.get("verified") is False
+    assert verify_res.get("status") == "FAILED"
+    assert "baseline_exception_handlers_matched" in verify_res.get("unverified_transformations", [])
+
+
+def test_unexpected_extra_resources_detected(tmp_path, runner_path, expected_baseline):
+    """
+    Validates that unexpected extra resources fail exact resource-manifest equality checks.
+    """
+    generator = find_generator()
+    clean_path = FIXTURES_DIR / "fixture_resources_clean.dll"
+    if not clean_path.exists():
+        run_benchmark_case(
+            "Encrypted Resources",
+            FIXTURES_DIR / "fixture_resources.dll",
+            "resources",
+            runner_path,
+            expected_baseline,
+            baseline_dll_path=BENIGN_DLL,
+        )
+
+    tampered_dll = tmp_path / "tampered_res.dll"
+    tamper_cmd = get_exec_command(generator) + ["--tamper-res", str(clean_path), str(tampered_dll)]
+    t_res = subprocess.run(tamper_cmd, capture_output=True, text=True)
+    assert t_res.returncode == 0, f"Tamper command failed: {t_res.stderr}"
+
+    verify_res = verify_structural_transformations(tampered_dll, "resources", baseline_path=BENIGN_DLL)
+    assert verify_res.get("verified") is False
+    assert verify_res.get("status") == "FAILED"
+    assert "resource_manifest_names_matched" in verify_res.get("unverified_transformations", [])
+
+
+def test_mismatched_confuserex_checksum_fails(tmp_path, runner_path, monkeypatch):
+    """
+    Validates that a ConfuserEx CLI with a mismatched SHA-256 fails immediately
+    with REAL_PROTECTOR_FAIL and does not run or silently change the pinned release label.
+    """
+    fake_cli = tmp_path / "Confuser.CLI.exe"
+    fake_cli.write_bytes(b"MZ_DUMMY_EXECUTABLE_CONTENT_FOR_HASH_MISMATCH_TEST")
+
+    monkeypatch.setenv("CONFUSEREX_PATH", str(fake_cli))
+    summary = run_all_benchmarks(fixtures_dir=FIXTURES_DIR, runner_path=runner_path)
+
+    real_cases = [r for r in summary["results"] if r.get("scenario") == "real_confuserex"]
+    assert len(real_cases) == 1
+    real_case = real_cases[0]
+
+    assert real_case["verdict"] == "REAL_PROTECTOR_FAIL"
+    assert "identity verification failed" in real_case["error"]
+    assert str(CONFUSEREX_EXPECTED_SHA256) in real_case["error"]
+    assert real_case["output_produced"] is False
 

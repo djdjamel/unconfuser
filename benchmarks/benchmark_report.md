@@ -7,10 +7,10 @@
 > - `SYNTHETIC_PASS`: ConfuserExKillerRunner recognizes and deobfuscates specific synthetic IL and metadata patterns generated via dnlib.
 > - `SYNTHETIC_PARTIAL`: Output produced, execution succeeded with exit code 0 matching expected baseline, and audit clean, but specific documented transformations were unrecovered due to known ordering dependencies.
 > - `SYNTHETIC_FAIL`: Deobfuscator crashed, structural verification explicitly failed, runtime failed, or output mismatched.
-> - `UNVERIFIED`: Structural verification tool was unavailable; output produced but unverifiable at AST level.
+> - `UNVERIFIED`: Structural verification tool or required baseline was unavailable; output produced but unverified.
 > - `REAL_PROTECTOR_PASS`: Reserved exclusively for fixtures produced by a pinned, identified build of the ConfuserEx toolchain that have passed structural, audit, and runtime tests.
 > - `REAL_PROTECTOR_FAIL`: Protection or deobfuscation failed on a fixture produced by the pinned ConfuserEx toolchain.
-> - `SKIPPED_TOOL_MISSING`: Specific external protector CLI was not provisioned; explicitly skipped and never counted as passed.
+> - `SKIPPED_TOOL_MISSING`: Pinned external protector CLI was not provisioned; explicitly skipped and never counted as passed.
 > - **Execution Limits:** Process timeouts (30s deobfuscation, 5s runtime) serve as operational limits, not an operating-system-level sandbox.
 
 - **Total Benchmark Cases:** 9
@@ -26,15 +26,15 @@
 
 | Case / Protection Family | Input SHA256 | Output | Runner Exit | Runtime Exit | Audit | Behavior | Structural Assertions | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| Constants (Strings & Numerics) | `e838a820` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: string_constant_inlined(System.String), numeric_constant_inlined(System.Int32), numeric_constant_inlined(System.Int64), decrypter_calls_removed | **`SYNTHETIC_PASS`** |
-| Control Flow (Dead Code & Junk Stripping) | `52b72338` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: deadcode_junk_pair_stripped, switch_dispatch_structure_preserved | **`SYNTHETIC_PASS`** |
-| Reference & Method Call Proxies | `cd52acbd` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: proxy_call_rewritten_to_target, intermediate_proxy_call_removed, proxy_method_definition_pruned | **`SYNTHETIC_PASS`** |
-| Encrypted Resources | `b88eb0d9` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: resource_manifest_names_matched, resource_byte_for_byte_exact_match | **`SYNTHETIC_PASS`** |
-| Deflate Compressor Unpacker | `aa58fb9b` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: assembly_identity_restored_to_payload, all_payload_types_present, payload_embedded_resources_restored, full_metadata_and_content_matched_baseline | **`SYNTHETIC_PASS`** |
-| Anti-Tamper & Cleaner Hooks | `909e3018` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: cctor_hook_removed, protector_method_pruned | **`SYNTHETIC_PASS`** |
-| Combined Multi-Protection | `2c292174` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: proxies_inlined, cflow_deadcode_stripped, cctor_antitamper_hook_stripped<br>Unverified: constants_decrypted_and_inlined | **`SYNTHETIC_PARTIAL`** |
-| Generics & Exception Edges | `57fbb91b` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: generic_method_signature_intact, local_variables_structure_preserved, exception_handlers_try_and_handler_ranges_verified, baseline_exception_handlers_matched | **`SYNTHETIC_PASS`** |
-| ConfuserEx v1.0.0 (Release 36eb45d) (Constants, Ctrl Flow, Ref Proxy, Resources) | `N/A` | No | - | - | SKIPPED | Skipped | Confuser.CLI.exe (v1.0.0 (Release 36eb45d), expected SHA-256: 3810c9d7496ef9f2...) not found in tools/ConfuserEx or CONFUSEREX_PATH. | **`SKIPPED_TOOL_MISSING`** |
+| Constants (Strings & Numerics) | `bd1c95ad` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: string_constant_inlined(System.String), numeric_constant_inlined(System.Int32), numeric_constant_inlined(System.Int64), decrypter_calls_removed | **`SYNTHETIC_PASS`** |
+| Control Flow (Dead Code & Junk Stripping) | `55519a0f` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: deadcode_junk_pair_stripped, switch_dispatch_structure_preserved | **`SYNTHETIC_PASS`** |
+| Reference & Method Call Proxies | `9fe5ba62` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: proxy_call_rewritten_to_target, intermediate_proxy_call_removed, proxy_method_definition_pruned | **`SYNTHETIC_PASS`** |
+| Encrypted Resources | `08f30f43` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: resource_manifest_names_matched, resource_byte_for_byte_exact_match | **`SYNTHETIC_PASS`** |
+| Deflate Compressor Unpacker | `fd87d0ea` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: payload_types_entrypoint_and_required_resources_matched_baseline, assembly_identity_restored_to_payload, all_payload_types_present, payload_embedded_resources_restored | **`SYNTHETIC_PASS`** |
+| Anti-Tamper & Cleaner Hooks | `d9b1635f` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: cctor_hook_removed, protector_method_pruned | **`SYNTHETIC_PASS`** |
+| Combined Multi-Protection | `53d0516a` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: proxies_inlined, cflow_deadcode_stripped, cctor_antitamper_hook_stripped<br>Unverified: constants_decrypted_and_inlined | **`SYNTHETIC_PARTIAL`** |
+| Generics & Exception Edges | `6fd38555` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: generic_method_signature_intact, local_variables_structure_preserved, exception_handlers_try_and_handler_ranges_verified, baseline_exception_handlers_matched | **`SYNTHETIC_PASS`** |
+| ConfuserEx yck1509/ConfuserEx v1.0.0 (commit 3c9c29d9daf2f1259edf69054c5693d5d225a980) (Constants, Ctrl Flow, Ref Proxy, Resources) | `N/A` | No | - | - | SKIPPED | Skipped | Confuser.CLI.exe (yck1509/ConfuserEx v1.0.0 (commit 3c9c29d9daf2f1259edf69054c5693d5d225a980), expected SHA-256: 2b3e5cb7f96589e5...) not found in tools/ConfuserEx or CONFUSEREX_PATH. | **`SKIPPED_TOOL_MISSING`** |
 
 ## Detailed Structural Assertions & Findings
 
@@ -60,8 +60,8 @@
 
 ### 5. Deflate Compressor Unpacker (`SYNTHETIC_PASS`)
 - **Verdict:** `SYNTHETIC_PASS` | **Audit Status:** `CLEAN` | **Runtime Behavior:** `Exact Match`
-- **Verified Structural Transformations:** assembly_identity_restored_to_payload, all_payload_types_present, payload_embedded_resources_restored, full_metadata_and_content_matched_baseline
-- **Verification Notes:** Deflate container unwrapped and verified against reference BenignSample.dll: exact assembly identity, full type set (7 types), entry point, and byte-for-byte required embedded resource match.
+- **Verified Structural Transformations:** payload_types_entrypoint_and_required_resources_matched_baseline, assembly_identity_restored_to_payload, all_payload_types_present, payload_embedded_resources_restored
+- **Verification Notes:** Deflate container unwrapped and verified against reference BenignSample.dll: assembly identity, top-level type set (7 types), entry point, and required embedded resource byte-for-byte match.
 
 ### 6. Anti-Tamper & Cleaner Hooks (`SYNTHETIC_PASS`)
 - **Verdict:** `SYNTHETIC_PASS` | **Audit Status:** `CLEAN` | **Runtime Behavior:** `Exact Match`
@@ -77,8 +77,8 @@
 ### 8. Generics & Exception Edges (`SYNTHETIC_PASS`)
 - **Verdict:** `SYNTHETIC_PASS` | **Audit Status:** `CLEAN` | **Runtime Behavior:** `Exact Match`
 - **Verified Structural Transformations:** generic_method_signature_intact, local_variables_structure_preserved, exception_handlers_try_and_handler_ranges_verified, baseline_exception_handlers_matched
-- **Verification Notes:** Generic method signature, local variables (3+), and exception-handler try/handler ranges (including TryStart/TryEnd and HandlerStart/HandlerEnd) verified against baseline assembly.
+- **Verification Notes:** Generic method signature, local variables (3+), and exception-handler try/handler ranges (including semantic TryStart/TryEnd, HandlerStart/HandlerEnd targets, and instruction bodies) verified against baseline assembly.
 
-### 9. ConfuserEx v1.0.0 (Release 36eb45d) (Constants, Ctrl Flow, Ref Proxy, Resources) (`SKIPPED_TOOL_MISSING`)
+### 9. ConfuserEx yck1509/ConfuserEx v1.0.0 (commit 3c9c29d9daf2f1259edf69054c5693d5d225a980) (Constants, Ctrl Flow, Ref Proxy, Resources) (`SKIPPED_TOOL_MISSING`)
 - **Verdict:** `SKIPPED_TOOL_MISSING` | **Audit Status:** `SKIPPED` | **Runtime Behavior:** `Skipped`
-- **Diagnostic / Failure Information:** Confuser.CLI.exe (v1.0.0 (Release 36eb45d), expected SHA-256: 3810c9d7496ef9f2...) not found in tools/ConfuserEx or CONFUSEREX_PATH.
+- **Diagnostic / Failure Information:** Confuser.CLI.exe (yck1509/ConfuserEx v1.0.0 (commit 3c9c29d9daf2f1259edf69054c5693d5d225a980), expected SHA-256: 2b3e5cb7f96589e5...) not found in tools/ConfuserEx or CONFUSEREX_PATH.

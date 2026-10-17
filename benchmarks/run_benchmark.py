@@ -28,12 +28,26 @@ BENIGN_CONFIG = BENIGN_DIR / "bin" / "Release" / "net8.0" / "BenignSample.runtim
 PROFILE_CRPROJ = BENCHMARKS_DIR / "ConfuserExProfile" / "confuserex_v1.0.0.crproj"
 
 # Pinned ConfuserEx toolchain identity and immutable verification
-CONFUSEREX_PINNED_RELEASE = "v1.0.0 (Release 36eb45d)"
-CONFUSEREX_EXPECTED_SHA256 = os.environ.get(
-    "CONFUSEREX_SHA256",
-    # Official Release v1.0.0 Confuser.CLI.exe SHA-256
-    "3810c9d7496ef9f244199baee6a666e85eefb9db2f3ba9e89d6b2cba1608be92",
-)
+# Official upstream binary identity:
+#   Repository: https://github.com/yck1509/ConfuserEx
+#   Release: v1.0.0 (commit 3c9c29d9daf2f1259edf69054c5693d5d225a980)
+#   Binary: Confuser.CLI.exe from ConfuserEx_bin.zip
+#   SHA-256: 2b3e5cb7f96589e5377700a5f7f25e9fc6a14539e85256e6ac6e85c07f769f61
+CONFUSEREX_OFFICIAL_RELEASE = "yck1509/ConfuserEx v1.0.0 (commit 3c9c29d9daf2f1259edf69054c5693d5d225a980)"
+CONFUSEREX_OFFICIAL_SHA256 = "2b3e5cb7f96589e5377700a5f7f25e9fc6a14539e85256e6ac6e85c07f769f61"
+
+_custom_sha = os.environ.get("CONFUSEREX_SHA256")
+_custom_build = os.environ.get("CONFUSEREX_BUILD_ID")
+
+if _custom_sha:
+    CONFUSEREX_EXPECTED_SHA256 = _custom_sha.strip().lower()
+    if _custom_build:
+        CONFUSEREX_PINNED_RELEASE = f"Custom ConfuserEx Build ({_custom_build})"
+    else:
+        CONFUSEREX_PINNED_RELEASE = f"Custom ConfuserEx Build (Overridden SHA-256 {_custom_sha[:16]}...)"
+else:
+    CONFUSEREX_PINNED_RELEASE = CONFUSEREX_OFFICIAL_RELEASE
+    CONFUSEREX_EXPECTED_SHA256 = CONFUSEREX_OFFICIAL_SHA256
 
 # Candidate runner paths prioritized by platform compatibility (.dll and .exe)
 RUNNER_CANDIDATES = [
@@ -204,21 +218,27 @@ def verify_structural_transformations(
             errors="replace",
             timeout=10,
         )
-        if proc.returncode not in (0, 2):
-            return {
-                "verified": False,
-                "partial": False,
-                "status": "FAILED",
-                "verifier_returncode": proc.returncode,
-                "error": f"Structural verifier exited with code {proc.returncode}: {proc.stderr.strip()}",
-                "verified_transformations": [],
-                "unverified_transformations": [],
-            }
+        if proc.stdout.strip():
+            try:
+                parsed = json.loads(proc.stdout.strip())
+                parsed["verifier_returncode"] = proc.returncode
+                if proc.returncode == 3 or parsed.get("unverified") or parsed.get("status") == "UNVERIFIED":
+                    parsed["status"] = "UNVERIFIED"
+                else:
+                    parsed["status"] = "VERIFIED" if parsed.get("verified") else ("PARTIAL" if parsed.get("partial") else "FAILED")
+                return parsed
+            except json.JSONDecodeError:
+                pass
 
-        parsed = json.loads(proc.stdout.strip())
-        parsed["verifier_returncode"] = proc.returncode
-        parsed["status"] = "VERIFIED" if parsed.get("verified") else ("PARTIAL" if parsed.get("partial") else "FAILED")
-        return parsed
+        return {
+            "verified": False,
+            "partial": False,
+            "status": "FAILED",
+            "verifier_returncode": proc.returncode,
+            "error": f"Structural verifier exited with code {proc.returncode}: {proc.stderr.strip()}",
+            "verified_transformations": [],
+            "unverified_transformations": [],
+        }
     except Exception as ex:
         return {
             "verified": False,
@@ -598,10 +618,10 @@ def generate_markdown_report(summary: Dict[str, Any], report_path: Path):
     lines.append("> - `SYNTHETIC_PASS`: ConfuserExKillerRunner recognizes and deobfuscates specific synthetic IL and metadata patterns generated via dnlib.")
     lines.append("> - `SYNTHETIC_PARTIAL`: Output produced, execution succeeded with exit code 0 matching expected baseline, and audit clean, but specific documented transformations were unrecovered due to known ordering dependencies.")
     lines.append("> - `SYNTHETIC_FAIL`: Deobfuscator crashed, structural verification explicitly failed, runtime failed, or output mismatched.")
-    lines.append("> - `UNVERIFIED`: Structural verification tool was unavailable; output produced but unverifiable at AST level.")
+    lines.append("> - `UNVERIFIED`: Structural verification tool or required baseline was unavailable; output produced but unverified.")
     lines.append("> - `REAL_PROTECTOR_PASS`: Reserved exclusively for fixtures produced by a pinned, identified build of the ConfuserEx toolchain that have passed structural, audit, and runtime tests.")
     lines.append("> - `REAL_PROTECTOR_FAIL`: Protection or deobfuscation failed on a fixture produced by the pinned ConfuserEx toolchain.")
-    lines.append("> - `SKIPPED_TOOL_MISSING`: Specific external protector CLI was not provisioned; explicitly skipped and never counted as passed.")
+    lines.append("> - `SKIPPED_TOOL_MISSING`: Pinned external protector CLI was not provisioned; explicitly skipped and never counted as passed.")
     lines.append("> - **Execution Limits:** Process timeouts (30s deobfuscation, 5s runtime) serve as operational limits, not an operating-system-level sandbox.")
     lines.append("")
     lines.append(f"- **Total Benchmark Cases:** {summary['total_cases']}")

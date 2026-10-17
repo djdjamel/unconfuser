@@ -34,6 +34,35 @@ namespace FixtureGenerator
                     benignPath = Path.GetFullPath(args[++i]);
                 else if (args[i] == "--output-dir" && i + 1 < args.Length)
                     outputDir = Path.GetFullPath(args[++i]);
+                else if (args[i] == "--tamper-eh" && i + 2 < args.Length)
+                {
+                    string inPath = Path.GetFullPath(args[++i]);
+                    string outPath = Path.GetFullPath(args[++i]);
+                    using (var mod = ModuleDefMD.Load(inPath))
+                    {
+                        var worker = mod.Find("BenignSample.GenericWorker`1", false);
+                        var proc = worker?.FindMethod("Process");
+                        if (proc != null && proc.Body.ExceptionHandlers.Count > 0)
+                        {
+                            proc.Body.KeepOldMaxStack = true;
+                            var h = proc.Body.ExceptionHandlers[0];
+                            h.HandlerEnd = h.HandlerStart;
+                        }
+                        WriteModule(mod, outPath);
+                    }
+                    return 0;
+                }
+                else if (args[i] == "--tamper-res" && i + 2 < args.Length)
+                {
+                    string inPath = Path.GetFullPath(args[++i]);
+                    string outPath = Path.GetFullPath(args[++i]);
+                    using (var mod = ModuleDefMD.Load(inPath))
+                    {
+                        mod.Resources.Add(new EmbeddedResource("UnexpectedExtraResource.bin", new byte[] { 1, 2, 3 }));
+                        WriteModule(mod, outPath);
+                    }
+                    return 0;
+                }
             }
 
             if (!string.IsNullOrEmpty(verifyPath))
@@ -84,6 +113,7 @@ namespace FixtureGenerator
                 {
                     bool verified = false;
                     bool partial = false;
+                    bool unverified = false;
                     var verifiedTransformations = new List<string>();
                     var unverifiedTransformations = new List<string>();
                     string notes = "";
@@ -167,6 +197,15 @@ namespace FixtureGenerator
                                 var resourceNames = module.Resources.Select(r => r.Name.String).OrderBy(n => n).ToList();
                                 bool namesMatch = resourceNames.Count == 1 && resourceNames[0] == "BenignSample.Greeting.txt";
 
+                                if (!string.IsNullOrEmpty(baselinePath) && File.Exists(baselinePath))
+                                {
+                                    using (var baseModule = ModuleDefMD.Load(baselinePath))
+                                    {
+                                        var baseResNames = baseModule.Resources.Select(r => r.Name.String).OrderBy(n => n).ToList();
+                                        namesMatch = namesMatch && resourceNames.SequenceEqual(baseResNames);
+                                    }
+                                }
+
                                 if (namesMatch) verifiedTransformations.Add("resource_manifest_names_matched");
                                 else unverifiedTransformations.Add("resource_manifest_names_matched");
 
@@ -208,9 +247,14 @@ namespace FixtureGenerator
                                 bool allTypesPresent = hasProgram && hasFeatures && hasCalc && hasWorker && hasDecrypters && hasStandardCalc;
 
                                 bool baselineCompared = false;
-                                bool baselineMatched = true;
+                                bool baselineMatched = false;
 
-                                if (!string.IsNullOrEmpty(baselinePath) && File.Exists(baselinePath))
+                                if (string.IsNullOrEmpty(baselinePath) || !File.Exists(baselinePath))
+                                {
+                                    unverified = true;
+                                    unverifiedTransformations.Add("payload_types_entrypoint_and_required_resources_matched_baseline");
+                                }
+                                else
                                 {
                                     using (var baseModule = ModuleDefMD.Load(baselinePath))
                                     {
@@ -242,6 +286,14 @@ namespace FixtureGenerator
                                             || (module.EntryPoint != null && baseModule.EntryPoint != null && module.EntryPoint.Name == baseModule.EntryPoint.Name);
 
                                         baselineMatched = typesMatch && requiredResMatch && epMatch;
+                                        if (baselineMatched)
+                                        {
+                                            verifiedTransformations.Add("payload_types_entrypoint_and_required_resources_matched_baseline");
+                                        }
+                                        else
+                                        {
+                                            unverifiedTransformations.Add("payload_types_entrypoint_and_required_resources_matched_baseline");
+                                        }
                                     }
                                 }
 
@@ -254,16 +306,10 @@ namespace FixtureGenerator
                                 if (hasGreetingRes) verifiedTransformations.Add("payload_embedded_resources_restored");
                                 else unverifiedTransformations.Add("payload_embedded_resources_restored");
 
-                                if (baselineCompared)
-                                {
-                                    if (baselineMatched) verifiedTransformations.Add("full_metadata_and_content_matched_baseline");
-                                    else unverifiedTransformations.Add("full_metadata_and_content_matched_baseline");
-                                }
-
-                                verified = isNotStub && allTypesPresent && hasGreetingRes && baselineMatched;
+                                verified = isNotStub && allTypesPresent && hasGreetingRes && baselineMatched && !unverified;
                                 notes = baselineCompared
-                                    ? "Deflate container unwrapped and verified against reference BenignSample.dll: exact assembly identity, full type set (7 types), entry point, and byte-for-byte required embedded resource match."
-                                    : "Deflate container unwrapped and verified against known payload assembly types, identity, and required resources.";
+                                    ? "Deflate container unwrapped and verified against reference BenignSample.dll: assembly identity, top-level type set (7 types), entry point, and required embedded resource byte-for-byte match."
+                                    : "Deflate container unwrapped and verified against known payload assembly types, identity, and required resources (baseline comparison unverified).";
                             }
                             break;
 
@@ -335,7 +381,7 @@ namespace FixtureGenerator
 
                                 bool ehValid = false;
                                 bool baselineCompared = false;
-                                bool baselineMatched = true;
+                                bool baselineMatched = false;
 
                                 if (process != null && process.Body.HasExceptionHandlers && process.Body.ExceptionHandlers.Count == 2)
                                 {
@@ -352,7 +398,11 @@ namespace FixtureGenerator
 
                                     ehValid = catchMatches && finallyMatches;
 
-                                    if (!string.IsNullOrEmpty(baselinePath) && File.Exists(baselinePath))
+                                    if (string.IsNullOrEmpty(baselinePath) || !File.Exists(baselinePath))
+                                    {
+                                        unverified = true;
+                                    }
+                                    else
                                     {
                                         using (var baseModule = ModuleDefMD.Load(baselinePath))
                                         {
@@ -369,20 +419,58 @@ namespace FixtureGenerator
                                                     && process.ReturnType.FullName == baseProcess.ReturnType.FullName;
                                                 bool localsMatch = process.Body.Variables.Count == baseProcess.Body.Variables.Count;
 
-                                                bool catchRangeMatch = baseCatch != null && catchMatches
+                                                bool catchTypeMatch = baseCatch != null && catchMatches
                                                     && hCatch.HandlerType == baseCatch.HandlerType
                                                     && hCatch.CatchType?.FullName == baseCatch.CatchType?.FullName;
 
-                                                bool finallyRangeMatch = baseFinally != null && finallyMatches
+                                                bool finallyTypeMatch = baseFinally != null && finallyMatches
                                                     && hFinally.HandlerType == baseFinally.HandlerType;
 
-                                                baselineMatched = sigMatch && localsMatch && catchRangeMatch && finallyRangeMatch;
+                                                bool catchBoundariesMatch = catchTypeMatch
+                                                    && MatchSemanticInstruction(hCatch.TryStart, baseCatch.TryStart)
+                                                    && MatchSemanticInstruction(hCatch.TryEnd, baseCatch.TryEnd)
+                                                    && MatchSemanticInstruction(hCatch.HandlerStart, baseCatch.HandlerStart)
+                                                    && MatchSemanticInstruction(hCatch.HandlerEnd, baseCatch.HandlerEnd);
+
+                                                bool finallyBoundariesMatch = finallyTypeMatch
+                                                    && MatchSemanticInstruction(hFinally.TryStart, baseFinally.TryStart)
+                                                    && MatchSemanticInstruction(hFinally.TryEnd, baseFinally.TryEnd)
+                                                    && MatchSemanticInstruction(hFinally.HandlerStart, baseFinally.HandlerStart)
+                                                    && MatchSemanticInstruction(hFinally.HandlerEnd, baseFinally.HandlerEnd);
+
+                                                bool catchTryMatch = catchBoundariesMatch && MatchInstructionRanges(
+                                                    process.Body.Instructions, hCatch.TryStart, hCatch.TryEnd,
+                                                    baseProcess.Body.Instructions, baseCatch.TryStart, baseCatch.TryEnd);
+
+                                                bool catchHandlerMatch = catchBoundariesMatch && MatchInstructionRanges(
+                                                    process.Body.Instructions, hCatch.HandlerStart, hCatch.HandlerEnd,
+                                                    baseProcess.Body.Instructions, baseCatch.HandlerStart, baseCatch.HandlerEnd);
+
+                                                bool finallyTryMatch = finallyBoundariesMatch && MatchInstructionRanges(
+                                                    process.Body.Instructions, hFinally.TryStart, hFinally.TryEnd,
+                                                    baseProcess.Body.Instructions, baseFinally.TryStart, baseFinally.TryEnd);
+
+                                                bool finallyHandlerMatch = finallyBoundariesMatch && MatchInstructionRanges(
+                                                    process.Body.Instructions, hFinally.HandlerStart, hFinally.HandlerEnd,
+                                                    baseProcess.Body.Instructions, baseFinally.HandlerStart, baseFinally.HandlerEnd);
+
+                                                baselineMatched = sigMatch && localsMatch
+                                                    && catchBoundariesMatch && finallyBoundariesMatch
+                                                    && catchTryMatch && catchHandlerMatch
+                                                    && finallyTryMatch && finallyHandlerMatch;
                                             }
                                             else
                                             {
                                                 baselineMatched = false;
                                             }
                                         }
+                                    }
+                                }
+                                else
+                                {
+                                    if (string.IsNullOrEmpty(baselinePath) || !File.Exists(baselinePath))
+                                    {
+                                        unverified = true;
                                     }
                                 }
 
@@ -395,16 +483,19 @@ namespace FixtureGenerator
                                 if (ehValid) verifiedTransformations.Add("exception_handlers_try_and_handler_ranges_verified");
                                 else unverifiedTransformations.Add("exception_handlers_try_and_handler_ranges_verified");
 
-                                if (baselineCompared)
+                                if (baselineCompared && baselineMatched)
                                 {
-                                    if (baselineMatched) verifiedTransformations.Add("baseline_exception_handlers_matched");
-                                    else unverifiedTransformations.Add("baseline_exception_handlers_matched");
+                                    verifiedTransformations.Add("baseline_exception_handlers_matched");
+                                }
+                                else
+                                {
+                                    unverifiedTransformations.Add("baseline_exception_handlers_matched");
                                 }
 
-                                verified = hasGenericParam && returnTypeMatch && hasLocals && ehValid && baselineMatched;
+                                verified = hasGenericParam && returnTypeMatch && hasLocals && ehValid && baselineMatched && !unverified;
                                 notes = baselineCompared
-                                    ? "Generic method signature, local variables (3+), and exception-handler try/handler ranges (including TryStart/TryEnd and HandlerStart/HandlerEnd) verified against baseline assembly."
-                                    : "Generic method signature, local variables (3+), and exception-handler try/handler ranges (including TryStart/TryEnd and HandlerStart/HandlerEnd) structurally verified.";
+                                    ? "Generic method signature, local variables (3+), and exception-handler try/handler ranges (including semantic TryStart/TryEnd, HandlerStart/HandlerEnd targets, and instruction bodies) verified against baseline assembly."
+                                    : "Generic method signature, local variables (3+), and exception-handler try/handler ranges structurally verified (baseline comparison unavailable).";
                             }
                             break;
 
@@ -451,16 +542,20 @@ namespace FixtureGenerator
                     }
 
                     // Format JSON output
+                    string statusStr = verified ? "VERIFIED" : (unverified ? "UNVERIFIED" : (partial ? "PARTIAL" : "FAILED"));
                     string json = string.Format(
-                        "{{\"scenario\":\"{0}\",\"verified\":{1},\"partial\":{2},\"verified_transformations\":[{3}],\"unverified_transformations\":[{4}],\"notes\":\"{5}\"}}",
+                        "{{\"scenario\":\"{0}\",\"verified\":{1},\"partial\":{2},\"unverified\":{3},\"status\":\"{4}\",\"verified_transformations\":[{5}],\"unverified_transformations\":[{6}],\"notes\":\"{7}\"}}",
                         scenario,
                         verified ? "true" : "false",
                         partial ? "true" : "false",
+                        unverified ? "true" : "false",
+                        statusStr,
                         string.Join(",", verifiedTransformations.Select(s => $"\"{s}\"")),
                         string.Join(",", unverifiedTransformations.Select(s => $"\"{s}\"")),
                         notes.Replace("\"", "\\\"")
                     );
                     Console.WriteLine(json);
+                    if (unverified) return 3;
                     return verified ? 0 : (partial ? 2 : 1);
                 }
             }
@@ -471,9 +566,97 @@ namespace FixtureGenerator
             }
         }
 
+        private static bool MatchSemanticInstruction(Instruction a, Instruction b)
+        {
+            if (a == null && b == null) return true;
+            if (a == null || b == null) return false;
+            if (a.OpCode != b.OpCode) return false;
+
+            if (a.Operand == null && b.Operand == null) return true;
+            if (a.Operand == null || b.Operand == null) return false;
+
+            if (a.Operand is IMethod aMeth && b.Operand is IMethod bMeth)
+                return aMeth.FullName == bMeth.FullName;
+
+            if (a.Operand is IField aField && b.Operand is IField bField)
+                return aField.FullName == bField.FullName;
+
+            if (a.Operand is ITypeDefOrRef aType && b.Operand is ITypeDefOrRef bType)
+                return aType.FullName == bType.FullName;
+
+            if (a.Operand is string aStr && b.Operand is string bStr)
+                return aStr == bStr;
+
+            if (a.Operand is int aInt && b.Operand is int bInt)
+                return aInt == bInt;
+
+            if (a.Operand is long aLong && b.Operand is long bLong)
+                return aLong == bLong;
+
+            if (a.Operand is Instruction aTarget && b.Operand is Instruction bTarget)
+                return aTarget.OpCode == bTarget.OpCode;
+
+            if (a.Operand is Instruction[] aTargets && b.Operand is Instruction[] bTargets)
+            {
+                if (aTargets.Length != bTargets.Length) return false;
+                for (int i = 0; i < aTargets.Length; i++)
+                {
+                    if (aTargets[i]?.OpCode != bTargets[i]?.OpCode) return false;
+                }
+                return true;
+            }
+
+            return a.Operand.ToString() == b.Operand.ToString();
+        }
+
+        private static List<Instruction> GetRangeInstructions(IList<Instruction> allInstrs, Instruction start, Instruction end)
+        {
+            var list = new List<Instruction>();
+            if (start == null || allInstrs == null) return list;
+
+            int startIndex = allInstrs.IndexOf(start);
+            if (startIndex < 0) return list;
+
+            int endIndex = end != null ? allInstrs.IndexOf(end) : allInstrs.Count;
+            if (endIndex < 0) endIndex = allInstrs.Count;
+
+            for (int i = startIndex; i < endIndex; i++)
+            {
+                var inst = allInstrs[i];
+                if (inst.OpCode != OpCodes.Nop)
+                {
+                    list.Add(inst);
+                }
+            }
+            return list;
+        }
+
+        private static bool MatchInstructionRanges(
+            IList<Instruction> cleanInstrs, Instruction cleanStart, Instruction cleanEnd,
+            IList<Instruction> baseInstrs, Instruction baseStart, Instruction baseEnd)
+        {
+            if (!MatchSemanticInstruction(cleanStart, baseStart)) return false;
+            if (!MatchSemanticInstruction(cleanEnd, baseEnd)) return false;
+
+            var cleanRange = GetRangeInstructions(cleanInstrs, cleanStart, cleanEnd);
+            var baseRange = GetRangeInstructions(baseInstrs, baseStart, baseEnd);
+
+            if (cleanRange.Count != baseRange.Count) return false;
+
+            for (int i = 0; i < cleanRange.Count; i++)
+            {
+                if (!MatchSemanticInstruction(cleanRange[i], baseRange[i]))
+                    return false;
+            }
+
+            return true;
+        }
+
         private static void WriteModule(ModuleDef module, string destinationPath)
         {
             var writerOpts = new ModuleWriterOptions(module);
+            writerOpts.MetaDataOptions.Flags |= MetaDataFlags.KeepOldMaxStack;
+            writerOpts.Logger = DummyLogger.NoThrowInstance;
             module.Write(destinationPath, writerOpts);
             Console.WriteLine($"  [+] Created: {Path.GetFileName(destinationPath)} ({new FileInfo(destinationPath).Length} bytes)");
         }
