@@ -24,8 +24,12 @@ WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
 BENCHMARKS_DIR = WORKSPACE_ROOT / "benchmarks"
 FIXTURES_DIR = BENCHMARKS_DIR / "fixtures"
 BENIGN_DIR = BENCHMARKS_DIR / "BenignSample"
-BENIGN_DLL = BENIGN_DIR / "bin" / "Release" / "net8.0" / "BenignSample.dll"
-BENIGN_CONFIG = BENIGN_DIR / "bin" / "Release" / "net8.0" / "BenignSample.runtimeconfig.json"
+
+
+BENIGN_NET48_EXE = BENIGN_DIR / "bin" / "Release" / "net48" / "BenignSample.exe"
+BENIGN_NET8_DLL = BENIGN_DIR / "bin" / "Release" / "net8.0" / "BenignSample.dll"
+BENIGN_DLL = BENIGN_NET8_DLL if BENIGN_NET8_DLL.exists() else BENIGN_NET48_EXE
+BENIGN_CONFIG = BENIGN_NET8_DLL.parent / f"{BENIGN_NET8_DLL.stem}.runtimeconfig.json"
 PROFILE_CRPROJ = BENCHMARKS_DIR / "ConfuserExProfile" / "confuserex_v1.0.0.crproj"
 
 # Pinned ConfuserEx toolchain identity and immutable verification
@@ -136,10 +140,10 @@ def sha256_file(path: Path) -> str:
 def get_benign_baseline() -> str:
     """Executes the benign baseline in a restricted process to capture expected output."""
     if not BENIGN_DLL.exists():
-        raise FileNotFoundError(f"BenignSample.dll not found at {BENIGN_DLL}. Run dotnet build first.")
+        raise FileNotFoundError(f"BenignSample binary not found at {BENIGN_DLL}. Run dotnet build first.")
 
     res = subprocess.run(
-        ["dotnet", str(BENIGN_DLL), "test"],
+        get_exec_command(BENIGN_DLL) + ["test"],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -319,7 +323,7 @@ def run_benchmark_case(
         "verdict": fail_verdict,
     }
 
-    clean_output = fixture_path.parent / f"{fixture_path.stem}_clean.dll"
+    clean_output = fixture_path.parent / f"{fixture_path.stem}_clean{fixture_path.suffix}"
     if clean_output.exists():
         try:
             clean_output.unlink()
@@ -383,7 +387,7 @@ def run_benchmark_case(
 
         try:
             exec_proc = subprocess.run(
-                ["dotnet", str(clean_output), "test"],
+                get_exec_command(clean_output) + ["test"],
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",
@@ -540,14 +544,15 @@ def run_all_benchmarks(
             if cli_fixture_dir.exists():
                 shutil.rmtree(cli_fixture_dir, ignore_errors=True)
             cli_fixture_dir.mkdir(parents=True, exist_ok=True)
-            cli_output_file = cli_fixture_dir / "BenignSample.dll"
+            real_target_module = BENIGN_NET48_EXE if BENIGN_NET48_EXE.exists() else BENIGN_DLL
+            cli_output_file = cli_fixture_dir / real_target_module.name
 
             # Generate config project from template
             crproj_content = PROFILE_CRPROJ.read_text(encoding="utf-8")
             crproj_instance = crproj_content.format(
                 output_dir=str(cli_fixture_dir),
-                base_dir=str(BENIGN_DIR / "bin" / "Release" / "net8.0"),
-                module_path=str(BENIGN_DLL),
+                base_dir=str(real_target_module.parent),
+                module_path=str(real_target_module),
             )
             instance_crproj_path = cli_fixture_dir / "confuser_run.crproj"
             instance_crproj_path.write_text(crproj_instance, encoding="utf-8")
@@ -568,7 +573,7 @@ def run_all_benchmarks(
                         "real_confuserex",
                         runner_path,
                         expected_baseline,
-                        baseline_dll_path=BENIGN_DLL,
+                        baseline_dll_path=real_target_module,
                         is_synthetic=False,
                     )
                     results.append(res)

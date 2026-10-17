@@ -27,11 +27,11 @@ namespace BenignSample
             {
                 if (localVal == 0)
                     throw new InvalidOperationException("Zero multiplier encountered");
-                return $"GENERIC_WORKER:{Data}:{tag}:{status}:{localVal}";
+                return string.Format("GENERIC_WORKER:{0}:{1}:{2}:{3}", Data, tag, status, localVal);
             }
             catch (Exception ex)
             {
-                return $"CAUGHT:{ex.Message}:{status}";
+                return string.Format("CAUGHT:{0}:{1}", ex.Message, status);
             }
             finally
             {
@@ -111,11 +111,11 @@ namespace BenignSample
             if (args.Length > 0 && args[0] == "test")
             {
                 Console.WriteLine("BENIGN_START");
-                Console.WriteLine($"CONST_STR:{BenignFeatures.GetStringConstant()}");
-                Console.WriteLine($"CONST_NUM:{BenignFeatures.GetNumericConstant1()}:{BenignFeatures.GetNumericConstant2()}");
-                Console.WriteLine($"CFLOW:{BenignFeatures.ComputeSwitch(2, 50)}:{BenignFeatures.ComputeSwitch(1, 20)}:{BenignFeatures.ComputeSwitch(3, 40)}:{BenignFeatures.ComputeSwitch(99, 10)}");
-                Console.WriteLine($"PROXY:{BenignFeatures.ExecuteProxy(30, 12)}");
-                Console.WriteLine($"RESOURCE:{BenignFeatures.ReadEmbeddedGreeting()}");
+                Console.WriteLine("CONST_STR:" + BenignFeatures.GetStringConstant());
+                Console.WriteLine("CONST_NUM:" + BenignFeatures.GetNumericConstant1() + ":" + BenignFeatures.GetNumericConstant2());
+                Console.WriteLine("CFLOW:" + BenignFeatures.ComputeSwitch(2, 50) + ":" + BenignFeatures.ComputeSwitch(1, 20) + ":" + BenignFeatures.ComputeSwitch(3, 40) + ":" + BenignFeatures.ComputeSwitch(99, 10));
+                Console.WriteLine("PROXY:" + BenignFeatures.ExecuteProxy(30, 12));
+                Console.WriteLine("RESOURCE:" + BenignFeatures.ReadEmbeddedGreeting());
 
                 var worker = new GenericWorker<string> { Data = "ITEM_PAYLOAD" };
                 Console.WriteLine(worker.Process("TAG_99", 5));

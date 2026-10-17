@@ -41,6 +41,9 @@ jobs:
     - name: Generate Deobfuscation Benchmark Fixtures
       run: dotnet .\benchmarks\FixtureGenerator\bin\Release\net8.0-windows\FixtureGenerator.dll --input benchmarks\BenignSample\bin\Release\net8.0\BenignSample.dll --output-dir benchmarks\fixtures
 
+    - name: Provision ConfuserEx Toolchain
+      run: python benchmarks/provision_confuserex.py
+
     - name: Run Deobfuscation Benchmark Suite
       run: python benchmarks/run_benchmark.py
 

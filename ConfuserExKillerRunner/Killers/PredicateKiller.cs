@@ -47,7 +47,9 @@ namespace ConfuserExKillerRunner.Killers
                             passChanged = false;
                             iterations++;
 
-                            int foldedConsts = FoldConstants(method.Body.Instructions);
+                            var branchTargets = CollectBranchTargets(method.Body);
+
+                            int foldedConsts = FoldConstants(method.Body.Instructions, branchTargets);
                             if (foldedConsts > 0)
                             {
                                 methodConstantsFolded += foldedConsts;
@@ -55,7 +57,7 @@ namespace ConfuserExKillerRunner.Killers
                                 modified = true;
                             }
 
-                            int simplifiedIdents = FoldAlgebraicIdentities(method.Body.Instructions);
+                            int simplifiedIdents = FoldAlgebraicIdentities(method.Body.Instructions, branchTargets);
                             if (simplifiedIdents > 0)
                             {
                                 methodIdentitiesSimplified += simplifiedIdents;
@@ -63,7 +65,7 @@ namespace ConfuserExKillerRunner.Killers
                                 modified = true;
                             }
 
-                            int resolvedBranches = EvaluateConstantBranches(method.Body.Instructions);
+                            int resolvedBranches = EvaluateConstantBranches(method.Body.Instructions, branchTargets);
                             if (resolvedBranches > 0)
                             {
                                 methodBranchesResolved += resolvedBranches;
@@ -100,7 +102,40 @@ namespace ConfuserExKillerRunner.Killers
             return result;
         }
 
-        private static int FoldConstants(IList<Instruction> instrs)
+        private static HashSet<Instruction> CollectBranchTargets(CilBody body)
+        {
+            var targets = new HashSet<Instruction>();
+            foreach (var inst in body.Instructions)
+            {
+                if (inst.Operand is Instruction singleTarget && singleTarget != null)
+                {
+                    targets.Add(singleTarget);
+                }
+                else if (inst.Operand is IList<Instruction> multiTargets)
+                {
+                    foreach (var t in multiTargets)
+                    {
+                        if (t != null) targets.Add(t);
+                    }
+                }
+            }
+
+            if (body.HasExceptionHandlers)
+            {
+                foreach (var eh in body.ExceptionHandlers)
+                {
+                    if (eh.TryStart != null) targets.Add(eh.TryStart);
+                    if (eh.TryEnd != null) targets.Add(eh.TryEnd);
+                    if (eh.HandlerStart != null) targets.Add(eh.HandlerStart);
+                    if (eh.HandlerEnd != null) targets.Add(eh.HandlerEnd);
+                    if (eh.FilterStart != null) targets.Add(eh.FilterStart);
+                }
+            }
+
+            return targets;
+        }
+
+        private static int FoldConstants(IList<Instruction> instrs, HashSet<Instruction> branchTargets)
         {
             int folded = 0;
 
@@ -112,6 +147,8 @@ namespace ConfuserExKillerRunner.Killers
                 // Unary operations: ldc.i4 -> neg / not
                 if (instr.OpCode == OpCodes.Neg || instr.OpCode == OpCodes.Not)
                 {
+                    if (branchTargets.Contains(instr)) continue;
+
                     int prevIdx = FindPreviousNonNop(instrs, i);
                     if (prevIdx >= 0 && instrs[prevIdx].IsLdcI4())
                     {
@@ -130,9 +167,13 @@ namespace ConfuserExKillerRunner.Killers
                 // Binary arithmetic / bitwise operations
                 if (IsBinaryArithmetic(instr.OpCode))
                 {
+                    if (branchTargets.Contains(instr)) continue;
+
                     int rightIdx = FindPreviousNonNop(instrs, i);
                     if (rightIdx >= 0 && instrs[rightIdx].IsLdcI4())
                     {
+                        if (branchTargets.Contains(instrs[rightIdx])) continue;
+
                         int leftIdx = FindPreviousNonNop(instrs, rightIdx);
                         if (leftIdx >= 0 && instrs[leftIdx].IsLdcI4())
                         {
@@ -158,7 +199,7 @@ namespace ConfuserExKillerRunner.Killers
             return folded;
         }
 
-        private static int FoldAlgebraicIdentities(IList<Instruction> instrs)
+        private static int FoldAlgebraicIdentities(IList<Instruction> instrs, HashSet<Instruction> branchTargets)
         {
             int simplified = 0;
 
@@ -170,6 +211,8 @@ namespace ConfuserExKillerRunner.Killers
                 // Identity: dup; xor => pop; ldc.i4.0 (x ^ x == 0)
                 if (instr.OpCode == OpCodes.Xor)
                 {
+                    if (branchTargets.Contains(instr)) continue;
+
                     int prevIdx = FindPreviousNonNop(instrs, i);
                     if (prevIdx >= 0 && instrs[prevIdx].OpCode == OpCodes.Dup)
                     {
@@ -184,9 +227,13 @@ namespace ConfuserExKillerRunner.Killers
                 // Pattern: dup; ldc.i4.1; add; mul; ldc.i4.2; rem (or ldc.i4.1; and)
                 if ((instr.OpCode == OpCodes.Rem || instr.OpCode == OpCodes.Rem_Un || instr.OpCode == OpCodes.And))
                 {
+                    if (branchTargets.Contains(instr)) continue;
+
                     int p1 = FindPreviousNonNop(instrs, i); // divisor / mask
                     if (p1 >= 0 && instrs[p1].IsLdcI4())
                     {
+                        if (branchTargets.Contains(instrs[p1])) continue;
+
                         int divisor = instrs[p1].GetLdcI4Value();
                         bool matchesModulo = (instr.OpCode == OpCodes.And && divisor == 1) ||
                                              ((instr.OpCode == OpCodes.Rem || instr.OpCode == OpCodes.Rem_Un) && divisor == 2);
@@ -196,12 +243,18 @@ namespace ConfuserExKillerRunner.Killers
                             int p2 = FindPreviousNonNop(instrs, p1); // mul
                             if (p2 >= 0 && instrs[p2].OpCode == OpCodes.Mul)
                             {
+                                if (branchTargets.Contains(instrs[p2])) continue;
+
                                 int p3 = FindPreviousNonNop(instrs, p2); // add
                                 if (p3 >= 0 && instrs[p3].OpCode == OpCodes.Add)
                                 {
+                                    if (branchTargets.Contains(instrs[p3])) continue;
+
                                     int p4 = FindPreviousNonNop(instrs, p3); // ldc.i4.1
                                     if (p4 >= 0 && instrs[p4].IsLdcI4() && instrs[p4].GetLdcI4Value() == 1)
                                     {
+                                        if (branchTargets.Contains(instrs[p4])) continue;
+
                                         int p5 = FindPreviousNonNop(instrs, p4); // dup
                                         if (p5 >= 0 && instrs[p5].OpCode == OpCodes.Dup)
                                         {
@@ -230,7 +283,7 @@ namespace ConfuserExKillerRunner.Killers
             return simplified;
         }
 
-        private static int EvaluateConstantBranches(IList<Instruction> instrs)
+        private static int EvaluateConstantBranches(IList<Instruction> instrs, HashSet<Instruction> branchTargets)
         {
             int resolved = 0;
 
@@ -243,6 +296,8 @@ namespace ConfuserExKillerRunner.Killers
                 if (instr.OpCode == OpCodes.Brtrue || instr.OpCode == OpCodes.Brtrue_S ||
                     instr.OpCode == OpCodes.Brfalse || instr.OpCode == OpCodes.Brfalse_S)
                 {
+                    if (branchTargets.Contains(instr)) continue;
+
                     int prevIdx = FindPreviousNonNop(instrs, i);
                     if (prevIdx >= 0 && instrs[prevIdx].IsLdcI4())
                     {
@@ -270,9 +325,13 @@ namespace ConfuserExKillerRunner.Killers
                 // 2) Two-operand conditional branches: beq, bne.un, bge, bgt, ble, blt
                 if (IsTwoOperandBranch(instr.OpCode))
                 {
+                    if (branchTargets.Contains(instr)) continue;
+
                     int rightIdx = FindPreviousNonNop(instrs, i);
                     if (rightIdx >= 0 && instrs[rightIdx].IsLdcI4())
                     {
+                        if (branchTargets.Contains(instrs[rightIdx])) continue;
+
                         int leftIdx = FindPreviousNonNop(instrs, rightIdx);
                         if (leftIdx >= 0 && instrs[leftIdx].IsLdcI4())
                         {

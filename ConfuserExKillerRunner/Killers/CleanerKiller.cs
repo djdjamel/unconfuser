@@ -111,6 +111,8 @@ namespace ConfuserExKillerRunner.Killers
             bool hasDebuggerCheck = false;
             bool hasSectionLoop = false;
             bool hasHINSTANCE = false;
+            bool hasResourceResolve = false;
+            bool hasInitializeArray = false;
 
             foreach (var inst in method.Body.Instructions)
             {
@@ -125,6 +127,11 @@ namespace ConfuserExKillerRunner.Killers
                         hasDebuggerCheck = true;
                     if (fullName.IndexOf("VirtualProtect", StringComparison.OrdinalIgnoreCase) >= 0)
                         hasVirtualProtect = true;
+                    if (fullName.IndexOf("add_ResourceResolve", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        fullName.IndexOf("add_AssemblyResolve", StringComparison.OrdinalIgnoreCase) >= 0)
+                        hasResourceResolve = true;
+                    if (fullName.IndexOf("InitializeArray", StringComparison.OrdinalIgnoreCase) >= 0)
+                        hasInitializeArray = true;
                 }
 
                 if (inst.OpCode == OpCodes.Ldfld || inst.OpCode == OpCodes.Stfld)
@@ -140,6 +147,10 @@ namespace ConfuserExKillerRunner.Killers
                 return "Anti-Debug";
             if (hasVirtualProtect)
                 return "Anti-Dump";
+            if (hasResourceResolve)
+                return "Resource-Resolver";
+            if (hasInitializeArray)
+                return "Constant-Buffer";
 
             return null;
         }
