@@ -26,6 +26,9 @@ build/
 *.cexk-cleaned.dll
 *_final.dll
 *.orig.dll
+*.candidate.*
+benchmarks/fixtures/
+scratch/
 
 # OS files
 Thumbs.db

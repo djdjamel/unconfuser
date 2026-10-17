@@ -38,8 +38,15 @@ jobs:
     - name: Run C# Unit Tests
       run: dotnet test unconfuser.sln -c Release --no-build --verbosity normal
 
+    - name: Generate Deobfuscation Benchmark Fixtures
+      run: .\benchmarks\FixtureGenerator\bin\Release\net8.0-windows\FixtureGenerator.exe --input benchmarks\BenignSample\bin\Release\net8.0\BenignSample.dll --output-dir benchmarks\fixtures
+
+    - name: Run Deobfuscation Benchmark Suite
+      run: python benchmarks/run_benchmark.py
+
     - name: Run Python Pytest Suite
       run: python -m pytest tests -v
 
     - name: Run Python Detector Regression Suite
       run: python test_detector.py
+
