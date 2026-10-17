@@ -27,6 +27,14 @@ BENIGN_DLL = BENIGN_DIR / "bin" / "Release" / "net8.0" / "BenignSample.dll"
 BENIGN_CONFIG = BENIGN_DIR / "bin" / "Release" / "net8.0" / "BenignSample.runtimeconfig.json"
 PROFILE_CRPROJ = BENCHMARKS_DIR / "ConfuserExProfile" / "confuserex_v1.0.0.crproj"
 
+# Pinned ConfuserEx toolchain identity and immutable verification
+CONFUSEREX_PINNED_RELEASE = "v1.0.0 (Release 36eb45d)"
+CONFUSEREX_EXPECTED_SHA256 = os.environ.get(
+    "CONFUSEREX_SHA256",
+    # Official Release v1.0.0 Confuser.CLI.exe SHA-256
+    "3810c9d7496ef9f244199baee6a666e85eefb9db2f3ba9e89d6b2cba1608be92",
+)
+
 # Candidate runner paths prioritized by platform compatibility (.dll and .exe)
 RUNNER_CANDIDATES = [
     WORKSPACE_ROOT / "ConfuserExKillerRunner" / "bin" / "Release" / "net8.0-windows" / "ConfuserExKillerRunner.dll",
@@ -124,7 +132,7 @@ def parse_runner_metrics(stdout: str) -> Dict[str, Any]:
             parts = line_clean.split("SwitchKiller:")[-1].strip().split()
             if parts and parts[0].isdigit():
                 metrics["switches_resolved"] = int(parts[0])
-        elif "DeadCodeStripper" in line_clean and "Optimized" in line_clean:
+        elif line_clean.startswith("[+] DeadCodeStripper") and "Optimized" in line_clean:
             try:
                 opt_part = line_clean.split("Optimized")[-1].strip().split()[0]
                 metrics["deadcode_optimized_methods"] += int(opt_part)
@@ -168,7 +176,9 @@ def parse_runner_metrics(stdout: str) -> Dict[str, Any]:
     return metrics
 
 
-def verify_structural_transformations(clean_path: Path, scenario: str) -> Dict[str, Any]:
+def verify_structural_transformations(
+    clean_path: Path, scenario: str, baseline_path: Optional[Path] = None
+) -> Dict[str, Any]:
     """Uses FixtureGenerator --verify to check AST-level IL and metadata transformations."""
     generator = find_generator()
     if not generator or not generator.exists():
@@ -183,6 +193,9 @@ def verify_structural_transformations(clean_path: Path, scenario: str) -> Dict[s
         }
 
     cmd = get_exec_command(generator) + ["--verify", str(clean_path), "--scenario", scenario]
+    if baseline_path and baseline_path.exists():
+        cmd.extend(["--baseline", str(baseline_path)])
+
     try:
         proc = subprocess.run(
             cmd,
@@ -223,11 +236,15 @@ def run_benchmark_case(
     scenario: str,
     runner_path: Path,
     expected_baseline: str,
+    baseline_dll_path: Optional[Path] = None,
     is_synthetic: bool = True,
     timeout_sec: int = 30,
 ) -> Dict[str, Any]:
     fail_verdict = "SYNTHETIC_FAIL" if is_synthetic else "REAL_PROTECTOR_FAIL"
     pass_verdict = "SYNTHETIC_PASS" if is_synthetic else "REAL_PROTECTOR_PASS"
+
+    if baseline_dll_path is None:
+        baseline_dll_path = BENIGN_DLL
 
     record: Dict[str, Any] = {
         "case_name": case_name,
@@ -300,18 +317,9 @@ def run_benchmark_case(
         record["output_sha256"] = sha256_file(clean_output)
 
         # 1. Deep Structural Verification (AST / IL / Metadata inspection)
-        if scenario == "real_confuserex":
-            # For real ConfuserEx CLI, check that output is clean and runs
-            record["structural_verification"] = {
-                "verified": True,
-                "partial": False,
-                "status": "VERIFIED",
-                "verified_transformations": ["real_confuserex_cli_deobfuscated"],
-                "unverified_transformations": [],
-                "notes": "Verified against real ConfuserEx CLI protected assembly.",
-            }
-        else:
-            record["structural_verification"] = verify_structural_transformations(clean_output, scenario)
+        record["structural_verification"] = verify_structural_transformations(
+            clean_output, scenario, baseline_path=baseline_dll_path
+        )
 
         # 2. Behavioral verification in separate process with 5s execution limit
         runtime_config_dest = fixture_path.parent / f"{clean_output.stem}.runtimeconfig.json"
@@ -398,7 +406,7 @@ def run_all_benchmarks(
     # Defined deterministic benchmark cases (8 synthetic patterns)
     cases = [
         ("Constants (Strings & Numerics)", fixtures_dir / "fixture_constants.dll", "constants"),
-        ("Control Flow & Trampolines", fixtures_dir / "fixture_cflow.dll", "cflow"),
+        ("Control Flow (Dead Code & Junk Stripping)", fixtures_dir / "fixture_cflow.dll", "cflow"),
         ("Reference & Method Call Proxies", fixtures_dir / "fixture_proxies.dll", "proxies"),
         ("Encrypted Resources", fixtures_dir / "fixture_resources.dll", "resources"),
         ("Deflate Compressor Unpacker", fixtures_dir / "fixture_compressor.dll", "compressor"),
@@ -431,50 +439,101 @@ def run_all_benchmarks(
             })
             continue
 
-        res = run_benchmark_case(case_name, fixture_path, scenario, runner_path, expected_baseline, is_synthetic=True)
+        res = run_benchmark_case(
+            case_name,
+            fixture_path,
+            scenario,
+            runner_path,
+            expected_baseline,
+            baseline_dll_path=BENIGN_DLL,
+            is_synthetic=True,
+        )
         results.append(res)
 
     # 9. Real ConfuserEx CLI Preset: Always included in results, whether tool is present or missing
     confuser_cli_env = os.environ.get("CONFUSEREX_PATH")
     confuser_cli_path = Path(confuser_cli_env) if confuser_cli_env else WORKSPACE_ROOT / "tools" / "ConfuserEx" / "Confuser.CLI.exe"
+    real_case_name = f"ConfuserEx {CONFUSEREX_PINNED_RELEASE} (Constants, Ctrl Flow, Ref Proxy, Resources)"
 
     if confuser_cli_path.exists():
-        # Tool is provisioned: run genuine protection and deobfuscation
-        cli_fixture_dir = fixtures_dir / "real_confuserex"
-        cli_fixture_dir.mkdir(parents=True, exist_ok=True)
-        cli_output_file = cli_fixture_dir / "BenignSample.dll"
+        # Verify immutable identity before execution
+        cli_sha = sha256_file(confuser_cli_path)
+        if CONFUSEREX_EXPECTED_SHA256 and cli_sha.lower() != CONFUSEREX_EXPECTED_SHA256.lower():
+            results.append({
+                "case_name": real_case_name,
+                "fixture_name": "BenignSample.dll",
+                "scenario": "real_confuserex",
+                "is_synthetic": False,
+                "input_sha256": cli_sha,
+                "output_produced": False,
+                "output_sha256": None,
+                "deobfuscator_returncode": None,
+                "metrics": {},
+                "audit_status": "FAILED",
+                "behavioral_match": False,
+                "execution_returncode": None,
+                "structural_verification": {},
+                "error": f"Confuser.CLI.exe SHA-256 identity verification failed. Expected {CONFUSEREX_EXPECTED_SHA256}, got {cli_sha}.",
+                "verdict": "REAL_PROTECTOR_FAIL",
+            })
+        else:
+            # Clean output directory for each run to prevent stale protected outputs from being reused
+            cli_fixture_dir = fixtures_dir / "real_confuserex"
+            if cli_fixture_dir.exists():
+                shutil.rmtree(cli_fixture_dir, ignore_errors=True)
+            cli_fixture_dir.mkdir(parents=True, exist_ok=True)
+            cli_output_file = cli_fixture_dir / "BenignSample.dll"
 
-        # Generate config project from template
-        crproj_content = PROFILE_CRPROJ.read_text(encoding="utf-8")
-        crproj_instance = crproj_content.format(
-            output_dir=str(cli_fixture_dir),
-            base_dir=str(BENIGN_DIR / "bin" / "Release" / "net8.0"),
-            module_path=str(BENIGN_DLL),
-        )
-        instance_crproj_path = cli_fixture_dir / "confuser_run.crproj"
-        instance_crproj_path.write_text(crproj_instance, encoding="utf-8")
-
-        try:
-            prot_proc = subprocess.run(
-                [str(confuser_cli_path), "-n", str(instance_crproj_path)],
-                capture_output=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=60,
+            # Generate config project from template
+            crproj_content = PROFILE_CRPROJ.read_text(encoding="utf-8")
+            crproj_instance = crproj_content.format(
+                output_dir=str(cli_fixture_dir),
+                base_dir=str(BENIGN_DIR / "bin" / "Release" / "net8.0"),
+                module_path=str(BENIGN_DLL),
             )
-            if prot_proc.returncode == 0 and cli_output_file.exists():
-                res = run_benchmark_case(
-                    "Full ConfuserEx CLI Preset (v1.0.0 Pinned)",
-                    cli_output_file,
-                    "real_confuserex",
-                    runner_path,
-                    expected_baseline,
-                    is_synthetic=False,
+            instance_crproj_path = cli_fixture_dir / "confuser_run.crproj"
+            instance_crproj_path.write_text(crproj_instance, encoding="utf-8")
+
+            try:
+                prot_proc = subprocess.run(
+                    [str(confuser_cli_path), "-n", str(instance_crproj_path)],
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=60,
                 )
-                results.append(res)
-            else:
+                if prot_proc.returncode == 0 and cli_output_file.exists():
+                    res = run_benchmark_case(
+                        real_case_name,
+                        cli_output_file,
+                        "real_confuserex",
+                        runner_path,
+                        expected_baseline,
+                        baseline_dll_path=BENIGN_DLL,
+                        is_synthetic=False,
+                    )
+                    results.append(res)
+                else:
+                    results.append({
+                        "case_name": real_case_name,
+                        "fixture_name": "BenignSample.dll",
+                        "scenario": "real_confuserex",
+                        "is_synthetic": False,
+                        "input_sha256": "N/A",
+                        "output_produced": False,
+                        "output_sha256": None,
+                        "deobfuscator_returncode": None,
+                        "metrics": {},
+                        "audit_status": "FAILED",
+                        "behavioral_match": False,
+                        "execution_returncode": None,
+                        "structural_verification": {},
+                        "error": f"Confuser.CLI.exe protection failed: {prot_proc.stderr.strip()[:200]}",
+                        "verdict": "REAL_PROTECTOR_FAIL",
+                    })
+            except Exception as ex:
                 results.append({
-                    "case_name": "Full ConfuserEx CLI Preset (v1.0.0 Pinned)",
+                    "case_name": real_case_name,
                     "fixture_name": "BenignSample.dll",
                     "scenario": "real_confuserex",
                     "is_synthetic": False,
@@ -487,32 +546,14 @@ def run_all_benchmarks(
                     "behavioral_match": False,
                     "execution_returncode": None,
                     "structural_verification": {},
-                    "error": f"Confuser.CLI.exe protection failed: {prot_proc.stderr.strip()[:200]}",
+                    "error": f"Confuser.CLI.exe execution exception: {str(ex)}",
                     "verdict": "REAL_PROTECTOR_FAIL",
                 })
-        except Exception as ex:
-            results.append({
-                "case_name": "Full ConfuserEx CLI Preset (v1.0.0 Pinned)",
-                "fixture_name": "BenignSample.dll",
-                "scenario": "real_confuserex",
-                "is_synthetic": False,
-                "input_sha256": "N/A",
-                "output_produced": False,
-                "output_sha256": None,
-                "deobfuscator_returncode": None,
-                "metrics": {},
-                "audit_status": "FAILED",
-                "behavioral_match": False,
-                "execution_returncode": None,
-                "structural_verification": {},
-                "error": f"Confuser.CLI.exe execution exception: {str(ex)}",
-                "verdict": "REAL_PROTECTOR_FAIL",
-            })
     else:
         # Tool is not provisioned: explicitly record SKIPPED_TOOL_MISSING with clear reason
         results.append({
-            "case_name": "Full ConfuserEx CLI Preset (v1.0.0 Pinned)",
-            "fixture_name": "fixture_confuserex_cli.dll",
+            "case_name": real_case_name,
+            "fixture_name": "BenignSample.dll",
             "scenario": "real_confuserex",
             "is_synthetic": False,
             "input_sha256": "N/A",
@@ -524,7 +565,7 @@ def run_all_benchmarks(
             "behavioral_match": False,
             "execution_returncode": None,
             "structural_verification": {},
-            "error": "Confuser.CLI.exe (pinned ConfuserEx v1.0.0) not found in tools/ConfuserEx or CONFUSEREX_PATH.",
+            "error": f"Confuser.CLI.exe ({CONFUSEREX_PINNED_RELEASE}, expected SHA-256: {CONFUSEREX_EXPECTED_SHA256[:16]}...) not found in tools/ConfuserEx or CONFUSEREX_PATH.",
             "verdict": "SKIPPED_TOOL_MISSING",
         })
 
@@ -558,7 +599,8 @@ def generate_markdown_report(summary: Dict[str, Any], report_path: Path):
     lines.append("> - `SYNTHETIC_PARTIAL`: Output produced, execution succeeded with exit code 0 matching expected baseline, and audit clean, but specific documented transformations were unrecovered due to known ordering dependencies.")
     lines.append("> - `SYNTHETIC_FAIL`: Deobfuscator crashed, structural verification explicitly failed, runtime failed, or output mismatched.")
     lines.append("> - `UNVERIFIED`: Structural verification tool was unavailable; output produced but unverifiable at AST level.")
-    lines.append("> - `REAL_PROTECTOR_PASS`: Reserved exclusively for fixtures produced by a pinned, identified build of the ConfuserEx toolchain.")
+    lines.append("> - `REAL_PROTECTOR_PASS`: Reserved exclusively for fixtures produced by a pinned, identified build of the ConfuserEx toolchain that have passed structural, audit, and runtime tests.")
+    lines.append("> - `REAL_PROTECTOR_FAIL`: Protection or deobfuscation failed on a fixture produced by the pinned ConfuserEx toolchain.")
     lines.append("> - `SKIPPED_TOOL_MISSING`: Specific external protector CLI was not provisioned; explicitly skipped and never counted as passed.")
     lines.append("> - **Execution Limits:** Process timeouts (30s deobfuscation, 5s runtime) serve as operational limits, not an operating-system-level sandbox.")
     lines.append("")
@@ -601,43 +643,26 @@ def generate_markdown_report(summary: Dict[str, Any], report_path: Path):
     lines.append("")
     lines.append("## Detailed Structural Assertions & Findings")
     lines.append("")
-    lines.append("### 1. Constants (Strings & Numerics) (`SYNTHETIC_PASS`)")
-    lines.append("- **Coverage:** `System.String`, `System.Int32`, `System.Int64`.")
-    lines.append("- **Assertions:** `GetStringConstant` contains exact string; `GetNumericConstant1` contains exact int32 (133742); `GetNumericConstant2` contains exact int64 (9223372036854775800L); exactly 3 constants decrypted; call sites to `<Module>.Decrypter<T>` eliminated.")
-    lines.append("- **Status:** Fully verified at AST level and runtime behavior.")
-    lines.append("")
-    lines.append("### 2. Control Flow & Trampolines (`SYNTHETIC_PASS`)")
-    lines.append("- **Assertions:** Dummy stack-neutral junk pairs (`ldc.i4 8888` + `pop`) stripped from `ComputeSwitch`; branch evaluation preserved.")
-    lines.append("- **Status:** Fully verified at AST level and runtime behavior.")
-    lines.append("")
-    lines.append("### 3. Reference & Method Call Proxies (`SYNTHETIC_PASS`)")
-    lines.append("- **Assertions:** `ExecuteProxy` rewritten to directly call `AddProxyTarget`; intermediate `PrivateScope` proxy call eliminated; proxy method definition pruned.")
-    lines.append("- **Status:** Fully verified at AST level and runtime behavior.")
-    lines.append("")
-    lines.append("### 4. Encrypted Resources (`SYNTHETIC_PASS`)")
-    lines.append("- **Assertions:** Decrypted resource module extracted; manifest resource names match exactly; `BenignSample.Greeting.txt` re-embedded with exact byte-for-byte comparison (no `.Trim()`).")
-    lines.append("- **Status:** Fully verified at AST level and runtime behavior.")
-    lines.append("")
-    lines.append("### 5. Deflate Compressor Unpacker (`SYNTHETIC_PASS`)")
-    lines.append("- **Assertions:** Container stub unwrapped; target assembly identity restored from `CompressorStubAsm` back to `BenignSample`; full type set and embedded resources verified against known payload assembly.")
-    lines.append("- **Status:** Fully verified at AST level and runtime behavior.")
-    lines.append("")
-    lines.append("### 6. Anti-Tamper & Cleaner Hooks (`SYNTHETIC_PASS`)")
-    lines.append("- **Assertions:** Module initializer hook removed from `<Module>.cctor`; unused `ConfuserAntiTamper` method pruned by `CleanerKiller`.")
-    lines.append("- **Scope Clarification:** Verifies `CleanerKiller` initializer stripping and method pruning. Does not simulate or claim raw native PE section decryption of ConfuserEx native anti-tamper runtime.")
-    lines.append("")
-    lines.append("### 7. Combined Multi-Protection (`SYNTHETIC_PARTIAL`)")
-    lines.append("- **Verified Transformations:** Proxies inlined, deadcode stripped, anti-tamper hook stripped from `<Module>.cctor`.")
-    lines.append("- **Unverified Transformation:** Constant decryption was **NOT** completed.")
-    lines.append("- **Documented Limitation:** In this synthetic fixture, the module initializer hook causes `TypeInitializationException` when loaded into Reflection by `ConstantKiller`. This blocks constant decryption even though proxy inlining, dead code stripping, and hook removal succeed. Runtime execution exits with code 0 and matches baseline.")
-    lines.append("")
-    lines.append("### 8. Generics & Exception Edges (`SYNTHETIC_PASS`)")
-    lines.append("- **Assertions:** Generic method signature `Process<U>`, local variables (3+), and nested `try-catch-finally` exception handlers structure verified against known baseline.")
-    lines.append("- **Status:** Fully verified at AST level and runtime behavior.")
-    lines.append("")
-    lines.append("### 9. Real ConfuserEx CLI Integration (`SKIPPED_TOOL_MISSING`)")
-    lines.append("- **Status:** Explicitly tracked as `SKIPPED_TOOL_MISSING` when `Confuser.CLI.exe` (pinned ConfuserEx v1.0.0) is not provisioned in `tools/ConfuserEx/` or `CONFUSEREX_PATH`.")
-    lines.append("")
+
+    for idx, r in enumerate(summary["results"], 1):
+        lines.append(f"### {idx}. {r['case_name']} (`{r['verdict']}`)")
+        beh_desc = "Exact Match" if r["behavioral_match"] else ("Skipped" if "SKIPPED" in r["verdict"] else "Mismatch / Failed")
+        lines.append(f"- **Verdict:** `{r['verdict']}` | **Audit Status:** `{r['audit_status']}` | **Runtime Behavior:** `{beh_desc}`")
+
+        v_data = r.get("structural_verification", {})
+        verified_ts = v_data.get("verified_transformations", [])
+        unverified_ts = v_data.get("unverified_transformations", [])
+        notes = v_data.get("notes")
+
+        if verified_ts:
+            lines.append(f"- **Verified Structural Transformations:** {', '.join(verified_ts)}")
+        if unverified_ts:
+            lines.append(f"- **Unverified Transformations:** {', '.join(unverified_ts)}")
+        if notes:
+            lines.append(f"- **Verification Notes:** {notes}")
+        if r.get("error"):
+            lines.append(f"- **Diagnostic / Failure Information:** {r['error']}")
+        lines.append("")
 
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -665,4 +690,5 @@ if __name__ == "__main__":
     summary = run_all_benchmarks(output_report_path=report_file)
     print_console_summary(summary)
     print(f"[+] Detailed Markdown report generated at: {report_file}")
-    sys.exit(0 if summary["synthetic_fail"] == 0 and summary["real_protector_fail"] == 0 else 1)
+    sys.exit(0 if summary["synthetic_fail"] == 0 and summary["real_protector_fail"] == 0 and summary["unverified"] == 0 else 1)
+

@@ -113,7 +113,7 @@ namespace BenignSample
                 Console.WriteLine("BENIGN_START");
                 Console.WriteLine($"CONST_STR:{BenignFeatures.GetStringConstant()}");
                 Console.WriteLine($"CONST_NUM:{BenignFeatures.GetNumericConstant1()}:{BenignFeatures.GetNumericConstant2()}");
-                Console.WriteLine($"CFLOW:{BenignFeatures.ComputeSwitch(2, 50)}:{BenignFeatures.ComputeSwitch(1, 20)}");
+                Console.WriteLine($"CFLOW:{BenignFeatures.ComputeSwitch(2, 50)}:{BenignFeatures.ComputeSwitch(1, 20)}:{BenignFeatures.ComputeSwitch(3, 40)}:{BenignFeatures.ComputeSwitch(99, 10)}");
                 Console.WriteLine($"PROXY:{BenignFeatures.ExecuteProxy(30, 12)}");
                 Console.WriteLine($"RESOURCE:{BenignFeatures.ReadEmbeddedGreeting()}");
 

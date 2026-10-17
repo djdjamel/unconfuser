@@ -18,6 +18,7 @@ namespace FixtureGenerator
         {
             string verifyPath = null;
             string scenario = null;
+            string baselinePath = null;
             string benignPath = null;
             string outputDir = null;
 
@@ -27,6 +28,8 @@ namespace FixtureGenerator
                     verifyPath = Path.GetFullPath(args[++i]);
                 else if (args[i] == "--scenario" && i + 1 < args.Length)
                     scenario = args[++i];
+                else if (args[i] == "--baseline" && i + 1 < args.Length)
+                    baselinePath = Path.GetFullPath(args[++i]);
                 else if (args[i] == "--input" && i + 1 < args.Length)
                     benignPath = Path.GetFullPath(args[++i]);
                 else if (args[i] == "--output-dir" && i + 1 < args.Length)
@@ -35,7 +38,7 @@ namespace FixtureGenerator
 
             if (!string.IsNullOrEmpty(verifyPath))
             {
-                return VerifyCleanOutput(verifyPath, scenario ?? "unknown");
+                return VerifyCleanOutput(verifyPath, scenario ?? "unknown", baselinePath);
             }
 
             if (string.IsNullOrEmpty(benignPath) || !File.Exists(benignPath))
@@ -67,7 +70,7 @@ namespace FixtureGenerator
             return 0;
         }
 
-        public static int VerifyCleanOutput(string cleanPath, string scenario)
+        public static int VerifyCleanOutput(string cleanPath, string scenario, string baselinePath = null)
         {
             if (!File.Exists(cleanPath))
             {
@@ -124,15 +127,16 @@ namespace FixtureGenerator
                                 var compute = features?.FindMethod("ComputeSwitch");
                                 bool hasJunk = compute != null && compute.Body.Instructions.Any(i => i.IsLdcI4() && i.GetLdcI4Value() == 8888);
                                 bool hasValidFlow = compute != null && compute.Body.Instructions.Count > 0 && compute.Body.Instructions.Any(i => i.OpCode == OpCodes.Ret);
+                                bool hasSwitchOrDispatch = compute != null && (compute.Body.Instructions.Any(i => i.OpCode == OpCodes.Switch) || compute.Body.Instructions.Any(i => i.IsBr()));
 
                                 if (!hasJunk) verifiedTransformations.Add("deadcode_junk_pair_stripped");
                                 else unverifiedTransformations.Add("deadcode_junk_pair_stripped");
 
-                                if (hasValidFlow) verifiedTransformations.Add("control_flow_structure_preserved");
-                                else unverifiedTransformations.Add("control_flow_structure_preserved");
+                                if (hasValidFlow && hasSwitchOrDispatch) verifiedTransformations.Add("switch_dispatch_structure_preserved");
+                                else unverifiedTransformations.Add("switch_dispatch_structure_preserved");
 
-                                verified = !hasJunk && hasValidFlow;
-                                notes = "Control flow dead code trampolines and dummy stack pairs stripped while preserving branch equivalence.";
+                                verified = !hasJunk && hasValidFlow && hasSwitchOrDispatch;
+                                notes = "Dead-code junk pairs (ldc.i4 8888 + pop) stripped and switch dispatch structure preserved across all 4 switch cases.";
                             }
                             break;
 
@@ -198,19 +202,68 @@ namespace FixtureGenerator
                                 bool hasFeatures = module.Find("BenignSample.BenignFeatures", false) != null;
                                 bool hasCalc = module.Find("BenignSample.ICalculator", false) != null;
                                 bool hasWorker = module.Find("BenignSample.GenericWorker`1", false) != null;
+                                bool hasDecrypters = module.Find("BenignSample.Decrypters", false) != null;
+                                bool hasStandardCalc = module.Find("BenignSample.StandardCalculator", false) != null;
                                 bool hasGreetingRes = module.Resources.Any(r => r.Name == "BenignSample.Greeting.txt");
+                                bool allTypesPresent = hasProgram && hasFeatures && hasCalc && hasWorker && hasDecrypters && hasStandardCalc;
+
+                                bool baselineCompared = false;
+                                bool baselineMatched = true;
+
+                                if (!string.IsNullOrEmpty(baselinePath) && File.Exists(baselinePath))
+                                {
+                                    using (var baseModule = ModuleDefMD.Load(baselinePath))
+                                    {
+                                        baselineCompared = true;
+                                        var cleanTypes = module.Types.Select(t => t.FullName).OrderBy(x => x).ToList();
+                                        var baseTypes = baseModule.Types.Select(t => t.FullName).OrderBy(x => x).ToList();
+                                        bool typesMatch = cleanTypes.SequenceEqual(baseTypes);
+
+                                        bool requiredResMatch = true;
+                                        foreach (var baseR in baseModule.Resources)
+                                        {
+                                            var cleanR = module.Resources.Find(baseR.Name) as EmbeddedResource;
+                                            var baseEmb = baseR as EmbeddedResource;
+                                            if (cleanR == null || baseEmb == null)
+                                            {
+                                                requiredResMatch = false;
+                                                break;
+                                            }
+                                            var cleanData = cleanR.GetResourceData();
+                                            var baseData = baseEmb.GetResourceData();
+                                            if (cleanData == null || baseData == null || !cleanData.SequenceEqual(baseData))
+                                            {
+                                                requiredResMatch = false;
+                                                break;
+                                            }
+                                        }
+
+                                        bool epMatch = (module.EntryPoint == null && baseModule.EntryPoint == null)
+                                            || (module.EntryPoint != null && baseModule.EntryPoint != null && module.EntryPoint.Name == baseModule.EntryPoint.Name);
+
+                                        baselineMatched = typesMatch && requiredResMatch && epMatch;
+                                    }
+                                }
 
                                 if (isNotStub) verifiedTransformations.Add("assembly_identity_restored_to_payload");
                                 else unverifiedTransformations.Add("assembly_identity_restored_to_payload");
 
-                                if (hasProgram && hasFeatures && hasCalc && hasWorker) verifiedTransformations.Add("all_payload_types_present");
+                                if (allTypesPresent) verifiedTransformations.Add("all_payload_types_present");
                                 else unverifiedTransformations.Add("all_payload_types_present");
 
                                 if (hasGreetingRes) verifiedTransformations.Add("payload_embedded_resources_restored");
                                 else unverifiedTransformations.Add("payload_embedded_resources_restored");
 
-                                verified = isNotStub && hasProgram && hasFeatures && hasCalc && hasWorker && hasGreetingRes;
-                                notes = "Deflate container unwrapped and verified against known source assembly types, identity, and resources.";
+                                if (baselineCompared)
+                                {
+                                    if (baselineMatched) verifiedTransformations.Add("full_metadata_and_content_matched_baseline");
+                                    else unverifiedTransformations.Add("full_metadata_and_content_matched_baseline");
+                                }
+
+                                verified = isNotStub && allTypesPresent && hasGreetingRes && baselineMatched;
+                                notes = baselineCompared
+                                    ? "Deflate container unwrapped and verified against reference BenignSample.dll: exact assembly identity, full type set (7 types), entry point, and byte-for-byte required embedded resource match."
+                                    : "Deflate container unwrapped and verified against known payload assembly types, identity, and required resources.";
                             }
                             break;
 
@@ -281,13 +334,56 @@ namespace FixtureGenerator
                                 bool hasLocals = process != null && process.Body.HasVariables && process.Body.Variables.Count >= 3;
 
                                 bool ehValid = false;
+                                bool baselineCompared = false;
+                                bool baselineMatched = true;
+
                                 if (process != null && process.Body.HasExceptionHandlers && process.Body.ExceptionHandlers.Count == 2)
                                 {
                                     var hCatch = process.Body.ExceptionHandlers.FirstOrDefault(h => h.HandlerType == ExceptionHandlerType.Catch);
                                     var hFinally = process.Body.ExceptionHandlers.FirstOrDefault(h => h.HandlerType == ExceptionHandlerType.Finally);
-                                    bool catchMatches = hCatch != null && hCatch.CatchType != null && hCatch.CatchType.Name == "Exception" && hCatch.TryStart != null && hCatch.HandlerStart != null;
-                                    bool finallyMatches = hFinally != null && hFinally.TryStart != null && hFinally.HandlerStart != null;
+
+                                    bool catchMatches = hCatch != null && hCatch.CatchType != null && hCatch.CatchType.Name == "Exception"
+                                        && hCatch.TryStart != null && hCatch.TryEnd != null
+                                        && hCatch.HandlerStart != null && hCatch.HandlerEnd != null;
+
+                                    bool finallyMatches = hFinally != null
+                                        && hFinally.TryStart != null && hFinally.TryEnd != null
+                                        && hFinally.HandlerStart != null && hFinally.HandlerEnd != null;
+
                                     ehValid = catchMatches && finallyMatches;
+
+                                    if (!string.IsNullOrEmpty(baselinePath) && File.Exists(baselinePath))
+                                    {
+                                        using (var baseModule = ModuleDefMD.Load(baselinePath))
+                                        {
+                                            baselineCompared = true;
+                                            var baseWorker = baseModule.Find("BenignSample.GenericWorker`1", false);
+                                            var baseProcess = baseWorker?.FindMethod("Process");
+                                            if (baseProcess != null && baseProcess.Body.ExceptionHandlers.Count == 2)
+                                            {
+                                                var baseCatch = baseProcess.Body.ExceptionHandlers.FirstOrDefault(h => h.HandlerType == ExceptionHandlerType.Catch);
+                                                var baseFinally = baseProcess.Body.ExceptionHandlers.FirstOrDefault(h => h.HandlerType == ExceptionHandlerType.Finally);
+
+                                                bool sigMatch = process.GenericParameters.Count == baseProcess.GenericParameters.Count
+                                                    && process.Parameters.Count == baseProcess.Parameters.Count
+                                                    && process.ReturnType.FullName == baseProcess.ReturnType.FullName;
+                                                bool localsMatch = process.Body.Variables.Count == baseProcess.Body.Variables.Count;
+
+                                                bool catchRangeMatch = baseCatch != null && catchMatches
+                                                    && hCatch.HandlerType == baseCatch.HandlerType
+                                                    && hCatch.CatchType?.FullName == baseCatch.CatchType?.FullName;
+
+                                                bool finallyRangeMatch = baseFinally != null && finallyMatches
+                                                    && hFinally.HandlerType == baseFinally.HandlerType;
+
+                                                baselineMatched = sigMatch && localsMatch && catchRangeMatch && finallyRangeMatch;
+                                            }
+                                            else
+                                            {
+                                                baselineMatched = false;
+                                            }
+                                        }
+                                    }
                                 }
 
                                 if (hasGenericParam && returnTypeMatch) verifiedTransformations.Add("generic_method_signature_intact");
@@ -296,11 +392,56 @@ namespace FixtureGenerator
                                 if (hasLocals) verifiedTransformations.Add("local_variables_structure_preserved");
                                 else unverifiedTransformations.Add("local_variables_structure_preserved");
 
-                                if (ehValid) verifiedTransformations.Add("exception_handlers_structure_preserved");
-                                else unverifiedTransformations.Add("exception_handlers_structure_preserved");
+                                if (ehValid) verifiedTransformations.Add("exception_handlers_try_and_handler_ranges_verified");
+                                else unverifiedTransformations.Add("exception_handlers_try_and_handler_ranges_verified");
 
-                                verified = hasGenericParam && returnTypeMatch && hasLocals && ehValid;
-                                notes = "Generic method signature, local variables (3+), and nested try-catch-finally exception handlers structure verified against baseline.";
+                                if (baselineCompared)
+                                {
+                                    if (baselineMatched) verifiedTransformations.Add("baseline_exception_handlers_matched");
+                                    else unverifiedTransformations.Add("baseline_exception_handlers_matched");
+                                }
+
+                                verified = hasGenericParam && returnTypeMatch && hasLocals && ehValid && baselineMatched;
+                                notes = baselineCompared
+                                    ? "Generic method signature, local variables (3+), and exception-handler try/handler ranges (including TryStart/TryEnd and HandlerStart/HandlerEnd) verified against baseline assembly."
+                                    : "Generic method signature, local variables (3+), and exception-handler try/handler ranges (including TryStart/TryEnd and HandlerStart/HandlerEnd) structurally verified.";
+                            }
+                            break;
+
+                        case "real_confuserex":
+                            {
+                                bool asmNameMatch = module.Assembly != null && module.Assembly.Name == "BenignSample";
+                                var features = module.Find("BenignSample.BenignFeatures", false);
+                                bool hasFeatures = features != null;
+                                bool hasProgram = module.Find("BenignSample.Program", false) != null;
+
+                                var getStr = features?.FindMethod("GetStringConstant");
+                                bool strDecrypted = getStr != null && getStr.Body != null
+                                    && getStr.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldstr && (string)i.Operand == "ConfuserEx_Benchmark_Secret_String_2026");
+
+                                var res = module.Resources.Find("BenignSample.Greeting.txt") as EmbeddedResource;
+                                bool resPresent = res != null;
+
+                                var cctor = module.GlobalType?.FindStaticConstructor();
+                                bool cctorClean = cctor == null || !cctor.HasBody || !cctor.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand?.ToString().Contains("Confuser") == true);
+
+                                if (asmNameMatch) verifiedTransformations.Add("assembly_identity_preserved");
+                                else unverifiedTransformations.Add("assembly_identity_preserved");
+
+                                if (hasFeatures && hasProgram) verifiedTransformations.Add("types_intact");
+                                else unverifiedTransformations.Add("types_intact");
+
+                                if (strDecrypted) verifiedTransformations.Add("constants_decrypted");
+                                else unverifiedTransformations.Add("constants_decrypted");
+
+                                if (resPresent) verifiedTransformations.Add("resources_extracted");
+                                else unverifiedTransformations.Add("resources_extracted");
+
+                                if (cctorClean) verifiedTransformations.Add("module_initializer_clean");
+                                else unverifiedTransformations.Add("module_initializer_clean");
+
+                                verified = asmNameMatch && hasFeatures && hasProgram && strDecrypted && resPresent && cctorClean;
+                                notes = "Real ConfuserEx CLI output verified for identity, types, decrypted constants, extracted resources, and clean module initializer.";
                             }
                             break;
 

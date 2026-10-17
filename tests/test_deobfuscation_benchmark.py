@@ -51,44 +51,63 @@ def expected_baseline():
 
 
 def test_benign_baseline_output(expected_baseline):
-    """Verifies that the benign baseline executes and emits expected markers."""
+    """Verifies that the benign baseline executes and emits expected markers across all paths."""
     assert "BENIGN_START" in expected_baseline
     assert "CONST_STR:ConfuserEx_Benchmark_Secret_String_2026" in expected_baseline
     assert "CONST_NUM:133742:9223372036854775800" in expected_baseline
-    assert "CFLOW:100:30" in expected_baseline
+    assert "CFLOW:100:30:35:95" in expected_baseline
     assert "PROXY:42" in expected_baseline
     assert "RESOURCE:HELLO_FROM_BENIGN_EMBEDDED_RESOURCE" in expected_baseline
     assert "BENIGN_END" in expected_baseline
 
 
+# Exact expected recovery counts documented per synthetic fixture
 @pytest.mark.parametrize(
-    "case_name,fixture_filename,scenario,min_constants,min_proxies,min_resources",
+    "case_name,fixture_filename,scenario,exp_constants,exp_proxies,exp_resources,exp_junk_pairs,exp_cleaner_hooks",
     [
-        ("Constants (Strings & Numerics)", "fixture_constants.dll", "constants", 3, 0, 0),
-        ("Reference & Method Call Proxies", "fixture_proxies.dll", "proxies", 0, 1, 0),
-        ("Encrypted Resources", "fixture_resources.dll", "resources", 0, 0, 1),
-        ("Deflate Compressor Unpacker", "fixture_compressor.dll", "compressor", 0, 0, 0),
-        ("Control Flow & Trampolines", "fixture_cflow.dll", "cflow", 0, 0, 0),
-        ("Anti-Tamper & Cleaner Hooks", "fixture_antitamper.dll", "antitamper", 0, 0, 0),
-        ("Generics & Exception Edges", "fixture_edge_cases.dll", "edge_cases", 0, 0, 0),
+        # Constants fixture: exactly 3 constants encrypted (1 string, 1 int32, 1 int64)
+        ("Constants (Strings & Numerics)", "fixture_constants.dll", "constants", 3, 0, 0, 0, 0),
+        # Control flow fixture: exactly 1 dead-code junk pair (ldc.i4 8888 + pop) in ComputeSwitch
+        ("Control Flow (Dead Code & Junk Stripping)", "fixture_cflow.dll", "cflow", 0, 0, 0, 1, 0),
+        # Proxies fixture: exactly 1 proxy method inlining AddProxyTarget
+        ("Reference & Method Call Proxies", "fixture_proxies.dll", "proxies", 0, 1, 0, 0, 0),
+        # Resources fixture: exactly 1 encrypted embedded resource (BenignSample.Greeting.txt)
+        ("Encrypted Resources", "fixture_resources.dll", "resources", 0, 0, 1, 0, 0),
+        # Deflate compressor fixture: uncompressed payload container restored, 0 internal counters
+        ("Deflate Compressor Unpacker", "fixture_compressor.dll", "compressor", 0, 0, 0, 0, 0),
+        # Anti-tamper fixture: exactly 1 module initializer hook stripped and pruned
+        ("Anti-Tamper & Cleaner Hooks", "fixture_antitamper.dll", "antitamper", 0, 0, 0, 0, 1),
+        # Generics & exception edges: clean pass-through of generic method and nested handlers; exactly 1 boundary junk pair stripped
+        ("Generics & Exception Edges", "fixture_edge_cases.dll", "edge_cases", 0, 0, 0, 1, 0),
     ],
 )
 def test_deobfuscation_synthetic_pipeline_case(
     case_name,
     fixture_filename,
     scenario,
-    min_constants,
-    min_proxies,
-    min_resources,
+    exp_constants,
+    exp_proxies,
+    exp_resources,
+    exp_junk_pairs,
+    exp_cleaner_hooks,
     runner_path,
     expected_baseline,
 ):
-    """Tests individual synthetic protection deobfuscation end-to-end with structural AST audit and runtime verification."""
+    """Tests individual synthetic protection deobfuscation end-to-end with structural AST audit and exact metric counts."""
     fixture_path = FIXTURES_DIR / fixture_filename
     if not fixture_path.exists():
         pytest.fail(f"Required synthetic fixture {fixture_filename} does not exist at {fixture_path}.")
 
-    record = run_benchmark_case(case_name, fixture_path, scenario, runner_path, expected_baseline, is_synthetic=True, timeout_sec=25)
+    record = run_benchmark_case(
+        case_name,
+        fixture_path,
+        scenario,
+        runner_path,
+        expected_baseline,
+        baseline_dll_path=BENIGN_DLL,
+        is_synthetic=True,
+        timeout_sec=25,
+    )
 
     assert record["output_produced"], f"No output produced for {case_name}. Error: {record.get('error')}"
     assert record["deobfuscator_returncode"] == 0, f"Deobfuscator process failed with code {record['deobfuscator_returncode']}"
@@ -101,13 +120,25 @@ def test_deobfuscation_synthetic_pipeline_case(
     v_data = record.get("structural_verification", {})
     assert v_data.get("verified", False), f"AST-level verification failed for {case_name}: {v_data}"
 
+    # Verify exact metric recovery counts (no >= leniency)
     metrics = record["metrics"]
-    if min_constants > 0:
-        assert metrics.get("constants_decrypted", 0) >= min_constants
-    if min_proxies > 0:
-        assert metrics.get("proxies_inlined", 0) >= min_proxies
-    if min_resources > 0:
-        assert metrics.get("resources_extracted", 0) >= min_resources
+    assert metrics.get("constants_decrypted", 0) == exp_constants, (
+        f"Exact constants count mismatch in {case_name}: expected {exp_constants}, got {metrics.get('constants_decrypted', 0)}"
+    )
+    assert metrics.get("proxies_inlined", 0) == exp_proxies, (
+        f"Exact proxies count mismatch in {case_name}: expected {exp_proxies}, got {metrics.get('proxies_inlined', 0)}"
+    )
+    assert metrics.get("resources_extracted", 0) == exp_resources, (
+        f"Exact resources count mismatch in {case_name}: expected {exp_resources}, got {metrics.get('resources_extracted', 0)}"
+    )
+    assert metrics.get("deadcode_junk_pairs", 0) == exp_junk_pairs, (
+        f"Exact deadcode junk pairs mismatch in {case_name}: expected {exp_junk_pairs}, got {metrics.get('deadcode_junk_pairs', 0)}"
+    )
+    assert metrics.get("cleaner_hooks_stripped", 0) == exp_cleaner_hooks, (
+        f"Exact cleaner hooks mismatch in {case_name}: expected {exp_cleaner_hooks}, got {metrics.get('cleaner_hooks_stripped', 0)}"
+    )
+    if scenario == "compressor":
+        assert metrics.get("compressor_unpacked") is True, f"Compressor unpacked flag not True for {case_name}"
 
 
 def test_combined_fixture_exposes_ordering_bottleneck(runner_path, expected_baseline):
@@ -125,6 +156,7 @@ def test_combined_fixture_exposes_ordering_bottleneck(runner_path, expected_base
         "combined",
         runner_path,
         expected_baseline,
+        baseline_dll_path=BENIGN_DLL,
         is_synthetic=True,
         timeout_sec=25,
     )
@@ -149,6 +181,14 @@ def test_combined_fixture_exposes_ordering_bottleneck(runner_path, expected_base
     # Confirm specific unverified transformation that exposes the documented limitation
     assert "constants_decrypted_and_inlined" in unverified_ts
 
+    # Confirm exact metric recovery counts for combined scenario
+    metrics = record["metrics"]
+    assert metrics.get("proxies_inlined", 0) == 1
+    assert metrics.get("deadcode_junk_pairs", 0) == 1
+    assert metrics.get("cleaner_hooks_stripped", 0) == 1
+    assert metrics.get("constants_decrypted", 0) == 0
+    assert metrics.get("resources_extracted", 0) == 0
+
 
 def test_real_protector_integration_and_skip_logic(runner_path, expected_baseline):
     """Validates that real protector profile is executed when present, or cleanly skipped as SKIPPED_TOOL_MISSING."""
@@ -160,11 +200,15 @@ def test_real_protector_integration_and_skip_logic(runner_path, expected_baselin
     if real_case["verdict"] == "SKIPPED_TOOL_MISSING":
         assert real_case["verdict"] != "REAL_PROTECTOR_PASS"
         assert real_case["verdict"] != "SYNTHETIC_PASS"
-        assert "Confuser.CLI.exe (pinned ConfuserEx v1.0.0) not found" in real_case["error"]
+        assert "not found" in real_case["error"]
         assert summary["skipped_tool_missing"] >= 1
     elif real_case["verdict"] == "REAL_PROTECTOR_PASS":
         assert real_case["output_produced"]
         assert real_case["execution_returncode"] == 0
         assert real_case["behavioral_match"]
+        assert real_case["audit_status"] == "CLEAN"
+        v_data = real_case.get("structural_verification", {})
+        assert v_data.get("verified") is True, f"Real ConfuserEx structural verification failed: {v_data}"
     else:
-        assert real_case["verdict"] == "REAL_PROTECTOR_FAIL"
+        pytest.fail(f"Real ConfuserEx protector integration failed with verdict {real_case['verdict']}: {real_case.get('error')}")
+
