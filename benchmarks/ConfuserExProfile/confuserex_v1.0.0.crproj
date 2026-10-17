@@ -1,0 +1,10 @@
+<project outputDir="{output_dir}" baseDir="{base_dir}" xmlns="http://confuser.codeplex.com">
+  <!-- Pinned deterministic profile for ConfuserEx v1.0.0 benchmark testing -->
+  <rule pattern="true" inherit="false">
+    <protection id="constants" />
+    <protection id="ctrl flow" />
+    <protection id="ref proxy" />
+    <protection id="resources" />
+  </rule>
+  <module path="{module_path}" />
+</project>

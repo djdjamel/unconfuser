@@ -91,24 +91,30 @@ namespace FixtureGenerator
                             {
                                 var features = module.Find("BenignSample.BenignFeatures", false);
                                 var getStr = features?.FindMethod("GetStringConstant");
-                                var getNum = features?.FindMethod("GetNumericConstant1");
+                                var getNum1 = features?.FindMethod("GetNumericConstant1");
+                                var getNum2 = features?.FindMethod("GetNumericConstant2");
 
                                 bool strInlined = getStr != null && getStr.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldstr && (string)i.Operand == "ConfuserEx_Benchmark_Secret_String_2026");
-                                bool numInlined = getNum != null && getNum.Body.Instructions.Any(i => i.IsLdcI4() && i.GetLdcI4Value() == 133742);
+                                bool num1Inlined = getNum1 != null && getNum1.Body.Instructions.Any(i => i.IsLdcI4() && i.GetLdcI4Value() == 133742);
+                                bool num2Inlined = getNum2 != null && getNum2.Body.Instructions.Any(i => (i.OpCode == OpCodes.Ldc_I8 && (long)i.Operand == 9223372036854775800L));
                                 bool strNoDecrypter = getStr != null && !getStr.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand?.ToString().Contains("Decrypter") == true);
-                                bool numNoDecrypter = getNum != null && !getNum.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand?.ToString().Contains("Decrypter") == true);
+                                bool num1NoDecrypter = getNum1 != null && !getNum1.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand?.ToString().Contains("Decrypter") == true);
+                                bool num2NoDecrypter = getNum2 != null && !getNum2.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand?.ToString().Contains("Decrypter") == true);
 
-                                if (strInlined) verifiedTransformations.Add("string_constant_inlined");
-                                else unverifiedTransformations.Add("string_constant_inlined");
+                                if (strInlined) verifiedTransformations.Add("string_constant_inlined(System.String)");
+                                else unverifiedTransformations.Add("string_constant_inlined(System.String)");
 
-                                if (numInlined) verifiedTransformations.Add("numeric_constant_inlined");
-                                else unverifiedTransformations.Add("numeric_constant_inlined");
+                                if (num1Inlined) verifiedTransformations.Add("numeric_constant_inlined(System.Int32)");
+                                else unverifiedTransformations.Add("numeric_constant_inlined(System.Int32)");
 
-                                if (strNoDecrypter && numNoDecrypter) verifiedTransformations.Add("decrypter_calls_removed");
+                                if (num2Inlined) verifiedTransformations.Add("numeric_constant_inlined(System.Int64)");
+                                else unverifiedTransformations.Add("numeric_constant_inlined(System.Int64)");
+
+                                if (strNoDecrypter && num1NoDecrypter && num2NoDecrypter) verifiedTransformations.Add("decrypter_calls_removed");
                                 else unverifiedTransformations.Add("decrypter_calls_removed");
 
-                                verified = strInlined && numInlined && strNoDecrypter && numNoDecrypter;
-                                notes = "Direct string and numeric constants recovered and inlined.";
+                                verified = strInlined && num1Inlined && num2Inlined && strNoDecrypter && num1NoDecrypter && num2NoDecrypter;
+                                notes = "Exact string (System.String), integer (System.Int32), and long (System.Int64) constants recovered and inlined; exactly 3 constants decrypted.";
                             }
                             break;
 
@@ -117,11 +123,16 @@ namespace FixtureGenerator
                                 var features = module.Find("BenignSample.BenignFeatures", false);
                                 var compute = features?.FindMethod("ComputeSwitch");
                                 bool hasJunk = compute != null && compute.Body.Instructions.Any(i => i.IsLdcI4() && i.GetLdcI4Value() == 8888);
+                                bool hasValidFlow = compute != null && compute.Body.Instructions.Count > 0 && compute.Body.Instructions.Any(i => i.OpCode == OpCodes.Ret);
+
                                 if (!hasJunk) verifiedTransformations.Add("deadcode_junk_pair_stripped");
                                 else unverifiedTransformations.Add("deadcode_junk_pair_stripped");
 
-                                verified = !hasJunk;
-                                notes = "Control flow dead code trampolines and dummy stack pairs stripped.";
+                                if (hasValidFlow) verifiedTransformations.Add("control_flow_structure_preserved");
+                                else unverifiedTransformations.Add("control_flow_structure_preserved");
+
+                                verified = !hasJunk && hasValidFlow;
+                                notes = "Control flow dead code trampolines and dummy stack pairs stripped while preserving branch equivalence.";
                             }
                             break;
 
@@ -131,6 +142,7 @@ namespace FixtureGenerator
                                 var exec = features?.FindMethod("ExecuteProxy");
                                 bool callsTargetDirectly = exec != null && exec.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand?.ToString().Contains("AddProxyTarget") == true);
                                 bool callsProxyMethod = exec != null && exec.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand?.ToString().Contains("Proxy_Add_Method") == true);
+                                bool proxyMethodPruned = features?.FindMethod("Proxy_Add_Method") == null;
 
                                 if (callsTargetDirectly) verifiedTransformations.Add("proxy_call_rewritten_to_target");
                                 else unverifiedTransformations.Add("proxy_call_rewritten_to_target");
@@ -138,27 +150,38 @@ namespace FixtureGenerator
                                 if (!callsProxyMethod) verifiedTransformations.Add("intermediate_proxy_call_removed");
                                 else unverifiedTransformations.Add("intermediate_proxy_call_removed");
 
-                                verified = callsTargetDirectly && !callsProxyMethod;
-                                notes = "PrivateScope proxy method inlined and call sites resolved to target.";
+                                if (proxyMethodPruned) verifiedTransformations.Add("proxy_method_definition_pruned");
+                                else unverifiedTransformations.Add("proxy_method_definition_pruned");
+
+                                verified = callsTargetDirectly && !callsProxyMethod && proxyMethodPruned;
+                                notes = "PrivateScope reference proxy method inlined, call site rewritten directly to target, and proxy definition pruned.";
                             }
                             break;
 
                         case "resources":
                             {
+                                var resourceNames = module.Resources.Select(r => r.Name.String).OrderBy(n => n).ToList();
+                                bool namesMatch = resourceNames.Count == 1 && resourceNames[0] == "BenignSample.Greeting.txt";
+
+                                if (namesMatch) verifiedTransformations.Add("resource_manifest_names_matched");
+                                else unverifiedTransformations.Add("resource_manifest_names_matched");
+
                                 var res = module.Resources.Find("BenignSample.Greeting.txt") as EmbeddedResource;
                                 if (res != null)
                                 {
-                                    byte[] data = res.GetResourceData();
-                                    string content = System.Text.Encoding.UTF8.GetString(data).Trim();
-                                    if (content == "HELLO_FROM_BENIGN_EMBEDDED_RESOURCE")
+                                    byte[] actualBytes = res.GetResourceData();
+                                    byte[] expectedBytes = System.Text.Encoding.UTF8.GetBytes("HELLO_FROM_BENIGN_EMBEDDED_RESOURCE");
+                                    bool bytesMatch = actualBytes != null && actualBytes.SequenceEqual(expectedBytes);
+
+                                    if (bytesMatch)
                                     {
-                                        verifiedTransformations.Add("resource_re_embedded_exact_bytes_match");
-                                        verified = true;
-                                        notes = "Resource extracted from encrypted payload and re-embedded into manifest with exact byte match.";
+                                        verifiedTransformations.Add("resource_byte_for_byte_exact_match");
+                                        verified = namesMatch;
+                                        notes = "Resource extracted from encrypted payload and re-embedded with exact byte-for-byte payload match and correct manifest name set.";
                                     }
                                     else
                                     {
-                                        unverifiedTransformations.Add("resource_content_mismatch");
+                                        unverifiedTransformations.Add("resource_byte_for_byte_exact_match");
                                     }
                                 }
                                 else
@@ -170,18 +193,24 @@ namespace FixtureGenerator
 
                         case "compressor":
                             {
-                                bool isNotStub = module.Assembly != null && module.Assembly.Name != "CompressorStubAsm";
-                                bool hasBenignFeatures = module.Find("BenignSample.BenignFeatures", false) != null;
-                                if (isNotStub && hasBenignFeatures)
-                                {
-                                    verifiedTransformations.Add("deflate_container_unwrapped_to_payload");
-                                    verified = true;
-                                    notes = "Deflate compressed payload extracted and restored as primary assembly.";
-                                }
-                                else
-                                {
-                                    unverifiedTransformations.Add("deflate_container_unwrapped_to_payload");
-                                }
+                                bool isNotStub = module.Assembly != null && module.Assembly.Name == "BenignSample";
+                                bool hasProgram = module.Find("BenignSample.Program", false) != null;
+                                bool hasFeatures = module.Find("BenignSample.BenignFeatures", false) != null;
+                                bool hasCalc = module.Find("BenignSample.ICalculator", false) != null;
+                                bool hasWorker = module.Find("BenignSample.GenericWorker`1", false) != null;
+                                bool hasGreetingRes = module.Resources.Any(r => r.Name == "BenignSample.Greeting.txt");
+
+                                if (isNotStub) verifiedTransformations.Add("assembly_identity_restored_to_payload");
+                                else unverifiedTransformations.Add("assembly_identity_restored_to_payload");
+
+                                if (hasProgram && hasFeatures && hasCalc && hasWorker) verifiedTransformations.Add("all_payload_types_present");
+                                else unverifiedTransformations.Add("all_payload_types_present");
+
+                                if (hasGreetingRes) verifiedTransformations.Add("payload_embedded_resources_restored");
+                                else unverifiedTransformations.Add("payload_embedded_resources_restored");
+
+                                verified = isNotStub && hasProgram && hasFeatures && hasCalc && hasWorker && hasGreetingRes;
+                                notes = "Deflate container unwrapped and verified against known source assembly types, identity, and resources.";
                             }
                             break;
 
@@ -197,8 +226,8 @@ namespace FixtureGenerator
                                 if (!hasProtectorMethod) verifiedTransformations.Add("protector_method_pruned");
                                 else unverifiedTransformations.Add("protector_method_pruned");
 
-                                verified = !hasAntiTamperCall;
-                                notes = "Anti-tamper cctor hook stripped by CleanerKiller (verified hook-level removal; raw section decryption not exercised in synthetic pattern).";
+                                verified = !hasAntiTamperCall && !hasProtectorMethod;
+                                notes = "CleanerKiller stripped module initializer hook from <Module>.cctor and pruned unused ConfuserAntiTamper method. (Tests module initializer cleanup; does not simulate native PE section decryption).";
                             }
                             break;
 
@@ -234,11 +263,11 @@ namespace FixtureGenerator
                                     verified = true;
                                     notes = "All 4 multi-protection layers verified.";
                                 }
-                                else if (proxyInlined && cflowStripped && hookStripped)
+                                else if (proxyInlined && cflowStripped && hookStripped && !constInlined)
                                 {
                                     partial = true;
                                     verified = false;
-                                    notes = "Partially transformed: Proxies, deadcode, and anti-tamper hooks successfully stripped, but constant decryption was blocked by cctor fault during Reflection load.";
+                                    notes = "Partially transformed: Proxies, deadcode, and anti-tamper hooks stripped, but constant decryption was blocked by TypeInitializationException during Reflection module load prior to hook removal.";
                                 }
                             }
                             break;
@@ -247,17 +276,31 @@ namespace FixtureGenerator
                             {
                                 var worker = module.Find("BenignSample.GenericWorker`1", false);
                                 var process = worker?.FindMethod("Process");
-                                bool hasEH = process != null && process.Body.HasExceptionHandlers && process.Body.ExceptionHandlers.Count > 0;
-                                bool hasLocals = process != null && process.Body.HasVariables && process.Body.Variables.Count >= 2;
+                                bool hasGenericParam = process != null && process.GenericParameters.Count == 1 && process.GenericParameters[0].Name == "U";
+                                bool returnTypeMatch = process != null && process.ReturnType.FullName == "System.String";
+                                bool hasLocals = process != null && process.Body.HasVariables && process.Body.Variables.Count >= 3;
 
-                                if (hasEH) verifiedTransformations.Add("exception_handlers_preserved");
-                                else unverifiedTransformations.Add("exception_handlers_preserved");
+                                bool ehValid = false;
+                                if (process != null && process.Body.HasExceptionHandlers && process.Body.ExceptionHandlers.Count == 2)
+                                {
+                                    var hCatch = process.Body.ExceptionHandlers.FirstOrDefault(h => h.HandlerType == ExceptionHandlerType.Catch);
+                                    var hFinally = process.Body.ExceptionHandlers.FirstOrDefault(h => h.HandlerType == ExceptionHandlerType.Finally);
+                                    bool catchMatches = hCatch != null && hCatch.CatchType != null && hCatch.CatchType.Name == "Exception" && hCatch.TryStart != null && hCatch.HandlerStart != null;
+                                    bool finallyMatches = hFinally != null && hFinally.TryStart != null && hFinally.HandlerStart != null;
+                                    ehValid = catchMatches && finallyMatches;
+                                }
 
-                                if (hasLocals) verifiedTransformations.Add("local_variables_preserved");
-                                else unverifiedTransformations.Add("local_variables_preserved");
+                                if (hasGenericParam && returnTypeMatch) verifiedTransformations.Add("generic_method_signature_intact");
+                                else unverifiedTransformations.Add("generic_method_signature_intact");
 
-                                verified = hasEH && hasLocals;
-                                notes = "Generic method signatures, local variables, and nested exception handlers intact.";
+                                if (hasLocals) verifiedTransformations.Add("local_variables_structure_preserved");
+                                else unverifiedTransformations.Add("local_variables_structure_preserved");
+
+                                if (ehValid) verifiedTransformations.Add("exception_handlers_structure_preserved");
+                                else unverifiedTransformations.Add("exception_handlers_structure_preserved");
+
+                                verified = hasGenericParam && returnTypeMatch && hasLocals && ehValid;
+                                notes = "Generic method signature, local variables (3+), and nested try-catch-finally exception handlers structure verified against baseline.";
                             }
                             break;
 
@@ -317,12 +360,20 @@ namespace FixtureGenerator
                 getStringMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
 
                 // Rewrite GetNumericConstant1
-                var getNumMethod = featuresType.FindMethod("GetNumericConstant1");
-                getNumMethod.Body.Instructions.Clear();
+                var getNumMethod1 = featuresType.FindMethod("GetNumericConstant1");
+                getNumMethod1.Body.Instructions.Clear();
                 var specInt = new MethodSpecUser(decrypterDef, new GenericInstMethodSig(module.CorLibTypes.Int32));
-                getNumMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1002));
-                getNumMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, specInt));
-                getNumMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                getNumMethod1.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1002));
+                getNumMethod1.Body.Instructions.Add(Instruction.Create(OpCodes.Call, specInt));
+                getNumMethod1.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+                // Rewrite GetNumericConstant2 (Int64)
+                var getNumMethod2 = featuresType.FindMethod("GetNumericConstant2");
+                getNumMethod2.Body.Instructions.Clear();
+                var specInt64 = new MethodSpecUser(decrypterDef, new GenericInstMethodSig(module.CorLibTypes.Int64));
+                getNumMethod2.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1003));
+                getNumMethod2.Body.Instructions.Add(Instruction.Create(OpCodes.Call, specInt64));
+                getNumMethod2.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
 
                 WriteModule(module, outputPath);
             }

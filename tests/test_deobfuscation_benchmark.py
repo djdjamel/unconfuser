@@ -13,8 +13,11 @@ import pytest
 
 from benchmarks.run_benchmark import (
     find_runner,
+    find_generator,
+    get_exec_command,
     get_benign_baseline,
     run_benchmark_case,
+    run_all_benchmarks,
     FIXTURES_DIR,
     BENIGN_DLL,
 )
@@ -25,24 +28,24 @@ def runner_path():
     try:
         return find_runner()
     except FileNotFoundError:
-        pytest.skip("ConfuserExKillerRunner.exe not found. Build solution first.")
+        pytest.fail("ConfuserExKillerRunner binary not found. Build unconfuser.sln first.")
 
 
 @pytest.fixture(scope="session")
 def expected_baseline():
     if not BENIGN_DLL.exists():
-        pytest.skip("BenignSample.dll not found. Build solution first.")
-    
+        pytest.fail(f"BenignSample.dll not found at {BENIGN_DLL}. Build solution first.")
+
     # Auto-generate fixtures if missing
     if not (FIXTURES_DIR / "fixture_constants.dll").exists():
-        generator_exe = BENIGN_DLL.parent.parent.parent.parent / "FixtureGenerator" / "bin" / "Release" / "net8.0-windows" / "FixtureGenerator.exe"
-        if generator_exe.exists():
-            FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
-            subprocess.run(
-                [str(generator_exe), "--input", str(BENIGN_DLL), "--output-dir", str(FIXTURES_DIR)],
-                check=False,
-                capture_output=True,
-            )
+        generator = find_generator()
+        if not generator or not generator.exists():
+            pytest.fail("FixtureGenerator binary not found. Build solution first.")
+        FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
+        gen_cmd = get_exec_command(generator) + ["--input", str(BENIGN_DLL), "--output-dir", str(FIXTURES_DIR)]
+        gen_res = subprocess.run(gen_cmd, capture_output=True, text=True)
+        if gen_res.returncode != 0:
+            pytest.fail(f"Fixture generation failed with returncode {gen_res.returncode}: {gen_res.stderr}")
 
     return get_benign_baseline()
 
@@ -61,8 +64,8 @@ def test_benign_baseline_output(expected_baseline):
 @pytest.mark.parametrize(
     "case_name,fixture_filename,scenario,min_constants,min_proxies,min_resources",
     [
-        ("Constants (Strings & Numerics)", "fixture_constants.dll", "constants", 2, 0, 0),
-        ("Reference & Delegate Proxies", "fixture_proxies.dll", "proxies", 0, 1, 0),
+        ("Constants (Strings & Numerics)", "fixture_constants.dll", "constants", 3, 0, 0),
+        ("Reference & Method Call Proxies", "fixture_proxies.dll", "proxies", 0, 1, 0),
         ("Encrypted Resources", "fixture_resources.dll", "resources", 0, 0, 1),
         ("Deflate Compressor Unpacker", "fixture_compressor.dll", "compressor", 0, 0, 0),
         ("Control Flow & Trampolines", "fixture_cflow.dll", "cflow", 0, 0, 0),
@@ -83,11 +86,12 @@ def test_deobfuscation_synthetic_pipeline_case(
     """Tests individual synthetic protection deobfuscation end-to-end with structural AST audit and runtime verification."""
     fixture_path = FIXTURES_DIR / fixture_filename
     if not fixture_path.exists():
-        pytest.skip(f"Fixture {fixture_filename} not generated yet.")
+        pytest.fail(f"Required synthetic fixture {fixture_filename} does not exist at {fixture_path}.")
 
-    record = run_benchmark_case(case_name, fixture_path, scenario, runner_path, expected_baseline, timeout_sec=25)
+    record = run_benchmark_case(case_name, fixture_path, scenario, runner_path, expected_baseline, is_synthetic=True, timeout_sec=25)
 
     assert record["output_produced"], f"No output produced for {case_name}. Error: {record.get('error')}"
+    assert record["deobfuscator_returncode"] == 0, f"Deobfuscator process failed with code {record['deobfuscator_returncode']}"
     assert record["execution_returncode"] == 0, f"Runtime process failed with code {record['execution_returncode']}"
     assert record["audit_status"] == "CLEAN", f"Audit failed for {case_name}: {record['audit_status']}"
     assert record["behavioral_match"], f"Behavioral output mismatch for {case_name}. Error: {record.get('error')}"
@@ -113,7 +117,7 @@ def test_combined_fixture_exposes_ordering_bottleneck(runner_path, expected_base
     """
     fixture_path = FIXTURES_DIR / "fixture_combined.dll"
     if not fixture_path.exists():
-        pytest.skip("fixture_combined.dll not generated yet.")
+        pytest.fail("fixture_combined.dll not found; synthetic fixtures must be generated.")
 
     record = run_benchmark_case(
         "Combined Multi-Protection",
@@ -121,10 +125,14 @@ def test_combined_fixture_exposes_ordering_bottleneck(runner_path, expected_base
         "combined",
         runner_path,
         expected_baseline,
+        is_synthetic=True,
         timeout_sec=25,
     )
 
     assert record["output_produced"], "Combined fixture produced no output"
+    assert record["deobfuscator_returncode"] == 0, f"Deobfuscator failed: {record['deobfuscator_returncode']}"
+    assert record["execution_returncode"] == 0, f"Runtime execution failed: {record['execution_returncode']}"
+    assert record["behavioral_match"], f"Behavioral output mismatch for combined fixture: {record.get('error')}"
     assert record["audit_status"] == "CLEAN", f"Audit failed: {record['audit_status']}"
     assert record["verdict"] == "SYNTHETIC_PARTIAL", f"Expected SYNTHETIC_PARTIAL, got {record['verdict']}"
 
@@ -138,14 +146,25 @@ def test_combined_fixture_exposes_ordering_bottleneck(runner_path, expected_base
     assert "cflow_deadcode_stripped" in verified_ts
     assert "cctor_antitamper_hook_stripped" in verified_ts
 
-    # Confirm specific unverified transformation that exposes the next algorithmic improvement
+    # Confirm specific unverified transformation that exposes the documented limitation
     assert "constants_decrypted_and_inlined" in unverified_ts
 
 
-def test_missing_protector_marked_skipped_never_passed():
-    """Validates that unavailable external protectors are marked SKIPPED_TOOL_MISSING and never reported as passed."""
-    fake_cli = Path("non_existent_tools/Confuser.CLI.exe")
-    assert not fake_cli.exists()
-    status = "SKIPPED_TOOL_MISSING" if not fake_cli.exists() else "REAL_PROTECTOR_PASS"
-    assert status == "SKIPPED_TOOL_MISSING"
-    assert status != "REAL_PROTECTOR_PASS"
+def test_real_protector_integration_and_skip_logic(runner_path, expected_baseline):
+    """Validates that real protector profile is executed when present, or cleanly skipped as SKIPPED_TOOL_MISSING."""
+    summary = run_all_benchmarks(fixtures_dir=FIXTURES_DIR, runner_path=runner_path)
+    real_cases = [r for r in summary["results"] if r.get("scenario") == "real_confuserex"]
+    assert len(real_cases) == 1, "Expected exactly one real ConfuserEx CLI preset case in benchmark summary"
+    real_case = real_cases[0]
+
+    if real_case["verdict"] == "SKIPPED_TOOL_MISSING":
+        assert real_case["verdict"] != "REAL_PROTECTOR_PASS"
+        assert real_case["verdict"] != "SYNTHETIC_PASS"
+        assert "Confuser.CLI.exe (pinned ConfuserEx v1.0.0) not found" in real_case["error"]
+        assert summary["skipped_tool_missing"] >= 1
+    elif real_case["verdict"] == "REAL_PROTECTOR_PASS":
+        assert real_case["output_produced"]
+        assert real_case["execution_returncode"] == 0
+        assert real_case["behavioral_match"]
+    else:
+        assert real_case["verdict"] == "REAL_PROTECTOR_FAIL"
