@@ -77,7 +77,7 @@
 ### 8. Generics & Exception Edges (`SYNTHETIC_PASS`)
 - **Verdict:** `SYNTHETIC_PASS` | **Audit Status:** `CLEAN` | **Runtime Behavior:** `Exact Match`
 - **Verified Structural Transformations:** generic_method_signature_intact, local_variables_structure_preserved, exception_handlers_try_and_handler_ranges_verified, baseline_exception_handlers_matched
-- **Verification Notes:** Generic method signature, local variables (3+), and exception-handler try/handler ranges (including semantic TryStart/TryEnd, HandlerStart/HandlerEnd targets, and instruction bodies) verified against baseline assembly.
+- **Verification Notes:** Generic method signature (parameters, return type, generic constraints), local variables (count and types), and exception-handler try/handler ranges (including semantic TryStart/TryEnd, HandlerStart/HandlerEnd targets, and instruction bodies) verified against baseline assembly.
 
 ### 9. ConfuserEx yck1509/ConfuserEx v1.0.0 (commit 3c9c29d9daf2f1259edf69054c5693d5d225a980) (Constants, Ctrl Flow, Ref Proxy, Resources) (`SKIPPED_TOOL_MISSING`)
 - **Verdict:** `SKIPPED_TOOL_MISSING` | **Audit Status:** `SKIPPED` | **Runtime Behavior:** `Skipped`

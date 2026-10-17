@@ -435,3 +435,56 @@ def test_whitespace_and_invalid_confuserex_sha256_fails_immediately(tmp_path, ru
     assert valid_sha in real_cases[0]["error"]
 
 
+def test_altered_local_variable_type_detected(tmp_path, runner_path, expected_baseline):
+    """
+    Validates that altering a local variable's type without changing the local count
+    (e.g. changing int32 to int64) is caught by baseline metadata comparison and fails verification.
+    """
+    generator = find_generator()
+    clean_path = FIXTURES_DIR / "fixture_edge_cases_clean.dll"
+    if not clean_path.exists():
+        run_benchmark_case(
+            "Generics & Exception Edges",
+            FIXTURES_DIR / "fixture_edge_cases.dll",
+            "edge_cases",
+            runner_path,
+            expected_baseline,
+            baseline_dll_path=BENIGN_DLL,
+        )
+
+    tampered_dll = tmp_path / "tampered_local_type.dll"
+    tamper_cmd = get_exec_command(generator) + ["--tamper-local-type", str(clean_path), str(tampered_dll)]
+    t_res = subprocess.run(tamper_cmd, capture_output=True, text=True)
+    assert t_res.returncode == 0, f"Tamper local type command failed: {t_res.stderr}"
+
+    verify_res = verify_structural_transformations(tampered_dll, "edge_cases", baseline_path=BENIGN_DLL)
+    assert verify_res.get("verified") is False
+    assert verify_res.get("status") == "FAILED"
+    assert "baseline_exception_handlers_matched" in verify_res.get("unverified_transformations", [])
+
+
+def test_missing_tool_diagnostic_uses_custom_pin_label(runner_path, monkeypatch):
+    """
+    Validates that when a custom ConfuserEx pin is configured, the SKIPPED_TOOL_MISSING
+    diagnostic consistently reports the custom pin label and custom expected SHA-256
+    rather than stale module-level official defaults.
+    """
+    custom_sha = "b" * 64
+    custom_build = "Custom-CI-Diagnostic-Test"
+    monkeypatch.setenv("CONFUSEREX_SHA256", custom_sha)
+    monkeypatch.setenv("CONFUSEREX_BUILD_ID", custom_build)
+    monkeypatch.setenv("CONFUSEREX_PATH", "nonexistent/Confuser.CLI.exe")
+
+    summary = run_all_benchmarks(fixtures_dir=FIXTURES_DIR, runner_path=runner_path)
+    real_cases = [r for r in summary["results"] if r.get("scenario") == "real_confuserex"]
+    assert len(real_cases) == 1
+    real_case = real_cases[0]
+
+    assert real_case["verdict"] == "SKIPPED_TOOL_MISSING"
+    assert custom_build in real_case["case_name"]
+    assert custom_build in real_case["error"]
+    assert custom_sha[:16] in real_case["error"]
+    assert "yck1509/ConfuserEx" not in real_case["error"]
+
+
+

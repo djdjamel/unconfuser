@@ -118,6 +118,24 @@ namespace FixtureGenerator
                     }
                     return 0;
                 }
+                else if (args[i] == "--tamper-local-type" && i + 2 < args.Length)
+                {
+                    string inPath = Path.GetFullPath(args[++i]);
+                    string outPath = Path.GetFullPath(args[++i]);
+                    using (var mod = ModuleDefMD.Load(inPath))
+                    {
+                        var worker = mod.Find("BenignSample.GenericWorker`1", false);
+                        var proc = worker?.FindMethod("Process");
+                        if (proc != null && proc.Body.Variables.Count > 0)
+                        {
+                            proc.Body.KeepOldMaxStack = true;
+                            // Alter local variable type without changing the local count (int32 -> int64)
+                            proc.Body.Variables[0].Type = mod.CorLibTypes.Int64;
+                        }
+                        WriteModule(mod, outPath);
+                    }
+                    return 0;
+                }
             }
 
             if (!string.IsNullOrEmpty(verifyPath))
@@ -482,10 +500,67 @@ namespace FixtureGenerator
                                                 var baseCatch = baseProcess.Body.ExceptionHandlers.FirstOrDefault(h => h.HandlerType == ExceptionHandlerType.Catch);
                                                 var baseFinally = baseProcess.Body.ExceptionHandlers.FirstOrDefault(h => h.HandlerType == ExceptionHandlerType.Finally);
 
-                                                bool sigMatch = process.GenericParameters.Count == baseProcess.GenericParameters.Count
-                                                    && process.Parameters.Count == baseProcess.Parameters.Count
+                                                bool genericParamsMatch = process.GenericParameters.Count == baseProcess.GenericParameters.Count;
+                                                if (genericParamsMatch)
+                                                {
+                                                    for (int g = 0; g < process.GenericParameters.Count; g++)
+                                                    {
+                                                        var cleanGP = process.GenericParameters[g];
+                                                        var baseGP = baseProcess.GenericParameters[g];
+                                                        if (cleanGP.Name != baseGP.Name)
+                                                        {
+                                                            genericParamsMatch = false;
+                                                            break;
+                                                        }
+                                                        if (cleanGP.GenericParamConstraints.Count != baseGP.GenericParamConstraints.Count)
+                                                        {
+                                                            genericParamsMatch = false;
+                                                            break;
+                                                        }
+                                                        for (int c = 0; c < cleanGP.GenericParamConstraints.Count; c++)
+                                                        {
+                                                            if (cleanGP.GenericParamConstraints[c].Constraint?.FullName != baseGP.GenericParamConstraints[c].Constraint?.FullName)
+                                                            {
+                                                                genericParamsMatch = false;
+                                                                break;
+                                                            }
+                                                        }
+                                                        if (!genericParamsMatch) break;
+                                                    }
+                                                }
+
+                                                bool paramsMatch = process.Parameters.Count == baseProcess.Parameters.Count;
+                                                if (paramsMatch)
+                                                {
+                                                    for (int p = 0; p < process.Parameters.Count; p++)
+                                                    {
+                                                        var cleanParam = process.Parameters[p];
+                                                        var baseParam = baseProcess.Parameters[p];
+                                                        if (cleanParam.Type?.FullName != baseParam.Type?.FullName)
+                                                        {
+                                                            paramsMatch = false;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+
+                                                bool sigMatch = genericParamsMatch && paramsMatch
                                                     && process.ReturnType.FullName == baseProcess.ReturnType.FullName;
+
                                                 bool localsMatch = process.Body.Variables.Count == baseProcess.Body.Variables.Count;
+                                                if (localsMatch)
+                                                {
+                                                    for (int v = 0; v < process.Body.Variables.Count; v++)
+                                                    {
+                                                        var cleanVar = process.Body.Variables[v];
+                                                        var baseVar = baseProcess.Body.Variables[v];
+                                                        if (cleanVar.Type?.FullName != baseVar.Type?.FullName)
+                                                        {
+                                                            localsMatch = false;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
 
                                                 bool catchTypeMatch = baseCatch != null && catchMatches
                                                     && hCatch.HandlerType == baseCatch.HandlerType
@@ -578,7 +653,7 @@ namespace FixtureGenerator
 
                                 verified = hasGenericParam && returnTypeMatch && hasLocals && ehValid && baselineMatched && !unverified;
                                 notes = baselineCompared
-                                    ? "Generic method signature, local variables (3+), and exception-handler try/handler ranges (including semantic TryStart/TryEnd, HandlerStart/HandlerEnd targets, and instruction bodies) verified against baseline assembly."
+                                    ? "Generic method signature (parameters, return type, generic constraints), local variables (count and types), and exception-handler try/handler ranges (including semantic TryStart/TryEnd, HandlerStart/HandlerEnd targets, and instruction bodies) verified against baseline assembly."
                                     : "Generic method signature, local variables (3+), and exception-handler try/handler ranges structurally verified (baseline comparison unavailable).";
                             }
                             break;

@@ -445,6 +445,9 @@ def run_all_benchmarks(
     runner_path: Optional[Path] = None,
     output_report_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
+    # Validate ConfuserEx pin configuration upfront so invalid configuration fails immediately
+    pinned_release, expected_sha = get_confuserex_pin_configuration()
+
     if runner_path is None:
         runner_path = find_runner()
 
@@ -506,7 +509,6 @@ def run_all_benchmarks(
         results.append(res)
 
     # 9. Real ConfuserEx CLI Preset: Always included in results, whether tool is present or missing
-    pinned_release, expected_sha = get_confuserex_pin_configuration()
     confuser_cli_env = os.environ.get("CONFUSEREX_PATH")
     confuser_cli_path = Path(confuser_cli_env) if confuser_cli_env else WORKSPACE_ROOT / "tools" / "ConfuserEx" / "Confuser.CLI.exe"
     real_case_name = f"ConfuserEx {pinned_release} (Constants, Ctrl Flow, Ref Proxy, Resources)"
@@ -622,7 +624,7 @@ def run_all_benchmarks(
             "behavioral_match": False,
             "execution_returncode": None,
             "structural_verification": {},
-            "error": f"Confuser.CLI.exe ({CONFUSEREX_PINNED_RELEASE}, expected SHA-256: {CONFUSEREX_EXPECTED_SHA256[:16]}...) not found in tools/ConfuserEx or CONFUSEREX_PATH.",
+            "error": f"Confuser.CLI.exe ({pinned_release}, expected SHA-256: {expected_sha[:16]}...) not found in tools/ConfuserEx or CONFUSEREX_PATH.",
             "verdict": "SKIPPED_TOOL_MISSING",
         })
 
