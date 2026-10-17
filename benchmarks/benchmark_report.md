@@ -30,7 +30,7 @@
 | Control Flow (Dead Code & Junk Stripping) | `55519a0f` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: deadcode_junk_pair_stripped, switch_dispatch_structure_preserved | **`SYNTHETIC_PASS`** |
 | Reference & Method Call Proxies | `9fe5ba62` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: proxy_call_rewritten_to_target, intermediate_proxy_call_removed, proxy_method_definition_pruned | **`SYNTHETIC_PASS`** |
 | Encrypted Resources | `08f30f43` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: resource_manifest_names_matched, resource_byte_for_byte_exact_match | **`SYNTHETIC_PASS`** |
-| Deflate Compressor Unpacker | `fd87d0ea` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: payload_types_entrypoint_and_required_resources_matched_baseline, assembly_identity_restored_to_payload, all_payload_types_present, payload_embedded_resources_restored | **`SYNTHETIC_PASS`** |
+| Deflate Compressor Unpacker | `fd87d0ea` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: assembly_full_identity_matched_baseline, payload_types_entrypoint_and_required_resources_matched_baseline, assembly_simple_name_restored, all_payload_types_present, payload_embedded_resources_restored | **`SYNTHETIC_PASS`** |
 | Anti-Tamper & Cleaner Hooks | `d9b1635f` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: cctor_hook_removed, protector_method_pruned | **`SYNTHETIC_PASS`** |
 | Combined Multi-Protection | `53d0516a` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: proxies_inlined, cflow_deadcode_stripped, cctor_antitamper_hook_stripped<br>Unverified: constants_decrypted_and_inlined | **`SYNTHETIC_PARTIAL`** |
 | Generics & Exception Edges | `6fd38555` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: generic_method_signature_intact, local_variables_structure_preserved, exception_handlers_try_and_handler_ranges_verified, baseline_exception_handlers_matched | **`SYNTHETIC_PASS`** |
@@ -60,8 +60,8 @@
 
 ### 5. Deflate Compressor Unpacker (`SYNTHETIC_PASS`)
 - **Verdict:** `SYNTHETIC_PASS` | **Audit Status:** `CLEAN` | **Runtime Behavior:** `Exact Match`
-- **Verified Structural Transformations:** payload_types_entrypoint_and_required_resources_matched_baseline, assembly_identity_restored_to_payload, all_payload_types_present, payload_embedded_resources_restored
-- **Verification Notes:** Deflate container unwrapped and verified against reference BenignSample.dll: assembly identity, top-level type set (7 types), entry point, and required embedded resource byte-for-byte match.
+- **Verified Structural Transformations:** assembly_full_identity_matched_baseline, payload_types_entrypoint_and_required_resources_matched_baseline, assembly_simple_name_restored, all_payload_types_present, payload_embedded_resources_restored
+- **Verification Notes:** Deflate container unwrapped and verified against reference BenignSample.dll: 4-part assembly identity (Name, Version, Culture, PublicKeyToken), top-level type set (7 types), entry point, and required embedded resource byte-for-byte match.
 
 ### 6. Anti-Tamper & Cleaner Hooks (`SYNTHETIC_PASS`)
 - **Verdict:** `SYNTHETIC_PASS` | **Audit Status:** `CLEAN` | **Runtime Behavior:** `Exact Match`

@@ -63,6 +63,61 @@ namespace FixtureGenerator
                     }
                     return 0;
                 }
+                else if (args[i] == "--tamper-branch-target" && i + 2 < args.Length)
+                {
+                    string inPath = Path.GetFullPath(args[++i]);
+                    string outPath = Path.GetFullPath(args[++i]);
+                    using (var mod = ModuleDefMD.Load(inPath))
+                    {
+                        var worker = mod.Find("BenignSample.GenericWorker`1", false);
+                        var proc = worker?.FindMethod("Process");
+                        if (proc != null && proc.Body.Instructions.Count > 0)
+                        {
+                            proc.Body.KeepOldMaxStack = true;
+                            // Find a conditional branch targeting an instruction whose opcode is shared by another instruction
+                            var brInst = proc.Body.Instructions.FirstOrDefault(inst =>
+                                inst.Operand is Instruction target && target.OpCode == OpCodes.Ldstr);
+                            if (brInst != null)
+                            {
+                                var currentTarget = (Instruction)brInst.Operand;
+                                var altTarget = proc.Body.Instructions.FirstOrDefault(inst =>
+                                    inst != currentTarget && inst.OpCode == OpCodes.Ldstr);
+                                if (altTarget != null)
+                                {
+                                    brInst.Operand = altTarget;
+                                }
+                            }
+                        }
+                        WriteModule(mod, outPath);
+                    }
+                    return 0;
+                }
+                else if (args[i] == "--tamper-eh-boundary-fingerprint" && i + 2 < args.Length)
+                {
+                    string inPath = Path.GetFullPath(args[++i]);
+                    string outPath = Path.GetFullPath(args[++i]);
+                    using (var mod = ModuleDefMD.Load(inPath))
+                    {
+                        var worker = mod.Find("BenignSample.GenericWorker`1", false);
+                        var proc = worker?.FindMethod("Process");
+                        if (proc != null && proc.Body.ExceptionHandlers.Count > 0)
+                        {
+                            proc.Body.KeepOldMaxStack = true;
+                            var h = proc.Body.ExceptionHandlers[0];
+                            var origTryStart = h.TryStart;
+                            // Move TryStart to another instruction with the same structural fingerprint (ldloc.0)
+                            var altInst = proc.Body.Instructions.FirstOrDefault(inst =>
+                                inst != origTryStart && inst.OpCode == origTryStart.OpCode
+                                && ((inst.Operand == null && origTryStart.Operand == null) || (inst.Operand?.ToString() == origTryStart.Operand?.ToString())));
+                            if (altInst != null)
+                            {
+                                h.TryStart = altInst;
+                            }
+                        }
+                        WriteModule(mod, outPath);
+                    }
+                    return 0;
+                }
             }
 
             if (!string.IsNullOrEmpty(verifyPath))
@@ -236,7 +291,7 @@ namespace FixtureGenerator
 
                         case "compressor":
                             {
-                                bool isNotStub = module.Assembly != null && module.Assembly.Name == "BenignSample";
+                                bool hasSimpleName = module.Assembly != null && module.Assembly.Name == "BenignSample";
                                 bool hasProgram = module.Find("BenignSample.Program", false) != null;
                                 bool hasFeatures = module.Find("BenignSample.BenignFeatures", false) != null;
                                 bool hasCalc = module.Find("BenignSample.ICalculator", false) != null;
@@ -252,6 +307,7 @@ namespace FixtureGenerator
                                 if (string.IsNullOrEmpty(baselinePath) || !File.Exists(baselinePath))
                                 {
                                     unverified = true;
+                                    unverifiedTransformations.Add("assembly_full_identity_matched_baseline");
                                     unverifiedTransformations.Add("payload_types_entrypoint_and_required_resources_matched_baseline");
                                 }
                                 else
@@ -259,6 +315,16 @@ namespace FixtureGenerator
                                     using (var baseModule = ModuleDefMD.Load(baselinePath))
                                     {
                                         baselineCompared = true;
+                                        bool asmIdentityMatch = module.Assembly != null && baseModule.Assembly != null
+                                            && module.Assembly.Name == baseModule.Assembly.Name
+                                            && module.Assembly.Version == baseModule.Assembly.Version
+                                            && module.Assembly.Culture == baseModule.Assembly.Culture
+                                            && ((module.Assembly.PublicKeyOrToken == null && baseModule.Assembly.PublicKeyOrToken == null)
+                                                || (module.Assembly.PublicKeyOrToken != null && baseModule.Assembly.PublicKeyOrToken != null
+                                                    && (module.Assembly.PublicKeyOrToken.Data == null && baseModule.Assembly.PublicKeyOrToken.Data == null
+                                                        || (module.Assembly.PublicKeyOrToken.Data != null && baseModule.Assembly.PublicKeyOrToken.Data != null
+                                                            && module.Assembly.PublicKeyOrToken.Data.SequenceEqual(baseModule.Assembly.PublicKeyOrToken.Data)))));
+
                                         var cleanTypes = module.Types.Select(t => t.FullName).OrderBy(x => x).ToList();
                                         var baseTypes = baseModule.Types.Select(t => t.FullName).OrderBy(x => x).ToList();
                                         bool typesMatch = cleanTypes.SequenceEqual(baseTypes);
@@ -285,20 +351,22 @@ namespace FixtureGenerator
                                         bool epMatch = (module.EntryPoint == null && baseModule.EntryPoint == null)
                                             || (module.EntryPoint != null && baseModule.EntryPoint != null && module.EntryPoint.Name == baseModule.EntryPoint.Name);
 
-                                        baselineMatched = typesMatch && requiredResMatch && epMatch;
+                                        baselineMatched = asmIdentityMatch && typesMatch && requiredResMatch && epMatch;
                                         if (baselineMatched)
                                         {
+                                            verifiedTransformations.Add("assembly_full_identity_matched_baseline");
                                             verifiedTransformations.Add("payload_types_entrypoint_and_required_resources_matched_baseline");
                                         }
                                         else
                                         {
+                                            unverifiedTransformations.Add("assembly_full_identity_matched_baseline");
                                             unverifiedTransformations.Add("payload_types_entrypoint_and_required_resources_matched_baseline");
                                         }
                                     }
                                 }
 
-                                if (isNotStub) verifiedTransformations.Add("assembly_identity_restored_to_payload");
-                                else unverifiedTransformations.Add("assembly_identity_restored_to_payload");
+                                if (hasSimpleName) verifiedTransformations.Add("assembly_simple_name_restored");
+                                else unverifiedTransformations.Add("assembly_simple_name_restored");
 
                                 if (allTypesPresent) verifiedTransformations.Add("all_payload_types_present");
                                 else unverifiedTransformations.Add("all_payload_types_present");
@@ -306,9 +374,9 @@ namespace FixtureGenerator
                                 if (hasGreetingRes) verifiedTransformations.Add("payload_embedded_resources_restored");
                                 else unverifiedTransformations.Add("payload_embedded_resources_restored");
 
-                                verified = isNotStub && allTypesPresent && hasGreetingRes && baselineMatched && !unverified;
+                                verified = hasSimpleName && allTypesPresent && hasGreetingRes && baselineMatched && !unverified;
                                 notes = baselineCompared
-                                    ? "Deflate container unwrapped and verified against reference BenignSample.dll: assembly identity, top-level type set (7 types), entry point, and required embedded resource byte-for-byte match."
+                                    ? "Deflate container unwrapped and verified against reference BenignSample.dll: 4-part assembly identity (Name, Version, Culture, PublicKeyToken), top-level type set (7 types), entry point, and required embedded resource byte-for-byte match."
                                     : "Deflate container unwrapped and verified against known payload assembly types, identity, and required resources (baseline comparison unverified).";
                             }
                             break;
@@ -426,35 +494,51 @@ namespace FixtureGenerator
                                                 bool finallyTypeMatch = baseFinally != null && finallyMatches
                                                     && hFinally.HandlerType == baseFinally.HandlerType;
 
+                                                var cleanStream = new NormalizedMethodStream(process.Body.Instructions);
+                                                var baseStream = new NormalizedMethodStream(baseProcess.Body.Instructions);
+
                                                 bool catchBoundariesMatch = catchTypeMatch
-                                                    && MatchSemanticInstruction(hCatch.TryStart, baseCatch.TryStart)
-                                                    && MatchSemanticInstruction(hCatch.TryEnd, baseCatch.TryEnd)
-                                                    && MatchSemanticInstruction(hCatch.HandlerStart, baseCatch.HandlerStart)
-                                                    && MatchSemanticInstruction(hCatch.HandlerEnd, baseCatch.HandlerEnd);
+                                                    && cleanStream.GetNormalizedTargetIndex(hCatch.TryStart) == baseStream.GetNormalizedTargetIndex(baseCatch.TryStart)
+                                                    && cleanStream.GetNormalizedTargetIndex(hCatch.TryEnd) == baseStream.GetNormalizedTargetIndex(baseCatch.TryEnd)
+                                                    && cleanStream.GetNormalizedTargetIndex(hCatch.HandlerStart) == baseStream.GetNormalizedTargetIndex(baseCatch.HandlerStart)
+                                                    && cleanStream.GetNormalizedTargetIndex(hCatch.HandlerEnd) == baseStream.GetNormalizedTargetIndex(baseCatch.HandlerEnd)
+                                                    && MatchSemanticInstruction(hCatch.TryStart, baseCatch.TryStart, cleanStream, baseStream)
+                                                    && MatchSemanticInstruction(hCatch.TryEnd, baseCatch.TryEnd, cleanStream, baseStream)
+                                                    && MatchSemanticInstruction(hCatch.HandlerStart, baseCatch.HandlerStart, cleanStream, baseStream)
+                                                    && MatchSemanticInstruction(hCatch.HandlerEnd, baseCatch.HandlerEnd, cleanStream, baseStream);
 
                                                 bool finallyBoundariesMatch = finallyTypeMatch
-                                                    && MatchSemanticInstruction(hFinally.TryStart, baseFinally.TryStart)
-                                                    && MatchSemanticInstruction(hFinally.TryEnd, baseFinally.TryEnd)
-                                                    && MatchSemanticInstruction(hFinally.HandlerStart, baseFinally.HandlerStart)
-                                                    && MatchSemanticInstruction(hFinally.HandlerEnd, baseFinally.HandlerEnd);
+                                                    && cleanStream.GetNormalizedTargetIndex(hFinally.TryStart) == baseStream.GetNormalizedTargetIndex(baseFinally.TryStart)
+                                                    && cleanStream.GetNormalizedTargetIndex(hFinally.TryEnd) == baseStream.GetNormalizedTargetIndex(baseFinally.TryEnd)
+                                                    && cleanStream.GetNormalizedTargetIndex(hFinally.HandlerStart) == baseStream.GetNormalizedTargetIndex(baseFinally.HandlerStart)
+                                                    && cleanStream.GetNormalizedTargetIndex(hFinally.HandlerEnd) == baseStream.GetNormalizedTargetIndex(baseFinally.HandlerEnd)
+                                                    && MatchSemanticInstruction(hFinally.TryStart, baseFinally.TryStart, cleanStream, baseStream)
+                                                    && MatchSemanticInstruction(hFinally.TryEnd, baseFinally.TryEnd, cleanStream, baseStream)
+                                                    && MatchSemanticInstruction(hFinally.HandlerStart, baseFinally.HandlerStart, cleanStream, baseStream)
+                                                    && MatchSemanticInstruction(hFinally.HandlerEnd, baseFinally.HandlerEnd, cleanStream, baseStream);
 
                                                 bool catchTryMatch = catchBoundariesMatch && MatchInstructionRanges(
-                                                    process.Body.Instructions, hCatch.TryStart, hCatch.TryEnd,
-                                                    baseProcess.Body.Instructions, baseCatch.TryStart, baseCatch.TryEnd);
+                                                    cleanStream, hCatch.TryStart, hCatch.TryEnd,
+                                                    baseStream, baseCatch.TryStart, baseCatch.TryEnd);
 
                                                 bool catchHandlerMatch = catchBoundariesMatch && MatchInstructionRanges(
-                                                    process.Body.Instructions, hCatch.HandlerStart, hCatch.HandlerEnd,
-                                                    baseProcess.Body.Instructions, baseCatch.HandlerStart, baseCatch.HandlerEnd);
+                                                    cleanStream, hCatch.HandlerStart, hCatch.HandlerEnd,
+                                                    baseStream, baseCatch.HandlerStart, baseCatch.HandlerEnd);
 
                                                 bool finallyTryMatch = finallyBoundariesMatch && MatchInstructionRanges(
-                                                    process.Body.Instructions, hFinally.TryStart, hFinally.TryEnd,
-                                                    baseProcess.Body.Instructions, baseFinally.TryStart, baseFinally.TryEnd);
+                                                    cleanStream, hFinally.TryStart, hFinally.TryEnd,
+                                                    baseStream, baseFinally.TryStart, baseFinally.TryEnd);
 
                                                 bool finallyHandlerMatch = finallyBoundariesMatch && MatchInstructionRanges(
-                                                    process.Body.Instructions, hFinally.HandlerStart, hFinally.HandlerEnd,
-                                                    baseProcess.Body.Instructions, baseFinally.HandlerStart, baseFinally.HandlerEnd);
+                                                    cleanStream, hFinally.HandlerStart, hFinally.HandlerEnd,
+                                                    baseStream, baseFinally.HandlerStart, baseFinally.HandlerEnd);
+
+                                                bool methodBodyMatch = MatchInstructionRanges(
+                                                    cleanStream, process.Body.Instructions.FirstOrDefault(), null,
+                                                    baseStream, baseProcess.Body.Instructions.FirstOrDefault(), null);
 
                                                 baselineMatched = sigMatch && localsMatch
+                                                    && methodBodyMatch
                                                     && catchBoundariesMatch && finallyBoundariesMatch
                                                     && catchTryMatch && catchHandlerMatch
                                                     && finallyTryMatch && finallyHandlerMatch;
@@ -566,7 +650,72 @@ namespace FixtureGenerator
             }
         }
 
-        private static bool MatchSemanticInstruction(Instruction a, Instruction b)
+        private sealed class NormalizedMethodStream
+        {
+            public IList<Instruction> AllInstructions { get; }
+            public List<Instruction> NonNopInstructions { get; }
+            private readonly Dictionary<Instruction, int> _instructionToNonNopIndex;
+
+            public NormalizedMethodStream(IList<Instruction> instructions)
+            {
+                AllInstructions = instructions ?? Array.Empty<Instruction>();
+                NonNopInstructions = new List<Instruction>();
+                _instructionToNonNopIndex = new Dictionary<Instruction, int>();
+
+                int nonNopIdx = 0;
+                for (int i = 0; i < AllInstructions.Count; i++)
+                {
+                    var inst = AllInstructions[i];
+                    if (inst.OpCode != OpCodes.Nop)
+                    {
+                        NonNopInstructions.Add(inst);
+                        _instructionToNonNopIndex[inst] = nonNopIdx;
+                        nonNopIdx++;
+                    }
+                }
+            }
+
+            public int GetNormalizedTargetIndex(Instruction target)
+            {
+                if (target == null) return NonNopInstructions.Count;
+                if (_instructionToNonNopIndex.TryGetValue(target, out int idx))
+                    return idx;
+
+                int rawIdx = AllInstructions.IndexOf(target);
+                if (rawIdx < 0) return -1;
+
+                for (int i = rawIdx; i < AllInstructions.Count; i++)
+                {
+                    var inst = AllInstructions[i];
+                    if (_instructionToNonNopIndex.TryGetValue(inst, out int found))
+                        return found;
+                }
+
+                return NonNopInstructions.Count;
+            }
+
+            public List<Instruction> GetRangeInstructions(Instruction start, Instruction end)
+            {
+                var list = new List<Instruction>();
+                if (start == null) return list;
+
+                int startIdx = GetNormalizedTargetIndex(start);
+                if (startIdx < 0) return list;
+
+                int endIdx = end != null ? GetNormalizedTargetIndex(end) : NonNopInstructions.Count;
+                if (endIdx < 0) endIdx = NonNopInstructions.Count;
+
+                for (int i = startIdx; i < endIdx && i < NonNopInstructions.Count; i++)
+                {
+                    list.Add(NonNopInstructions[i]);
+                }
+                return list;
+            }
+        }
+
+        private static bool MatchSemanticInstruction(
+            Instruction a, Instruction b,
+            NormalizedMethodStream aStream = null, NormalizedMethodStream bStream = null)
         {
             if (a == null && b == null) return true;
             if (a == null || b == null) return false;
@@ -594,13 +743,27 @@ namespace FixtureGenerator
                 return aLong == bLong;
 
             if (a.Operand is Instruction aTarget && b.Operand is Instruction bTarget)
-                return aTarget.OpCode == bTarget.OpCode;
-
-            if (a.Operand is Instruction[] aTargets && b.Operand is Instruction[] bTargets)
             {
-                if (aTargets.Length != bTargets.Length) return false;
-                for (int i = 0; i < aTargets.Length; i++)
+                if (aStream != null && bStream != null)
                 {
+                    int aIdx = aStream.GetNormalizedTargetIndex(aTarget);
+                    int bIdx = bStream.GetNormalizedTargetIndex(bTarget);
+                    if (aIdx != bIdx || aIdx < 0) return false;
+                }
+                return aTarget.OpCode == bTarget.OpCode;
+            }
+
+            if (a.Operand is IList<Instruction> aTargets && b.Operand is IList<Instruction> bTargets)
+            {
+                if (aTargets.Count != bTargets.Count) return false;
+                for (int i = 0; i < aTargets.Count; i++)
+                {
+                    if (aStream != null && bStream != null)
+                    {
+                        int aIdx = aStream.GetNormalizedTargetIndex(aTargets[i]);
+                        int bIdx = bStream.GetNormalizedTargetIndex(bTargets[i]);
+                        if (aIdx != bIdx || aIdx < 0) return false;
+                    }
                     if (aTargets[i]?.OpCode != bTargets[i]?.OpCode) return false;
                 }
                 return true;
@@ -609,43 +772,34 @@ namespace FixtureGenerator
             return a.Operand.ToString() == b.Operand.ToString();
         }
 
-        private static List<Instruction> GetRangeInstructions(IList<Instruction> allInstrs, Instruction start, Instruction end)
-        {
-            var list = new List<Instruction>();
-            if (start == null || allInstrs == null) return list;
-
-            int startIndex = allInstrs.IndexOf(start);
-            if (startIndex < 0) return list;
-
-            int endIndex = end != null ? allInstrs.IndexOf(end) : allInstrs.Count;
-            if (endIndex < 0) endIndex = allInstrs.Count;
-
-            for (int i = startIndex; i < endIndex; i++)
-            {
-                var inst = allInstrs[i];
-                if (inst.OpCode != OpCodes.Nop)
-                {
-                    list.Add(inst);
-                }
-            }
-            return list;
-        }
-
         private static bool MatchInstructionRanges(
-            IList<Instruction> cleanInstrs, Instruction cleanStart, Instruction cleanEnd,
-            IList<Instruction> baseInstrs, Instruction baseStart, Instruction baseEnd)
+            NormalizedMethodStream cleanStream, Instruction cleanStart, Instruction cleanEnd,
+            NormalizedMethodStream baseStream, Instruction baseStart, Instruction baseEnd)
         {
-            if (!MatchSemanticInstruction(cleanStart, baseStart)) return false;
-            if (!MatchSemanticInstruction(cleanEnd, baseEnd)) return false;
+            if (cleanStream == null || baseStream == null) return false;
 
-            var cleanRange = GetRangeInstructions(cleanInstrs, cleanStart, cleanEnd);
-            var baseRange = GetRangeInstructions(baseInstrs, baseStart, baseEnd);
+            int cleanStartIdx = cleanStream.GetNormalizedTargetIndex(cleanStart);
+            int baseStartIdx = baseStream.GetNormalizedTargetIndex(baseStart);
+            if (cleanStartIdx != baseStartIdx || cleanStartIdx < 0) return false;
+
+            int cleanEndIdx = cleanStream.GetNormalizedTargetIndex(cleanEnd);
+            int baseEndIdx = baseStream.GetNormalizedTargetIndex(baseEnd);
+            if (cleanEndIdx != baseEndIdx || cleanEndIdx < 0) return false;
+
+            if (!MatchSemanticInstruction(cleanStart, baseStart, cleanStream, baseStream)) return false;
+            if (cleanEnd != null || baseEnd != null)
+            {
+                if (!MatchSemanticInstruction(cleanEnd, baseEnd, cleanStream, baseStream)) return false;
+            }
+
+            var cleanRange = cleanStream.GetRangeInstructions(cleanStart, cleanEnd);
+            var baseRange = baseStream.GetRangeInstructions(baseStart, baseEnd);
 
             if (cleanRange.Count != baseRange.Count) return false;
 
             for (int i = 0; i < cleanRange.Count; i++)
             {
-                if (!MatchSemanticInstruction(cleanRange[i], baseRange[i]))
+                if (!MatchSemanticInstruction(cleanRange[i], baseRange[i], cleanStream, baseStream))
                     return false;
             }
 

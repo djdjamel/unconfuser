@@ -19,6 +19,8 @@ from benchmarks.run_benchmark import (
     run_benchmark_case,
     run_all_benchmarks,
     verify_structural_transformations,
+    validate_sha256,
+    get_confuserex_pin_configuration,
     FIXTURES_DIR,
     BENIGN_DLL,
     CONFUSEREX_EXPECTED_SHA256,
@@ -251,6 +253,7 @@ def test_missing_baseline_fails_closed_and_unverified(tmp_path, runner_path, exp
     comp_res = verify_structural_transformations(comp_clean, "compressor", baseline_path=fake_baseline)
     assert comp_res.get("verified") is False
     assert comp_res.get("status") == "UNVERIFIED"
+    assert "assembly_full_identity_matched_baseline" in comp_res.get("unverified_transformations", [])
     assert "payload_types_entrypoint_and_required_resources_matched_baseline" in comp_res.get("unverified_transformations", [])
 
 
@@ -328,4 +331,107 @@ def test_mismatched_confuserex_checksum_fails(tmp_path, runner_path, monkeypatch
     assert "identity verification failed" in real_case["error"]
     assert str(CONFUSEREX_EXPECTED_SHA256) in real_case["error"]
     assert real_case["output_produced"] is False
+
+
+def test_branch_target_redirection_to_same_opcode_detected(tmp_path, runner_path, expected_baseline):
+    """
+    Validates that redirecting a branch instruction to a different target with the same
+    OpCode (e.g. redirecting brtrue to another ldstr) is caught by normalized instruction
+    mapping rather than falsely matching on OpCode equality alone.
+    """
+    generator = find_generator()
+    clean_path = FIXTURES_DIR / "fixture_edge_cases_clean.dll"
+    if not clean_path.exists():
+        run_benchmark_case(
+            "Generics & Exception Edges",
+            FIXTURES_DIR / "fixture_edge_cases.dll",
+            "edge_cases",
+            runner_path,
+            expected_baseline,
+            baseline_dll_path=BENIGN_DLL,
+        )
+
+    tampered_dll = tmp_path / "tampered_branch_target.dll"
+    tamper_cmd = get_exec_command(generator) + ["--tamper-branch-target", str(clean_path), str(tampered_dll)]
+    t_res = subprocess.run(tamper_cmd, capture_output=True, text=True)
+    assert t_res.returncode == 0, f"Tamper branch command failed: {t_res.stderr}"
+
+    verify_res = verify_structural_transformations(tampered_dll, "edge_cases", baseline_path=BENIGN_DLL)
+    assert verify_res.get("verified") is False
+    assert verify_res.get("status") == "FAILED"
+    assert "baseline_exception_handlers_matched" in verify_res.get("unverified_transformations", [])
+
+
+def test_exception_handler_boundary_moved_to_same_structural_fingerprint_detected(tmp_path, runner_path, expected_baseline):
+    """
+    Validates that moving an exception-handler boundary (TryStart) to another instruction
+    with the exact same structural fingerprint (same OpCode ldloc.0 and operand) is detected
+    via normalized instruction stream index alignment.
+    """
+    generator = find_generator()
+    clean_path = FIXTURES_DIR / "fixture_edge_cases_clean.dll"
+    if not clean_path.exists():
+        run_benchmark_case(
+            "Generics & Exception Edges",
+            FIXTURES_DIR / "fixture_edge_cases.dll",
+            "edge_cases",
+            runner_path,
+            expected_baseline,
+            baseline_dll_path=BENIGN_DLL,
+        )
+
+    tampered_dll = tmp_path / "tampered_eh_fingerprint.dll"
+    tamper_cmd = get_exec_command(generator) + ["--tamper-eh-boundary-fingerprint", str(clean_path), str(tampered_dll)]
+    t_res = subprocess.run(tamper_cmd, capture_output=True, text=True)
+    assert t_res.returncode == 0, f"Tamper EH boundary fingerprint command failed: {t_res.stderr}"
+
+    verify_res = verify_structural_transformations(tampered_dll, "edge_cases", baseline_path=BENIGN_DLL)
+    assert verify_res.get("verified") is False
+    assert verify_res.get("status") == "FAILED"
+    assert "baseline_exception_handlers_matched" in verify_res.get("unverified_transformations", [])
+
+
+def test_whitespace_and_invalid_confuserex_sha256_fails_immediately(tmp_path, runner_path, monkeypatch):
+    """
+    Validates that any invalid CONFUSEREX_SHA256 (including whitespace-only strings that would
+    strip to empty, wrong-length hex strings, and non-hex characters) fails immediately with
+    ValueError and cannot accidentally disable executable checksum verification.
+    """
+    # 1. Whitespace only: must raise ValueError immediately
+    monkeypatch.setenv("CONFUSEREX_SHA256", "   \t  \n  ")
+    with pytest.raises(ValueError, match="CONFUSEREX_SHA256 environment variable"):
+        get_confuserex_pin_configuration()
+
+    with pytest.raises(ValueError, match="CONFUSEREX_SHA256 environment variable"):
+        run_all_benchmarks(fixtures_dir=FIXTURES_DIR, runner_path=runner_path)
+
+    # 2. Too short (e.g. 63 chars): must raise ValueError
+    monkeypatch.setenv("CONFUSEREX_SHA256", "a" * 63)
+    with pytest.raises(ValueError, match="expected exactly 64 hexadecimal characters"):
+        get_confuserex_pin_configuration()
+
+    # 3. Non-hex characters: must raise ValueError
+    monkeypatch.setenv("CONFUSEREX_SHA256", "z" * 64)
+    with pytest.raises(ValueError, match="expected exactly 64 hexadecimal characters"):
+        get_confuserex_pin_configuration()
+
+    # 4. Valid 64-hex override succeeds in configuration resolution
+    valid_sha = "a" * 64
+    monkeypatch.setenv("CONFUSEREX_SHA256", valid_sha)
+    monkeypatch.setenv("CONFUSEREX_BUILD_ID", "CI-Test-Build-42")
+    pinned_release, expected_sha = get_confuserex_pin_configuration()
+    assert expected_sha == valid_sha
+    assert "Custom ConfuserEx Build (CI-Test-Build-42)" in pinned_release
+
+    # 5. Executable whose hash does not match the valid override fails verification
+    fake_cli = tmp_path / "Confuser.CLI.exe"
+    fake_cli.write_bytes(b"MZ_DUMMY_EXECUTABLE_CONTENT_FOR_HASH_MISMATCH_TEST")
+    monkeypatch.setenv("CONFUSEREX_PATH", str(fake_cli))
+
+    summary = run_all_benchmarks(fixtures_dir=FIXTURES_DIR, runner_path=runner_path)
+    real_cases = [r for r in summary["results"] if r.get("scenario") == "real_confuserex"]
+    assert len(real_cases) == 1
+    assert real_cases[0]["verdict"] == "REAL_PROTECTOR_FAIL"
+    assert valid_sha in real_cases[0]["error"]
+
 

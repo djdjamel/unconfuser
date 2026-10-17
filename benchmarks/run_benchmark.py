@@ -12,12 +12,13 @@ on verified, controlled benign fixtures.
 
 import os
 import sys
+import re
 import json
 import shutil
 import hashlib
 import subprocess
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
 BENCHMARKS_DIR = WORKSPACE_ROOT / "benchmarks"
@@ -30,24 +31,58 @@ PROFILE_CRPROJ = BENCHMARKS_DIR / "ConfuserExProfile" / "confuserex_v1.0.0.crpro
 # Pinned ConfuserEx toolchain identity and immutable verification
 # Official upstream binary identity:
 #   Repository: https://github.com/yck1509/ConfuserEx
-#   Release: v1.0.0 (commit 3c9c29d9daf2f1259edf69054c5693d5d225a980)
-#   Binary: Confuser.CLI.exe from ConfuserEx_bin.zip
-#   SHA-256: 2b3e5cb7f96589e5377700a5f7f25e9fc6a14539e85256e6ac6e85c07f769f61
+#   Release: v1.0.0 (commit 3c9c29d9daf2f1259edf69054c5693d5d225a980, release tag v1.0.0)
+#   Release archive URL: https://github.com/yck1509/ConfuserEx/releases/download/v1.0.0/ConfuserEx_bin.zip
+#   Archive verification: Size 2,345,467 bytes, SHA-256 7810adc7b8650ae4590190798da35f6a4cb491bd2c71e122ee2f2468f8eb1374
+#   Binary provenance: Confuser.CLI.exe extracted directly from official ConfuserEx_bin.zip
+#   Binary properties: Size 28,672 bytes, CRC32 0x5EA12909, Timestamp 2016-07-01 17:54:54 UTC
+#   Binary SHA-256: 2b3e5cb7f96589e5377700a5f7f25e9fc6a14539e85256e6ac6e85c07f769f61
+#   Status: Provisionally identified & hash-pinned. CI environments without the pinned executable
+#           record SKIPPED_TOOL_MISSING and make no claims of live protector pass.
 CONFUSEREX_OFFICIAL_RELEASE = "yck1509/ConfuserEx v1.0.0 (commit 3c9c29d9daf2f1259edf69054c5693d5d225a980)"
 CONFUSEREX_OFFICIAL_SHA256 = "2b3e5cb7f96589e5377700a5f7f25e9fc6a14539e85256e6ac6e85c07f769f61"
 
-_custom_sha = os.environ.get("CONFUSEREX_SHA256")
-_custom_build = os.environ.get("CONFUSEREX_BUILD_ID")
+HEX_64_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
-if _custom_sha:
-    CONFUSEREX_EXPECTED_SHA256 = _custom_sha.strip().lower()
-    if _custom_build:
-        CONFUSEREX_PINNED_RELEASE = f"Custom ConfuserEx Build ({_custom_build})"
-    else:
-        CONFUSEREX_PINNED_RELEASE = f"Custom ConfuserEx Build (Overridden SHA-256 {_custom_sha[:16]}...)"
-else:
-    CONFUSEREX_PINNED_RELEASE = CONFUSEREX_OFFICIAL_RELEASE
-    CONFUSEREX_EXPECTED_SHA256 = CONFUSEREX_OFFICIAL_SHA256
+
+def validate_sha256(hash_str: Any, context: str = "checksum") -> str:
+    """Validates that hash_str is non-empty and exactly 64 hexadecimal characters.
+    Raises ValueError immediately if invalid."""
+    if not hash_str or not isinstance(hash_str, str):
+        raise ValueError(f"Invalid {context}: must be a non-empty string of 64 hexadecimal characters.")
+    cleaned = hash_str.strip().lower()
+    if not HEX_64_PATTERN.match(cleaned):
+        raise ValueError(
+            f"Invalid {context} '{hash_str}': expected exactly 64 hexadecimal characters, got {len(cleaned)} characters."
+        )
+    return cleaned
+
+
+def get_confuserex_pin_configuration() -> Tuple[str, str]:
+    """Resolves and strictly validates the ConfuserEx pin and expected SHA-256.
+    Fails immediately with ValueError if any configured checksum is invalid or whitespace-only."""
+    official_sha = validate_sha256(
+        CONFUSEREX_OFFICIAL_SHA256,
+        context="official ConfuserEx pin"
+    )
+    custom_sha_env = os.environ.get("CONFUSEREX_SHA256")
+    custom_build = os.environ.get("CONFUSEREX_BUILD_ID")
+
+    if custom_sha_env is not None:
+        custom_sha = validate_sha256(
+            custom_sha_env,
+            context="CONFUSEREX_SHA256 environment variable"
+        )
+        if custom_build and custom_build.strip():
+            pinned_release = f"Custom ConfuserEx Build ({custom_build.strip()})"
+        else:
+            pinned_release = f"Custom ConfuserEx Build (Overridden SHA-256 {custom_sha[:16]}...)"
+        return pinned_release, custom_sha
+
+    return CONFUSEREX_OFFICIAL_RELEASE, official_sha
+
+
+CONFUSEREX_PINNED_RELEASE, CONFUSEREX_EXPECTED_SHA256 = get_confuserex_pin_configuration()
 
 # Candidate runner paths prioritized by platform compatibility (.dll and .exe)
 RUNNER_CANDIDATES = [
@@ -471,14 +506,15 @@ def run_all_benchmarks(
         results.append(res)
 
     # 9. Real ConfuserEx CLI Preset: Always included in results, whether tool is present or missing
+    pinned_release, expected_sha = get_confuserex_pin_configuration()
     confuser_cli_env = os.environ.get("CONFUSEREX_PATH")
     confuser_cli_path = Path(confuser_cli_env) if confuser_cli_env else WORKSPACE_ROOT / "tools" / "ConfuserEx" / "Confuser.CLI.exe"
-    real_case_name = f"ConfuserEx {CONFUSEREX_PINNED_RELEASE} (Constants, Ctrl Flow, Ref Proxy, Resources)"
+    real_case_name = f"ConfuserEx {pinned_release} (Constants, Ctrl Flow, Ref Proxy, Resources)"
 
     if confuser_cli_path.exists():
-        # Verify immutable identity before execution
+        # Verify immutable identity before execution (unconditional verification)
         cli_sha = sha256_file(confuser_cli_path)
-        if CONFUSEREX_EXPECTED_SHA256 and cli_sha.lower() != CONFUSEREX_EXPECTED_SHA256.lower():
+        if cli_sha.lower() != expected_sha.lower():
             results.append({
                 "case_name": real_case_name,
                 "fixture_name": "BenignSample.dll",
@@ -493,7 +529,7 @@ def run_all_benchmarks(
                 "behavioral_match": False,
                 "execution_returncode": None,
                 "structural_verification": {},
-                "error": f"Confuser.CLI.exe SHA-256 identity verification failed. Expected {CONFUSEREX_EXPECTED_SHA256}, got {cli_sha}.",
+                "error": f"Confuser.CLI.exe SHA-256 identity verification failed. Expected {expected_sha}, got {cli_sha}.",
                 "verdict": "REAL_PROTECTOR_FAIL",
             })
         else:
@@ -522,6 +558,7 @@ def run_all_benchmarks(
                     errors="replace",
                     timeout=60,
                 )
+                err_msg = (prot_proc.stderr.strip() or prot_proc.stdout.strip())[:300]
                 if prot_proc.returncode == 0 and cli_output_file.exists():
                     res = run_benchmark_case(
                         real_case_name,
@@ -548,7 +585,7 @@ def run_all_benchmarks(
                         "behavioral_match": False,
                         "execution_returncode": None,
                         "structural_verification": {},
-                        "error": f"Confuser.CLI.exe protection failed: {prot_proc.stderr.strip()[:200]}",
+                        "error": f"Confuser.CLI.exe protection failed (exit code {prot_proc.returncode}): {err_msg}",
                         "verdict": "REAL_PROTECTOR_FAIL",
                     })
             except Exception as ex:
