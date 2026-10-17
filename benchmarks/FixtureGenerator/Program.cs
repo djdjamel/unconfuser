@@ -136,6 +136,24 @@ namespace FixtureGenerator
                     }
                     return 0;
                 }
+                else if (args[i] == "--tamper-generic-constraint" && i + 2 < args.Length)
+                {
+                    string inPath = Path.GetFullPath(args[++i]);
+                    string outPath = Path.GetFullPath(args[++i]);
+                    using (var mod = ModuleDefMD.Load(inPath))
+                    {
+                        var worker = mod.Find("BenignSample.GenericWorker`1", false);
+                        var proc = worker?.FindMethod("Process");
+                        if (proc != null && proc.GenericParameters.Count > 0)
+                        {
+                            proc.Body.KeepOldMaxStack = true;
+                            // Alter special constraint flag without changing the explicit constraint collection
+                            proc.GenericParameters[0].Flags ^= GenericParamAttributes.ReferenceTypeConstraint;
+                        }
+                        WriteModule(mod, outPath);
+                    }
+                    return 0;
+                }
             }
 
             if (!string.IsNullOrEmpty(verifyPath))
@@ -512,6 +530,11 @@ namespace FixtureGenerator
                                                             genericParamsMatch = false;
                                                             break;
                                                         }
+                                                        if (cleanGP.Flags != baseGP.Flags)
+                                                        {
+                                                            genericParamsMatch = false;
+                                                            break;
+                                                        }
                                                         if (cleanGP.GenericParamConstraints.Count != baseGP.GenericParamConstraints.Count)
                                                         {
                                                             genericParamsMatch = false;
@@ -653,7 +676,7 @@ namespace FixtureGenerator
 
                                 verified = hasGenericParam && returnTypeMatch && hasLocals && ehValid && baselineMatched && !unverified;
                                 notes = baselineCompared
-                                    ? "Generic method signature (parameters, return type, generic constraints), local variables (count and types), and exception-handler try/handler ranges (including semantic TryStart/TryEnd, HandlerStart/HandlerEnd targets, and instruction bodies) verified against baseline assembly."
+                                    ? "Generic method signature (parameters, return type, generic constraints & special flags), local variables (count and types), and exception-handler try/handler ranges (including semantic TryStart/TryEnd, HandlerStart/HandlerEnd targets, and instruction bodies) verified against baseline assembly."
                                     : "Generic method signature, local variables (3+), and exception-handler try/handler ranges structurally verified (baseline comparison unavailable).";
                             }
                             break;

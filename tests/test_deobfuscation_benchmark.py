@@ -487,4 +487,33 @@ def test_missing_tool_diagnostic_uses_custom_pin_label(runner_path, monkeypatch)
     assert "yck1509/ConfuserEx" not in real_case["error"]
 
 
+def test_altered_generic_special_constraint_flag_detected(tmp_path, runner_path, expected_baseline):
+    """
+    Validates that altering a generic parameter's special constraint flags (e.g. ReferenceTypeConstraint)
+    without modifying the explicit constraint collection is caught by baseline metadata comparison and fails verification.
+    """
+    generator = find_generator()
+    clean_path = FIXTURES_DIR / "fixture_edge_cases_clean.dll"
+    if not clean_path.exists():
+        run_benchmark_case(
+            "Generics & Exception Edges",
+            FIXTURES_DIR / "fixture_edge_cases.dll",
+            "edge_cases",
+            runner_path,
+            expected_baseline,
+            baseline_dll_path=BENIGN_DLL,
+        )
+
+    tampered_dll = tmp_path / "tampered_generic_constraint.dll"
+    tamper_cmd = get_exec_command(generator) + ["--tamper-generic-constraint", str(clean_path), str(tampered_dll)]
+    t_res = subprocess.run(tamper_cmd, capture_output=True, text=True)
+    assert t_res.returncode == 0, f"Tamper generic constraint command failed: {t_res.stderr}"
+
+    verify_res = verify_structural_transformations(tampered_dll, "edge_cases", baseline_path=BENIGN_DLL)
+    assert verify_res.get("verified") is False
+    assert verify_res.get("status") == "FAILED"
+    assert "baseline_exception_handlers_matched" in verify_res.get("unverified_transformations", [])
+
+
+
 
