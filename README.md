@@ -134,3 +134,9 @@ Run the False Positive Benchmark Gate:
 ```bash
 python tests/fp_benchmark.py --limit 150 --baseline tests/fp_baseline.json
 ```
+
+---
+
+## Licenses & Attributions
+
+This project incorporates and links with `de4dot.blocks.dll` (GPLv3) and `dnlib.dll` (MIT). For detailed licensing analysis, third-party attributions, .NET framework support lifecycle, and security guidance, see [docs/LICENSES.md](docs/LICENSES.md).
