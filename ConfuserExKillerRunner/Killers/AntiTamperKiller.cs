@@ -55,6 +55,7 @@ namespace ConfuserExKillerRunner.Killers
 
             // Run module constructor to let runtime AntiTamper unpack sections in memory
             bool cctorSucceeded = false;
+            string cctorError = null;
             try
             {
                 RuntimeHelpers.RunModuleConstructor(module.ModuleHandle);
@@ -64,6 +65,7 @@ namespace ConfuserExKillerRunner.Killers
             {
                 Logger.LogWarning($"[AntiTamper] Runtime module constructor execution warning: {ex.Message}");
                 cctorSucceeded = false;
+                cctorError = ex.Message;
             }
 
             void* hModule = (void*)Marshal.GetHINSTANCE(module);
@@ -71,6 +73,7 @@ namespace ConfuserExKillerRunner.Killers
             {
                 result.Status = AntiTamperStatus.Failed;
                 result.Message = "Failed to obtain HINSTANCE for target module";
+                result.DecryptedPeImage = (byte[])peImage.Clone();
                 return result;
             }
 
@@ -87,6 +90,7 @@ namespace ConfuserExKillerRunner.Killers
                 {
                     result.Status = AntiTamperStatus.Failed;
                     result.Message = "Invalid in-memory PE header signature";
+                    result.DecryptedPeImage = (byte[])peImage.Clone();
                     return result;
                 }
 
@@ -168,6 +172,18 @@ namespace ConfuserExKillerRunner.Killers
                 Logger.LogError($"[AntiTamper] Section diffing failed: {ex.Message}");
                 result.Status = AntiTamperStatus.Failed;
                 result.Message = $"Anti-tamper dynamic execution failed: {ex.Message}";
+                result.DecryptedPeImage = (byte[])peImage.Clone();
+                return result;
+            }
+
+            // If module constructor threw an exception, dynamic execution failed.
+            // Even if differences were detected in memory, return Failed and restore original image.
+            if (!cctorSucceeded)
+            {
+                result.Status = AntiTamperStatus.Failed;
+                result.Modified = false;
+                result.DecryptedPeImage = (byte[])peImage.Clone();
+                result.Message = "Anti-tamper dynamic execution failed: module constructor threw an exception" + (cctorError != null ? $": {cctorError}" : "");
                 return result;
             }
 
@@ -175,16 +191,19 @@ namespace ConfuserExKillerRunner.Killers
             if (result.Modified)
             {
                 result.Status = AntiTamperStatus.ChangesDetected;
-                if (cctorSucceeded)
+                var verify = VerifyDecryptedImage(result.DecryptedPeImage, result.DecryptedSectionInfos);
+                result.Status = verify.status;
+                restoredMethodsCount = verify.restoredMethodCount;
+
+                if (result.Status != AntiTamperStatus.DecryptionConfirmed)
                 {
-                    var verify = VerifyDecryptedImage(result.DecryptedPeImage, result.DecryptedSectionInfos);
-                    result.Status = verify.status;
-                    restoredMethodsCount = verify.restoredMethodCount;
+                    // Validation failed or unconfirmed: restore original PE image so partial or broken bytes are not propagated.
+                    result.DecryptedPeImage = (byte[])peImage.Clone();
                 }
             }
             else
             {
-                result.Status = cctorSucceeded ? AntiTamperStatus.NoChangesDetected : AntiTamperStatus.Failed;
+                result.Status = AntiTamperStatus.NoChangesDetected;
             }
 
             switch (result.Status)
@@ -210,6 +229,18 @@ namespace ConfuserExKillerRunner.Killers
             return result;
         }
 
+        /// <summary>
+        /// Validates the decrypted PE image by checking that methods located within the restored section boundaries
+        /// can be successfully decoded by dnlib and pass structural IL, branch boundary, exception handler,
+        /// and evaluation stack verification.
+        ///
+        /// Note on verification boundaries:
+        /// This in-memory pass validates IL instruction integrity, branch &amp; switch bounds, exception handler boundaries,
+        /// and evaluation stack balance (including CFG max stack calculation via dnlib). Complete CLI ECMA-335 verification
+        /// (e.g. type-safety of method argument signatures, ref/by-ref constraints, and member accessibility rules typically
+        /// verified by ILVerify or PEVerify) is not performed at this stage because the module is verified in-memory prior to
+        /// writing to disk and external assembly resolution.
+        /// </summary>
         public static (AntiTamperStatus status, int restoredMethodCount) VerifyDecryptedImage(byte[] peImage, IReadOnlyList<DecryptedSectionInfo> restoredSections)
         {
             if (peImage == null || restoredSections == null || restoredSections.Count == 0)
@@ -245,28 +276,27 @@ namespace ConfuserExKillerRunner.Killers
                         if (!m.HasBody || m.Body == null || m.Body.Instructions == null || m.Body.Instructions.Count == 0)
                         {
                             allRestoredMethodsValid = false;
+                            Logger.LogWarning($"[AntiTamper] Restored method {m.FullName} has empty or null body.");
                             break;
                         }
 
                         try
                         {
-                            foreach (var inst in m.Body.Instructions)
+                            var auditReport = new AuditReport { CanLoad = true };
+                            QualityAuditor.AuditMethod(m, auditReport);
+                            if (!auditReport.StructuralAuditPassed)
                             {
-                                if (inst.OpCode == null)
-                                {
-                                    allRestoredMethodsValid = false;
-                                    break;
-                                }
+                                allRestoredMethodsValid = false;
+                                Logger.LogWarning($"[AntiTamper] Restored method {m.FullName} failed IL validation: {string.Join("; ", auditReport.Errors)}");
+                                break;
                             }
                         }
-                        catch
+                        catch (Exception ex)
                         {
                             allRestoredMethodsValid = false;
+                            Logger.LogWarning($"[AntiTamper] Restored method {m.FullName} threw during IL audit: {ex.Message}");
                             break;
                         }
-
-                        if (!allRestoredMethodsValid)
-                            break;
                     }
 
                     if (allRestoredMethodsValid)
@@ -275,7 +305,7 @@ namespace ConfuserExKillerRunner.Killers
                     }
                     else
                     {
-                        Logger.LogWarning($"[AntiTamper] Sections were restored, but some methods inside them have invalid/unparseable IL bodies.");
+                        Logger.LogWarning($"[AntiTamper] Sections were restored, but some methods inside them have invalid IL bodies, stack mismatches, or invalid branch/EH targets.");
                         return (AntiTamperStatus.ChangesDetected, 0);
                     }
                 }

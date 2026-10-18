@@ -630,8 +630,6 @@ namespace ConfuserExKillerRunner
                     return (true, atResult.DecryptedPeImage ?? (byte[])peImageOld.Clone());
 
                 case AntiTamperStatus.ChangesDetected:
-                    return (false, atResult.DecryptedPeImage ?? (byte[])peImageOld.Clone());
-
                 case AntiTamperStatus.NoChangesDetected:
                 case AntiTamperStatus.Failed:
                 case AntiTamperStatus.NotAttempted:

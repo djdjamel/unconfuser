@@ -105,7 +105,17 @@ namespace ConfuserExKillerRunner.Analysis
                 }
 
                 // Check for valid branch targets
-                if (inst.Operand is Instruction branchTarget)
+                if (inst.OpCode.OperandType == OperandType.InlineBrTarget || inst.OpCode.OperandType == OperandType.ShortInlineBrTarget)
+                {
+                    if (inst.Operand == null || !(inst.Operand is Instruction branchTarget) || !instSet.Contains((Instruction)inst.Operand))
+                    {
+                        report.InvalidInstructionsCount++;
+                        report.InvalidBranchesCount++;
+                        report.Errors.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} branches to orphaned/unlisted instruction at IL_{inst.Offset:X4}");
+                        report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} branches to orphaned/unlisted instruction at IL_{inst.Offset:X4}");
+                    }
+                }
+                else if (inst.Operand is Instruction branchTarget)
                 {
                     if (!instSet.Contains(branchTarget))
                     {
@@ -115,31 +125,40 @@ namespace ConfuserExKillerRunner.Analysis
                         report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} branches to orphaned/unlisted instruction at IL_{inst.Offset:X4}");
                     }
                 }
-                else if (inst.Operand is IList<Instruction> switchTargets)
+                else if (inst.OpCode.OperandType == OperandType.InlineSwitch)
                 {
-                    for (int st = 0; st < switchTargets.Count; st++)
+                    if (inst.Operand == null)
                     {
-                        var target = switchTargets[st];
-                        if (target == null || !instSet.Contains(target))
+                        report.InvalidInstructionsCount++;
+                        report.InvalidBranchesCount++;
+                        report.Errors.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} has null switch targets at IL_{inst.Offset:X4}");
+                    }
+                    else if (inst.Operand is IList<Instruction> switchTargets)
+                    {
+                        for (int st = 0; st < switchTargets.Count; st++)
                         {
-                            report.InvalidInstructionsCount++;
-                            report.InvalidBranchesCount++;
-                            report.Errors.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} switch target #{st} is null or unlisted at IL_{inst.Offset:X4}");
-                            report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} switch target #{st} is null or unlisted at IL_{inst.Offset:X4}");
+                            var target = switchTargets[st];
+                            if (target == null || !instSet.Contains(target))
+                            {
+                                report.InvalidInstructionsCount++;
+                                report.InvalidBranchesCount++;
+                                report.Errors.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} switch target #{st} is null or unlisted at IL_{inst.Offset:X4}");
+                                report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} switch target #{st} is null or unlisted at IL_{inst.Offset:X4}");
+                            }
                         }
                     }
-                }
-                else if (inst.Operand is Instruction[] switchArray)
-                {
-                    for (int st = 0; st < switchArray.Length; st++)
+                    else if (inst.Operand is Instruction[] switchArray)
                     {
-                        var target = switchArray[st];
-                        if (target == null || !instSet.Contains(target))
+                        for (int st = 0; st < switchArray.Length; st++)
                         {
-                            report.InvalidInstructionsCount++;
-                            report.InvalidBranchesCount++;
-                            report.Errors.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} switch target #{st} is null or unlisted at IL_{inst.Offset:X4}");
-                            report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} switch target #{st} is null or unlisted at IL_{inst.Offset:X4}");
+                            var target = switchArray[st];
+                            if (target == null || !instSet.Contains(target))
+                            {
+                                report.InvalidInstructionsCount++;
+                                report.InvalidBranchesCount++;
+                                report.Errors.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} switch target #{st} is null or unlisted at IL_{inst.Offset:X4}");
+                                report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} switch target #{st} is null or unlisted at IL_{inst.Offset:X4}");
+                            }
                         }
                     }
                 }
@@ -317,10 +336,22 @@ namespace ConfuserExKillerRunner.Analysis
                 {
                     if (inst.OpCode == OpCodes.Ret)
                     {
-                        bool isVoid = method.ReturnType.ElementType == ElementType.Void;
+                        bool isVoid = method.ReturnType == null ||
+                                      method.ReturnType.ElementType == ElementType.Void ||
+                                      (method.ReturnType.TypeName == "Void" && method.ReturnType.Namespace == "System");
                         if (isVoid && stackDepth > 0)
                         {
+                            report.InvalidInstructionsCount++;
+                            report.StackUnderflowCount++;
+                            report.Errors.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Non-empty stack ({stackDepth}) at void return");
                             report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Non-empty stack ({stackDepth}) at void return");
+                        }
+                        else if (!isVoid && stackDepth != 1)
+                        {
+                            report.InvalidInstructionsCount++;
+                            report.StackUnderflowCount++;
+                            report.Errors.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Invalid stack depth ({stackDepth}) at non-void return (expected 1)");
+                            report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Invalid stack depth ({stackDepth}) at non-void return (expected 1)");
                         }
                         stackDepth = 0;
                     }

@@ -47,6 +47,21 @@ namespace ConfuserExKillerRunner.Killers
                 {
                     inst.OpCode = OpCodes.Nop;
                     inst.Operand = null;
+
+                    // Clean up preceding argument push instructions if the stripped method consumed parameters
+                    int paramsCount = methodDef.Parameters?.Count ?? 0;
+                    for (int p = 1; p <= paramsCount && (i - p) >= 0; p++)
+                    {
+                        var prev = instructions[i - p];
+                        if (prev.OpCode == OpCodes.Ldnull || prev.OpCode == OpCodes.Ldarg_0 ||
+                            prev.OpCode == OpCodes.Ldc_I4 || prev.OpCode == OpCodes.Ldc_I4_0 ||
+                            prev.OpCode == OpCodes.Ldtoken)
+                        {
+                            prev.OpCode = OpCodes.Nop;
+                            prev.Operand = null;
+                        }
+                    }
+
                     methodsToRemove.Add(methodDef);
                     result.StrippedHooksCount++;
                     result.StrippedDetails.Add($"{hookType} hook removed from <Module>.cctor: {methodDef.Name}");
@@ -188,7 +203,7 @@ namespace ConfuserExKillerRunner.Killers
                 if (!IsValidModuleLoadInstruction(nonNops[0], method))
                     return false;
 
-                if (nonNops[1].OpCode != OpCodes.Call && nonNops[1].OpCode != OpCodes.Callvirt)
+                if (nonNops[1].OpCode != OpCodes.Call)
                     return false;
                 if (!(nonNops[1].Operand is IMethod called && IsMarshalGetHINSTANCE(called)))
                     return false;
@@ -211,7 +226,7 @@ namespace ConfuserExKillerRunner.Killers
                 if (!IsValidModuleLoadInstruction(nonNops[0], method))
                     return false;
 
-                if (nonNops[1].OpCode != OpCodes.Call && nonNops[1].OpCode != OpCodes.Callvirt)
+                if (nonNops[1].OpCode != OpCodes.Call)
                     return false;
                 if (!(nonNops[1].Operand is IMethod called && IsMarshalGetHINSTANCE(called)))
                     return false;
@@ -233,6 +248,34 @@ namespace ConfuserExKillerRunner.Killers
             var decl = called.DeclaringType;
             if (decl == null || decl.Name != "Marshal" || decl.Namespace != "System.Runtime.InteropServices")
                 return false;
+
+            // Verify resolving scope / assembly
+            string asmName = decl.DefinitionAssembly?.Name?.String;
+            if (string.IsNullOrEmpty(asmName) && decl.Scope != null)
+            {
+                asmName = decl.Scope.ScopeName;
+                if (asmName != null && asmName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                    asmName = asmName.Substring(0, asmName.Length - 4);
+            }
+
+            if (!string.IsNullOrEmpty(asmName))
+            {
+                bool isFrameworkAssembly =
+                    asmName.Equals("mscorlib", StringComparison.OrdinalIgnoreCase) ||
+                    asmName.Equals("System.Runtime.InteropServices", StringComparison.OrdinalIgnoreCase) ||
+                    asmName.Equals("System.Runtime", StringComparison.OrdinalIgnoreCase) ||
+                    asmName.Equals("netstandard", StringComparison.OrdinalIgnoreCase);
+
+                if (!isFrameworkAssembly)
+                    return false;
+            }
+            else
+            {
+                // If declaring type is defined in the current module (TypeDef) or has ModuleDef scope,
+                // it is an internal application type and not the framework BCL Marshal class.
+                if (decl is TypeDef || (decl is TypeRef tr && tr.ResolutionScope is ModuleDef))
+                    return false;
+            }
 
             var sig = called.MethodSig;
             if (sig == null || sig.HasThis)

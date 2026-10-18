@@ -44,7 +44,7 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
-        public void ProcessAntiTamperResult_ChangesDetected_DisablesDecryptedFlagAndRetainsDecryptedImage()
+        public void ProcessAntiTamperResult_ChangesDetected_DisablesDecryptedFlagAndRestoresOriginalImage()
         {
             byte[] orig = new byte[] { 1, 2, 3 };
             byte[] dec = new byte[] { 4, 5, 6 };
@@ -58,9 +58,10 @@ namespace ConfuserExKillerRunner.Tests
 
             var (antiTamperDecrypted, effectiveImage) = Program.ProcessAntiTamperResult(result, orig);
 
-            // Changes detected but unconfirmed -> hooks must NOT be stripped!
+            // Changes detected but unconfirmed -> hooks must NOT be stripped and original image restored!
             Assert.False(antiTamperDecrypted);
-            Assert.Same(dec, effectiveImage);
+            Assert.Equal(orig, effectiveImage);
+            Assert.NotSame(dec, effectiveImage);
         }
 
         [Fact]
@@ -177,7 +178,8 @@ namespace ConfuserExKillerRunner.Tests
             var mod = new ModuleDefUser("TestVerifyMod2");
             var userType = new TypeDefUser("UserType", mod.CorLibTypes.Object.TypeDefOrRef);
             mod.Types.Add(userType);
-            var method = new MethodDefUser("SampleMethod", MethodSig.CreateStatic(mod.CorLibTypes.Void),
+            // Non-void method returning Int32 with 1 pushed value is valid IL
+            var method = new MethodDefUser("SampleMethod", MethodSig.CreateStatic(mod.CorLibTypes.Int32),
                 MethodImplAttributes.IL | MethodImplAttributes.Managed,
                 MethodAttributes.Public | MethodAttributes.Static)
             {
@@ -220,9 +222,234 @@ namespace ConfuserExKillerRunner.Tests
 
             var (status, count) = AntiTamperKiller.VerifyDecryptedImage(peBytes, restoredSections);
 
-            // Methods located inside the section have valid bodies -> DecryptionConfirmed!
+            // Methods located inside the section have valid IL bodies -> DecryptionConfirmed!
             Assert.Equal(AntiTamperStatus.DecryptionConfirmed, status);
             Assert.True(count >= 1);
+        }
+
+        [Fact]
+        public void VerifyDecryptedImage_VoidMethodLeavesValueOnStack_ReturnsChangesDetected()
+        {
+            var mod = new ModuleDefUser("TestVerifyModVoidStack");
+            var userType = new TypeDefUser("UserType", mod.CorLibTypes.Object.TypeDefOrRef);
+            mod.Types.Add(userType);
+            // Void method that pushes a value and does not pop it before ret -> stack mismatch!
+            var method = new MethodDefUser("InvalidVoidMethod", MethodSig.CreateStatic(mod.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            method.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1));
+            method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            userType.Methods.Add(method);
+
+            byte[] peBytes;
+            using (var ms = new MemoryStream())
+            {
+                mod.Write(ms, new ModuleWriterOptions(mod));
+                peBytes = ms.ToArray();
+            }
+
+            uint methodRva = 0;
+            using (var loaded = ModuleDefMD.Load(peBytes))
+            {
+                var loadedMethod = loaded.Find("UserType", false)?.FindMethod("InvalidVoidMethod");
+                Assert.NotNull(loadedMethod);
+                methodRva = (uint)loadedMethod.RVA;
+            }
+
+            var restoredSections = new List<DecryptedSectionInfo>
+            {
+                new DecryptedSectionInfo
+                {
+                    Name = ".text",
+                    VirtualAddress = methodRva - 0x10,
+                    VirtualSize = 0x1000,
+                    SizeOfRawData = 0x1000,
+                    PointerToRawData = 0x400
+                }
+            };
+
+            var (status, count) = AntiTamperKiller.VerifyDecryptedImage(peBytes, restoredSections);
+
+            // Void method with non-empty evaluation stack at ret must fail structural IL verification
+            Assert.Equal(AntiTamperStatus.ChangesDetected, status);
+            Assert.Equal(0, count);
+        }
+
+        [Fact]
+        public void VerifyDecryptedImage_MethodWithOrphanedBranch_ReturnsChangesDetected()
+        {
+            var mod = new ModuleDefUser("TestVerifyModBranch");
+            var userType = new TypeDefUser("UserType", mod.CorLibTypes.Object.TypeDefOrRef);
+            mod.Types.Add(userType);
+            var method = new MethodDefUser("InvalidBranchMethod", MethodSig.CreateStatic(mod.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var i0 = Instruction.Create(OpCodes.Nop);
+            var i1 = Instruction.Create(OpCodes.Br_S, i0);
+            var i2 = Instruction.Create(OpCodes.Ret);
+            method.Body.Instructions.Add(i0);
+            method.Body.Instructions.Add(i1);
+            method.Body.Instructions.Add(i2);
+            userType.Methods.Add(method);
+
+            byte[] peBytes;
+            using (var ms = new MemoryStream())
+            {
+                mod.Write(ms, new ModuleWriterOptions(mod));
+                peBytes = ms.ToArray();
+            }
+
+            uint methodRva = 0;
+            using (var loaded = ModuleDefMD.Load(peBytes))
+            {
+                var loadedMethod = loaded.Find("UserType", false)?.FindMethod("InvalidBranchMethod");
+                Assert.NotNull(loadedMethod);
+                methodRva = (uint)loadedMethod.RVA;
+            }
+
+            // Find file offset of method in peBytes and corrupt br.s operand to branch out of bounds
+            var peModel = ConfuserExKillerRunner.Analysis.PEUtils.ParsePE(peBytes);
+            var sec = peModel.Sections.First(s => methodRva >= s.VirtualAddress && methodRva < s.VirtualAddress + s.VirtualSize);
+            uint fileOffset = sec.PointerToRawData + (methodRva - sec.VirtualAddress);
+
+            for (int i = (int)fileOffset; i < fileOffset + 32 && i < peBytes.Length - 1; i++)
+            {
+                if (peBytes[i] == 0x2B) // br.s
+                {
+                    peBytes[i + 1] = 0x7E; // Corrupt branch offset to +126 bytes out of bounds!
+                    break;
+                }
+            }
+
+            var restoredSections = new List<DecryptedSectionInfo>
+            {
+                new DecryptedSectionInfo
+                {
+                    Name = ".text",
+                    VirtualAddress = methodRva - 0x10,
+                    VirtualSize = 0x1000,
+                    SizeOfRawData = 0x1000,
+                    PointerToRawData = 0x400
+                }
+            };
+
+            var (status, count) = AntiTamperKiller.VerifyDecryptedImage(peBytes, restoredSections);
+
+            // Method with branch to unlisted/orphaned instruction must fail verification
+            Assert.Equal(AntiTamperStatus.ChangesDetected, status);
+            Assert.Equal(0, count);
+        }
+
+        [Fact]
+        public void VerifyDecryptedImage_MethodWithStackUnderflow_ReturnsChangesDetected()
+        {
+            var mod = new ModuleDefUser("TestVerifyModUnderflow");
+            var userType = new TypeDefUser("UserType", mod.CorLibTypes.Object.TypeDefOrRef);
+            mod.Types.Add(userType);
+            var method = new MethodDefUser("UnderflowMethod", MethodSig.CreateStatic(mod.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody
+                {
+                    KeepOldMaxStack = true,
+                    MaxStack = 8
+                }
+            };
+            // Add followed by ret without pushing operands causes evaluation stack underflow
+            method.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            userType.Methods.Add(method);
+
+            byte[] peBytes;
+            using (var ms = new MemoryStream())
+            {
+                var options = new ModuleWriterOptions(mod);
+                options.MetaDataOptions.Flags |= dnlib.DotNet.Writer.MetaDataFlags.KeepOldMaxStack;
+                mod.Write(ms, options);
+                peBytes = ms.ToArray();
+            }
+
+            uint methodRva = 0;
+            using (var loaded = ModuleDefMD.Load(peBytes))
+            {
+                var loadedMethod = loaded.Find("UserType", false)?.FindMethod("UnderflowMethod");
+                Assert.NotNull(loadedMethod);
+                methodRva = (uint)loadedMethod.RVA;
+            }
+
+            var restoredSections = new List<DecryptedSectionInfo>
+            {
+                new DecryptedSectionInfo
+                {
+                    Name = ".text",
+                    VirtualAddress = methodRva - 0x10,
+                    VirtualSize = 0x1000,
+                    SizeOfRawData = 0x1000,
+                    PointerToRawData = 0x400
+                }
+            };
+
+            var (status, count) = AntiTamperKiller.VerifyDecryptedImage(peBytes, restoredSections);
+
+            // Method with evaluation stack underflow must fail verification
+            Assert.Equal(AntiTamperStatus.ChangesDetected, status);
+            Assert.Equal(0, count);
+        }
+
+        [Fact]
+        public void Execute_ModuleConstructorThrowsException_ReturnsFailedAndRestoresOriginalImage()
+        {
+            // Build a valid assembly containing a module with a throwing .cctor
+            var asm = new AssemblyDefUser("ThrowingCctorAsm", new Version(1, 0, 0, 0));
+            var mod = new ModuleDefUser("ThrowingCctorMod.dll");
+            asm.Modules.Add(mod);
+
+            var globalType = mod.GlobalType;
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(mod.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            var exCtor = new MemberRefUser(mod, ".ctor",
+                MethodSig.CreateInstance(mod.CorLibTypes.Void, mod.CorLibTypes.String),
+                new TypeRefUser(mod, "System", "Exception", mod.CorLibTypes.AssemblyRef));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "Intentional cctor failure"));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Newobj, exCtor));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Throw));
+            globalType.Methods.Add(cctor);
+
+            string tempDir = Path.Combine(Path.GetTempPath(), "ThrowingCctorTest_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            string tempDll = Path.Combine(tempDir, "ThrowingCctorMod.dll");
+            try
+            {
+                mod.Write(tempDll);
+                byte[] peBytes = File.ReadAllBytes(tempDll);
+
+                var loadedAsm = System.Reflection.Assembly.LoadFrom(tempDll);
+                var loadedMod = loadedAsm.ManifestModule;
+
+                var result = AntiTamperKiller.Execute(loadedMod, peBytes);
+
+                // Even if memory diffs occurred or were scanned, failed cctor forces Failed status
+                // and original PE image must be restored.
+                Assert.Equal(AntiTamperStatus.Failed, result.Status);
+                Assert.False(result.Modified);
+                Assert.Equal(peBytes, result.DecryptedPeImage);
+                Assert.Contains("module constructor", result.Message, StringComparison.OrdinalIgnoreCase);
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
         }
 
         [Fact]
