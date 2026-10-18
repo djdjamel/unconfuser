@@ -13,9 +13,19 @@ namespace ConfuserExKillerRunner.Killers
     public enum AntiTamperStatus
     {
         NotAttempted,
+        NoChangesDetected,
         ChangesDetected,
         DecryptionConfirmed,
         Failed
+    }
+
+    public sealed class DecryptedSectionInfo
+    {
+        public string Name { get; set; }
+        public uint VirtualAddress { get; set; }
+        public uint VirtualSize { get; set; }
+        public uint SizeOfRawData { get; set; }
+        public uint PointerToRawData { get; set; }
     }
 
     public sealed class AntiTamperResult
@@ -24,6 +34,7 @@ namespace ConfuserExKillerRunner.Killers
         public AntiTamperStatus Status { get; set; } = AntiTamperStatus.NotAttempted;
         public byte[] DecryptedPeImage { get; set; }
         public List<string> DecryptedSections { get; set; } = new List<string>();
+        public List<DecryptedSectionInfo> DecryptedSectionInfos { get; set; } = new List<DecryptedSectionInfo>();
         public bool JitModeDetected { get; set; }
         public string Message { get; set; }
     }
@@ -98,6 +109,7 @@ namespace ConfuserExKillerRunner.Killers
                     string diskSecName = (peModel.IsValid && i < peModel.Sections.Count) ? peModel.Sections[i].Name : string.Empty;
                     string effectiveName = !string.IsNullOrEmpty(secName) ? secName : diskSecName;
 
+                    uint virtualSize = *(uint*)(secPtr + 8);
                     uint virtualAddress = *(uint*)(secPtr + 12);
                     uint sizeOfRawData = *(uint*)(secPtr + 16);
                     uint pointerToRawData = *(uint*)(secPtr + 20);
@@ -138,6 +150,14 @@ namespace ConfuserExKillerRunner.Killers
                         Marshal.Copy((IntPtr)inMemorySection, result.DecryptedPeImage, (int)pointerToRawData, (int)sizeOfRawData);
                         string displayName = !string.IsNullOrEmpty(effectiveName) ? effectiveName : $"Section_{i}";
                         result.DecryptedSections.Add(displayName);
+                        result.DecryptedSectionInfos.Add(new DecryptedSectionInfo
+                        {
+                            Name = displayName,
+                            VirtualAddress = virtualAddress,
+                            VirtualSize = virtualSize,
+                            SizeOfRawData = sizeOfRawData,
+                            PointerToRawData = pointerToRawData
+                        });
                         result.Modified = true;
                         Logger.LogInfo($"[AntiTamper] Decrypted section '{displayName}' (RVA=0x{virtualAddress:X}, Raw=0x{pointerToRawData:X}, Size={sizeOfRawData} bytes)");
                     }
@@ -147,42 +167,124 @@ namespace ConfuserExKillerRunner.Killers
             {
                 Logger.LogError($"[AntiTamper] Section diffing failed: {ex.Message}");
                 result.Status = AntiTamperStatus.Failed;
-                result.Message = ex.Message;
+                result.Message = $"Anti-tamper dynamic execution failed: {ex.Message}";
                 return result;
             }
 
+            int restoredMethodsCount = 0;
             if (result.Modified)
             {
                 result.Status = AntiTamperStatus.ChangesDetected;
                 if (cctorSucceeded)
                 {
-                    try
-                    {
-                        using (var verifyMod = dnlib.DotNet.ModuleDefMD.Load(result.DecryptedPeImage))
-                        {
-                            bool hasValidMethods = verifyMod.GetTypes().SelectMany(t => t.Methods).Any(m => m.HasBody && m.Body.Instructions.Count > 0);
-                            if (hasValidMethods)
-                            {
-                                result.Status = AntiTamperStatus.DecryptionConfirmed;
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.LogWarning($"[AntiTamper] Decrypted image validation warning: {ex.Message}");
-                    }
+                    var verify = VerifyDecryptedImage(result.DecryptedPeImage, result.DecryptedSectionInfos);
+                    result.Status = verify.status;
+                    restoredMethodsCount = verify.restoredMethodCount;
                 }
             }
             else
             {
-                result.Status = cctorSucceeded ? AntiTamperStatus.NotAttempted : AntiTamperStatus.Failed;
+                result.Status = cctorSucceeded ? AntiTamperStatus.NoChangesDetected : AntiTamperStatus.Failed;
             }
 
-            result.Message = result.Modified
-                ? $"Successfully decrypted {result.DecryptedSections.Count} sections: {string.Join(", ", result.DecryptedSections)}"
-                : "No section differences detected";
+            switch (result.Status)
+            {
+                case AntiTamperStatus.DecryptionConfirmed:
+                    result.Message = $"Successfully decrypted and verified {result.DecryptedSections.Count} section(s) ({string.Join(", ", result.DecryptedSections)}) containing {restoredMethodsCount} restored method(s)";
+                    break;
+                case AntiTamperStatus.ChangesDetected:
+                    result.Message = $"Memory differences detected in {result.DecryptedSections.Count} section(s) ({string.Join(", ", result.DecryptedSections)}), but method decryption could not be confirmed";
+                    break;
+                case AntiTamperStatus.NoChangesDetected:
+                    result.Message = "Dynamic execution completed; no section differences detected";
+                    break;
+                case AntiTamperStatus.Failed:
+                    result.Message = string.IsNullOrEmpty(result.Message) ? "Anti-tamper dynamic execution failed" : result.Message;
+                    break;
+                case AntiTamperStatus.NotAttempted:
+                default:
+                    result.Message = "Anti-tamper dynamic execution was not attempted";
+                    break;
+            }
 
             return result;
+        }
+
+        public static (AntiTamperStatus status, int restoredMethodCount) VerifyDecryptedImage(byte[] peImage, IReadOnlyList<DecryptedSectionInfo> restoredSections)
+        {
+            if (peImage == null || restoredSections == null || restoredSections.Count == 0)
+                return (AntiTamperStatus.ChangesDetected, 0);
+
+            try
+            {
+                using (var verifyMod = dnlib.DotNet.ModuleDefMD.Load(peImage))
+                {
+                    var allMethods = verifyMod.GetTypes().SelectMany(t => t.Methods).ToList();
+
+                    // Identify methods whose RVA falls specifically inside any restored section's virtual span
+                    var methodsInRestoredSections = allMethods.Where(m =>
+                    {
+                        if (m.RVA == 0) return false;
+                        uint rva = (uint)m.RVA;
+                        return restoredSections.Any(s =>
+                        {
+                            uint span = Math.Max(s.VirtualSize, s.SizeOfRawData);
+                            return rva >= s.VirtualAddress && rva < s.VirtualAddress + span;
+                        });
+                    }).ToList();
+
+                    if (methodsInRestoredSections.Count == 0)
+                    {
+                        Logger.LogWarning($"[AntiTamper] Section changes detected, but no methods were mapped within the restored section boundaries. Keeping ChangesDetected.");
+                        return (AntiTamperStatus.ChangesDetected, 0);
+                    }
+
+                    bool allRestoredMethodsValid = true;
+                    foreach (var m in methodsInRestoredSections)
+                    {
+                        if (!m.HasBody || m.Body == null || m.Body.Instructions == null || m.Body.Instructions.Count == 0)
+                        {
+                            allRestoredMethodsValid = false;
+                            break;
+                        }
+
+                        try
+                        {
+                            foreach (var inst in m.Body.Instructions)
+                            {
+                                if (inst.OpCode == null)
+                                {
+                                    allRestoredMethodsValid = false;
+                                    break;
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            allRestoredMethodsValid = false;
+                            break;
+                        }
+
+                        if (!allRestoredMethodsValid)
+                            break;
+                    }
+
+                    if (allRestoredMethodsValid)
+                    {
+                        return (AntiTamperStatus.DecryptionConfirmed, methodsInRestoredSections.Count);
+                    }
+                    else
+                    {
+                        Logger.LogWarning($"[AntiTamper] Sections were restored, but some methods inside them have invalid/unparseable IL bodies.");
+                        return (AntiTamperStatus.ChangesDetected, 0);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"[AntiTamper] Decrypted image validation warning: {ex.Message}");
+                return (AntiTamperStatus.ChangesDetected, 0);
+            }
         }
 
         public static bool DetectJitMode(dnlib.DotNet.ModuleDef module)

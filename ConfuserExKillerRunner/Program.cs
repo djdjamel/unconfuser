@@ -206,21 +206,33 @@ namespace ConfuserExKillerRunner
                     {
                         reflModule = Assembly.LoadFile(assemblyPath).ManifestModule;
                         var atResult = AntiTamperKiller.Execute(reflModule, peImageOld);
-                        peImage = atResult.DecryptedPeImage;
-                        if (atResult.Status == AntiTamperStatus.DecryptionConfirmed)
+                        var processed = ProcessAntiTamperResult(atResult, peImageOld);
+                        antiTamperDecrypted = processed.antiTamperDecrypted;
+                        peImage = processed.effectivePeImage;
+
+                        switch (atResult.Status)
                         {
-                            antiTamperDecrypted = true;
-                            Console.WriteLine($"[+] AntiTamper: Decryption confirmed across {atResult.DecryptedSections.Count} sections ({string.Join(", ", atResult.DecryptedSections)})");
-                        }
-                        else if (atResult.Status == AntiTamperStatus.ChangesDetected)
-                        {
-                            antiTamperDecrypted = false;
-                            Console.WriteLine($"[!] AntiTamper: Changes detected in {atResult.DecryptedSections.Count} sections, but full decryption unconfirmed. Retaining hooks.");
-                        }
-                        else
-                        {
-                            antiTamperDecrypted = false;
-                            Console.WriteLine("[-] AntiTamper: No section changes detected");
+                            case AntiTamperStatus.DecryptionConfirmed:
+                                Console.WriteLine($"[+] AntiTamper: Decryption confirmed across {atResult.DecryptedSections.Count} section(s) ({string.Join(", ", atResult.DecryptedSections)})");
+                                break;
+
+                            case AntiTamperStatus.ChangesDetected:
+                                Console.WriteLine($"[!] AntiTamper: Changes detected in {atResult.DecryptedSections.Count} section(s), but method decryption unconfirmed. Retaining hooks.");
+                                break;
+
+                            case AntiTamperStatus.NoChangesDetected:
+                                Console.WriteLine("[-] AntiTamper: No section differences detected");
+                                break;
+
+                            case AntiTamperStatus.Failed:
+                                Console.ForegroundColor = ConsoleColor.Red;
+                                Console.WriteLine($"[!] AntiTamper dynamic execution failed: {atResult.Message}");
+                                Console.ResetColor();
+                                break;
+
+                            default:
+                                Console.WriteLine("[-] AntiTamper: Dynamic execution not attempted");
+                                break;
                         }
                     }
                     catch (Exception ex)
@@ -229,6 +241,7 @@ namespace ConfuserExKillerRunner
                         Console.WriteLine($"[!] AntiTamper dynamic execution failed: {ex.Message}");
                         Console.ResetColor();
                         peImage = (byte[])peImageOld.Clone();
+                        antiTamperDecrypted = false;
                     }
                 }
 
@@ -603,6 +616,27 @@ namespace ConfuserExKillerRunner
                     Tool.Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] FinalizeMethodBodies for {method.Name}: {ex.Message}. Keeping existing MaxStack {body.MaxStack}.");
                     body.KeepOldMaxStack = true;
                 }
+            }
+        }
+
+        public static (bool antiTamperDecrypted, byte[] effectivePeImage) ProcessAntiTamperResult(AntiTamperResult atResult, byte[] peImageOld)
+        {
+            if (atResult == null)
+                return (false, (byte[])peImageOld.Clone());
+
+            switch (atResult.Status)
+            {
+                case AntiTamperStatus.DecryptionConfirmed:
+                    return (true, atResult.DecryptedPeImage ?? (byte[])peImageOld.Clone());
+
+                case AntiTamperStatus.ChangesDetected:
+                    return (false, atResult.DecryptedPeImage ?? (byte[])peImageOld.Clone());
+
+                case AntiTamperStatus.NoChangesDetected:
+                case AntiTamperStatus.Failed:
+                case AntiTamperStatus.NotAttempted:
+                default:
+                    return (false, (byte[])peImageOld.Clone());
             }
         }
     }

@@ -75,16 +75,20 @@ namespace ConfuserExKillerRunner.Tests
             };
             globalType.Methods.Add(cctor);
 
-            // Create synthetic protector method (matches anti-tamper via GetHINSTANCE)
-            var protectorMethod = new MethodDefUser("ConfuserAntiTamper", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            // Create synthetic protector method (matches exact protector stub via GetHINSTANCE)
+            var protectorMethod = new MethodDefUser("ConfuserAntiTamper", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
             {
                 Body = new CilBody()
             };
-            // Call GetHINSTANCE to trigger classification
+            // Call Marshal.GetHINSTANCE(Module) to trigger canonical stub classification
             var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
-                MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
                 new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+            protectorMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
             protectorMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            protectorMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
             protectorMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
             globalType.Methods.Add(protectorMethod);
 
@@ -480,13 +484,15 @@ namespace ConfuserExKillerRunner.Tests
             var module = new ModuleDefUser("TestMod");
             var globalType = module.GlobalType;
 
-            // Exact 4-instruction stub with random arbitrary name (name-independent!)
-            var stubMethod = new MethodDefUser("ArbitraryStubName_12345", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            // Exact 4-instruction stub with random arbitrary name (name-independent!) calling real Marshal.GetHINSTANCE(Module)
+            var stubMethod = new MethodDefUser("ArbitraryStubName_12345", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
             {
                 Body = new CilBody()
             };
             var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
-                MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
                 new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
             stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
             stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
@@ -510,6 +516,169 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(1, result.StrippedHooksCount);
             Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
             Assert.DoesNotContain(stubMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_HomonymousGetHINSTANCEOnDifferentType_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Method calls CustomAppHelper.GetHINSTANCE(Module), NOT Marshal.GetHINSTANCE
+            var helperMethod = new MethodDefUser("AppHelperStub", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var customGetHinstance = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "CustomAppNamespace", "AppHelper", module.CorLibTypes.AssemblyRef));
+
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, customGetHinstance));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(helperMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, helperMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Must NOT strip helper method with homonymous method on different declaring type
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Contains(helperMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_GetHINSTANCEWithIncorrectSignature_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Method calls Marshal.GetHINSTANCE(string) instead of Marshal.GetHINSTANCE(Module)
+            var helperMethod = new MethodDefUser("WrongSigStub", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var wrongSigRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, module.CorLibTypes.String),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, wrongSigRef));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(helperMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, helperMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Must NOT strip method calling GetHINSTANCE with non-Module parameter signature
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Contains(helperMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_StubWithScrambledStackOrder_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Method with scrambled instruction sequence (e.g., pop; ldnull; call; ret)
+            var helperMethod = new MethodDefUser("ScrambledStub", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(helperMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, helperMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Non-canonical stack sequence must be preserved
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Contains(helperMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_StubReturningVoidWithoutPop_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Void return method without pop: ldnull; call; ret (leaves IntPtr unconsumed on stack)
+            var helperMethod = new MethodDefUser("ImbalancedStub", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(helperMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, helperMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Stack imbalanced method must be preserved
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Contains(helperMethod, globalType.Methods);
         }
     }
 }

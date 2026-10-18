@@ -162,9 +162,15 @@ namespace ConfuserExKillerRunner.Killers
             return null;
         }
 
-        private static bool IsExactStubProtectorCall(MethodDef method)
+        internal static bool IsExactStubProtectorCall(MethodDef method)
         {
             if (method == null || !method.HasBody || method.Body.Instructions == null)
+                return false;
+
+            if (!method.IsStatic)
+                return false;
+
+            if (method.DeclaringType != null && !method.DeclaringType.IsGlobalModuleType)
                 return false;
 
             // Stubs must have no exception handlers and no local variables
@@ -172,38 +178,112 @@ namespace ConfuserExKillerRunner.Killers
                 return false;
 
             var nonNops = method.Body.Instructions.Where(i => i.OpCode != OpCodes.Nop).ToList();
-            if (nonNops.Count < 2 || nonNops.Count > 4)
-                return false;
 
-            if (nonNops[nonNops.Count - 1].OpCode != OpCodes.Ret)
-                return false;
-
-            bool hasProtectorCall = false;
-            for (int i = 0; i < nonNops.Count - 1; i++)
+            // Canonical 4-instruction void stub: ldnull/ldarg -> call Marshal.GetHINSTANCE -> pop -> ret
+            if (nonNops.Count == 4)
             {
-                var inst = nonNops[i];
-                if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
-                {
-                    if (inst.Operand is IMethod m && m.Name == "GetHINSTANCE")
-                    {
-                        hasProtectorCall = true;
-                    }
-                    else
-                    {
-                        return false;
-                    }
-                }
-                else if (inst.OpCode == OpCodes.Ldnull || inst.IsLdarg() || inst.OpCode == OpCodes.Pop)
-                {
-                    continue;
-                }
-                else
-                {
+                if (method.ReturnType == null || method.ReturnType.ElementType != ElementType.Void)
                     return false;
+
+                if (!IsValidModuleLoadInstruction(nonNops[0], method))
+                    return false;
+
+                if (nonNops[1].OpCode != OpCodes.Call && nonNops[1].OpCode != OpCodes.Callvirt)
+                    return false;
+                if (!(nonNops[1].Operand is IMethod called && IsMarshalGetHINSTANCE(called)))
+                    return false;
+
+                if (nonNops[2].OpCode != OpCodes.Pop)
+                    return false;
+
+                if (nonNops[3].OpCode != OpCodes.Ret)
+                    return false;
+
+                return true;
+            }
+
+            // Canonical 3-instruction IntPtr stub: ldnull/ldarg -> call Marshal.GetHINSTANCE -> ret
+            if (nonNops.Count == 3)
+            {
+                if (method.ReturnType == null || (method.ReturnType.ElementType != ElementType.I && method.ReturnType.TypeName != "IntPtr"))
+                    return false;
+
+                if (!IsValidModuleLoadInstruction(nonNops[0], method))
+                    return false;
+
+                if (nonNops[1].OpCode != OpCodes.Call && nonNops[1].OpCode != OpCodes.Callvirt)
+                    return false;
+                if (!(nonNops[1].Operand is IMethod called && IsMarshalGetHINSTANCE(called)))
+                    return false;
+
+                if (nonNops[2].OpCode != OpCodes.Ret)
+                    return false;
+
+                return true;
+            }
+
+            return false;
+        }
+
+        internal static bool IsMarshalGetHINSTANCE(IMethod called)
+        {
+            if (called == null || called.Name != "GetHINSTANCE")
+                return false;
+
+            var decl = called.DeclaringType;
+            if (decl == null || decl.Name != "Marshal" || decl.Namespace != "System.Runtime.InteropServices")
+                return false;
+
+            var sig = called.MethodSig;
+            if (sig == null || sig.HasThis)
+                return false;
+
+            if (sig.Params.Count != 1)
+                return false;
+
+            var p0 = sig.Params[0];
+            if (p0 == null || p0.TypeName != "Module" || p0.Namespace != "System.Reflection")
+                return false;
+
+            if (sig.RetType == null)
+                return false;
+
+            if (sig.RetType.ElementType != ElementType.I && sig.RetType.TypeName != "IntPtr")
+                return false;
+
+            return true;
+        }
+
+        private static bool IsValidModuleLoadInstruction(Instruction inst, MethodDef method)
+        {
+            if (inst == null)
+                return false;
+
+            if (inst.OpCode == OpCodes.Ldnull)
+            {
+                return method.Parameters.Count == 0;
+            }
+
+            if (inst.OpCode == OpCodes.Ldarg_0)
+            {
+                return method.Parameters.Count == 1 &&
+                       method.Parameters[0].Type != null &&
+                       method.Parameters[0].Type.TypeName == "Module" &&
+                       method.Parameters[0].Type.Namespace == "System.Reflection";
+            }
+
+            if (inst.OpCode == OpCodes.Ldarg)
+            {
+                if (inst.Operand is Parameter p && p.Index == 0)
+                {
+                    return method.Parameters.Count == 1 &&
+                           method.Parameters[0].Type != null &&
+                           method.Parameters[0].Type.TypeName == "Module" &&
+                           method.Parameters[0].Type.Namespace == "System.Reflection";
                 }
             }
 
-            return hasProtectorCall;
+            return false;
         }
 
         private static bool IsConfuserConstantBufferInitializer(MethodDef method)
