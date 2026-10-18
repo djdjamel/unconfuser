@@ -11,10 +11,9 @@ namespace ConfuserExTools.ConstantKiller {
 					yield return moduleDefMD.ResolveMethod(rid);
 			}
 			else {
-				for (uint rid = 1; ; rid++) {
-					if (!(module.ResolveToken(new MDToken(Table.Method, rid)) is MethodDef method))
-						yield break;
-					yield return method;
+				foreach (var type in module.GetTypes()) {
+					foreach (var method in type.Methods)
+						yield return method;
 				}
 			}
 		}

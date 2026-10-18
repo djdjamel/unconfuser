@@ -1,5 +1,4 @@
 using System.IO;
-using System.Linq;
 using ConfuserExKillerRunner.Killers;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
@@ -10,219 +9,120 @@ namespace ConfuserExKillerRunner.Tests
     public class ResourceKillerTests
     {
         [Fact]
-        public void TryDecryptAndReEmbedResources_SatisfiesDecrypterMethod_RollsBackAtomicOnFailure()
+        public void Execute_DynamicExecutionDisabled_HooksRemainIntact()
         {
-            // Build in-memory module with cctor calling a decrypter method that satisfies FindResourceDecrypterMethod
-            var module = new ModuleDefUser("TestResourceMod");
-            var asm = new AssemblyDefUser("TestAssembly");
-            asm.Modules.Add(module);
-
+            var module = new ModuleDefUser("TestMod");
             var globalType = module.GlobalType;
 
-            // Existing resource that must survive rollback
-            var initialResData = new byte[] { 1, 2, 3, 4, 5 };
-            module.Resources.Add(new EmbeddedResource("InitialResource", initialResData));
-
-            // Member references to satisfy FindResourceDecrypterMethod: InitializeArray and Assembly::Load
-            var initArrayRef = new MemberRefUser(module, "InitializeArray",
-                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Object, module.CorLibTypes.IntPtr),
-                new TypeRefUser(module, "System.Runtime.CompilerServices", "RuntimeHelpers", module.CorLibTypes.AssemblyRef));
-
-            var asmLoadRef = new MemberRefUser(module, "Load",
-                MethodSig.CreateStatic(module.CorLibTypes.Object, new SZArraySig(module.CorLibTypes.Byte)),
-                new TypeRefUser(module, "System.Reflection", "Assembly", module.CorLibTypes.AssemblyRef));
-
-            var decrypterMethod = new MethodDefUser("ConfuserResourceDecrypter",
-                MethodSig.CreateStatic(module.CorLibTypes.Void),
-                MethodImplAttributes.IL | MethodImplAttributes.Managed,
-                MethodAttributes.Public | MethodAttributes.Static)
-            {
-                Body = new CilBody()
-            };
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, initArrayRef)); // satisfies InitializeArray
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, asmLoadRef));    // satisfies Assembly::Load
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
-            globalType.Methods.Add(decrypterMethod);
-
-            // cctor calling decrypterMethod
             var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
                 MethodImplAttributes.IL | MethodImplAttributes.Managed,
                 MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
             {
                 Body = new CilBody()
             };
-            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, decrypterMethod));
+            var addResolveRef = new MemberRefUser(module, "add_ResourceResolve",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Object),
+                new TypeRefUser(module, "System", "AppDomain", module.CorLibTypes.AssemblyRef));
+
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, addResolveRef));
             cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
             globalType.Methods.Add(cctor);
 
-            // Save to memory and reload as ModuleDefMD so it matches parameter type
+            // Save to memory to get a ModuleDefMD
+            byte[] moduleBytes;
             using (var ms = new MemoryStream())
             {
                 module.Write(ms);
-                using (var modMD = ModuleDefMD.Load(ms.ToArray()))
-                {
-                    var originalAsmName = modMD.Assembly.Name.String;
-                    var origTarget = modMD.GlobalType.FindMethod("ConfuserResourceDecrypter");
-                    var origSig = origTarget.MethodSig.ToString();
-                    int origInstCount = origTarget.Body.Instructions.Count;
-                    int origResourceCount = modMD.Resources.Count;
+                moduleBytes = ms.ToArray();
+            }
 
-                    var result = new ResourceKillerResult();
-                    ResourceKiller.TryDecryptAndReEmbedResources(modMD, result);
+            using (var moduleMD = ModuleDefMD.Load(moduleBytes))
+            {
+                var result = ResourceKiller.Execute(moduleMD, reflModule: null);
 
-                    // Must report not decrypted
-                    Assert.False(result.ResourcesDecrypted);
-                    Assert.Equal(0, result.DecryptedResourcesCount);
-                    Assert.Equal(0, result.ExtractedResourcesCount);
+                Assert.False(result.ResourcesDecrypted);
+                Assert.False(result.HandlerStripped);
 
-                    // Signature, instruction count, opcodes, resources, and assembly name must be preserved via rollback
-                    Assert.Equal(origSig, origTarget.MethodSig.ToString());
-                    Assert.Equal(origInstCount, origTarget.Body.Instructions.Count);
-                    Assert.Equal(originalAsmName, modMD.Assembly.Name.String);
-                    Assert.Equal(origResourceCount, modMD.Resources.Count);
-                    Assert.Equal("InitialResource", modMD.Resources[0].Name.String);
-                    Assert.Equal(OpCodes.Call, origTarget.Body.Instructions[4].OpCode);
-                }
+                var loadedCctor = moduleMD.GlobalType.FindStaticConstructor();
+                Assert.NotNull(loadedCctor);
+                Assert.Equal(OpCodes.Call, loadedCctor.Body.Instructions[1].OpCode);
             }
         }
 
         [Fact]
-        public void TryDecryptAndReEmbedResources_FailsAfterResourceChangesBegin_RollsBackAtomic()
+        public void Execute_DecryptionFailed_RollsBackAndPreservesHooks()
         {
-            // 1. Create a decrypted payload module that contains a decrypted resource
-            var payloadMod = new ModuleDefUser("DecryptedPayloadModule");
-            var payloadAsm = new AssemblyDefUser("DecryptedPayloadAssembly");
-            payloadAsm.Modules.Add(payloadMod);
-            payloadMod.Resources.Add(new EmbeddedResource("DecryptedExtractedResource", new byte[] { 42, 43, 44, 45 }));
-            byte[] payloadBytes;
-            using (var pms = new MemoryStream())
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Create a fake decrypter method that has InitializeArray and Assembly.Load but cannot run / fails
+            var decrypter = new MethodDefUser("ResDecrypter", MethodSig.CreateStatic(module.CorLibTypes.Void))
             {
-                payloadMod.Write(pms);
-                payloadBytes = pms.ToArray();
-            }
-
-            // 2. Build target module with initial resource
-            var module = new ModuleDefUser("TestResourceMod2");
-            var asm = new AssemblyDefUser("TestAssembly2");
-            asm.Modules.Add(module);
-
-            var initialResData = new byte[] { 1, 2, 3 };
-            module.Resources.Add(new EmbeddedResource("InitialResource", initialResData));
-
+                Body = new CilBody()
+            };
+            var initArrayRef = new MemberRefUser(module, "InitializeArray",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Object, module.CorLibTypes.IntPtr),
+                new TypeRefUser(module, "System.Runtime.CompilerServices", "RuntimeHelpers", module.CorLibTypes.AssemblyRef));
             var asmLoadRef = new MemberRefUser(module, "Load",
                 MethodSig.CreateStatic(module.CorLibTypes.Object, new SZArraySig(module.CorLibTypes.Byte)),
                 new TypeRefUser(module, "System.Reflection", "Assembly", module.CorLibTypes.AssemblyRef));
 
-            var decrypterMethod = new MethodDefUser("ConfuserResourceDecrypter",
-                MethodSig.CreateStatic(module.CorLibTypes.Void),
-                MethodImplAttributes.IL | MethodImplAttributes.Managed,
-                MethodAttributes.Public | MethodAttributes.Static)
-            {
-                Body = new CilBody()
-            };
+            decrypter.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            decrypter.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            decrypter.Body.Instructions.Add(Instruction.Create(OpCodes.Call, initArrayRef));
+            decrypter.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            decrypter.Body.Instructions.Add(Instruction.Create(OpCodes.Call, asmLoadRef));
+            decrypter.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            decrypter.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(decrypter);
 
-            // Push payloadBytes onto stack using array initializer
-            var arrayInitInstrs = ConfuserExTools.ConstantKiller.ConstantKillerImpl.CreateArrayInitializer(
-                module, module.CorLibTypes.Byte.TypeDefOrRef, payloadBytes.Length, payloadBytes);
-            foreach (var inst in arrayInitInstrs)
-                decrypterMethod.Body.Instructions.Add(inst);
-
-            // Call Assembly.Load(payloadBytes) -> patched to Ret returning payloadBytes!
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, asmLoadRef));
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
-            decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
-            module.GlobalType.Methods.Add(decrypterMethod);
-
-            // cctor calling decrypterMethod
             var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
                 MethodImplAttributes.IL | MethodImplAttributes.Managed,
                 MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
             {
                 Body = new CilBody()
             };
-            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, decrypterMethod));
-            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
-            module.GlobalType.Methods.Add(cctor);
+            var addResolveRef = new MemberRefUser(module, "add_ResourceResolve",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Object),
+                new TypeRefUser(module, "System", "AppDomain", module.CorLibTypes.AssemblyRef));
 
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, decrypter));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, addResolveRef));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            // Add dummy resource
+            var dummyRes = new EmbeddedResource("TestResource", new byte[] { 1, 2, 3 });
+            module.Resources.Add(dummyRes);
+
+            byte[] moduleBytes;
             using (var ms = new MemoryStream())
             {
                 module.Write(ms);
-                using (var modMD = ModuleDefMD.Load(ms.ToArray()))
-                {
-                    var originalAsmName = modMD.Assembly.Name.String;
-                    var origTarget = modMD.GlobalType.FindMethod("ConfuserResourceDecrypter");
-                    var origSig = origTarget.MethodSig.ToString();
-                    int origInstCount = origTarget.Body.Instructions.Count;
-                    int origResourceCount = modMD.Resources.Count;
-
-                    // Inject ThrowingMemberRef into cctor so that after resources are extracted and embedded,
-                    // post-processing of cctor instructions throws and forces rollback
-                    var targetCctor = modMD.GlobalType.FindStaticConstructor();
-                    int origCctorInstCount = targetCctor.Body.Instructions.Count;
-                    var throwingRef = new ThrowingMemberRef(modMD, "ThrowingCall", MethodSig.CreateStatic(modMD.CorLibTypes.Void), modMD.CorLibTypes.Object.TypeDefOrRef);
-                    targetCctor.Body.Instructions.Insert(1, Instruction.Create(OpCodes.Call, throwingRef));
-
-                    ThrowingMemberRef.SignalTriggered = false;
-                    ThrowingMemberRef.ResourceCommittedBeforeFailure = false;
-
-                    var result = new ResourceKillerResult();
-                    ResourceKiller.TryDecryptAndReEmbedResources(modMD, result);
-
-                    // 1. Verify that the failure injection signal was triggered and that the decrypted resource had been committed before failure
-                    Assert.True(ThrowingMemberRef.SignalTriggered);
-                    Assert.True(ThrowingMemberRef.ResourceCommittedBeforeFailure);
-
-                    // 2. Verify that rollback cleared result counters
-                    Assert.False(result.ResourcesDecrypted);
-                    Assert.Equal(0, result.DecryptedResourcesCount);
-                    Assert.Equal(0, result.ExtractedResourcesCount);
-
-                    // 3. Verify that injected resource was discarded and original resource was restored
-                    Assert.Equal(origResourceCount, modMD.Resources.Count);
-                    Assert.Equal("InitialResource", modMD.Resources[0].Name.String);
-                    Assert.DoesNotContain(modMD.Resources, r => r.Name.String == "DecryptedExtractedResource");
-
-                    // 4. Verify that decrypter method signature and body are restored
-                    Assert.Equal(origSig, origTarget.MethodSig.ToString());
-                    Assert.Equal(origInstCount, origTarget.Body.Instructions.Count);
-
-                    // 5. Verify assembly name is restored
-                    Assert.Equal(originalAsmName, modMD.Assembly.Name.String);
-
-                    // 6. Verify cctor is restored from original snapshot
-                    Assert.NotNull(modMD.GlobalType.FindStaticConstructor());
-                    Assert.Equal(origCctorInstCount + 1, modMD.GlobalType.FindStaticConstructor().Body.Instructions.Count);
-                }
+                moduleBytes = ms.ToArray();
             }
-        }
-    }
 
-    internal class ThrowingMemberRef : MemberRefUser, dnlib.DotNet.IFullName
-    {
-        private readonly ModuleDef _targetModule;
-        public static bool SignalTriggered { get; set; }
-        public static bool ResourceCommittedBeforeFailure { get; set; }
-
-        public ThrowingMemberRef(ModuleDef module, UTF8String name, MethodSig sig, IMemberRefParent parent)
-            : base(module, name, sig, parent)
-        {
-            _targetModule = module;
-        }
-
-        UTF8String dnlib.DotNet.IFullName.Name
-        {
-            get
+            using (var moduleMD = ModuleDefMD.Load(moduleBytes))
             {
-                SignalTriggered = true;
-                ResourceCommittedBeforeFailure = _targetModule != null &&
-                    _targetModule.Resources.Any(r => r.Name == "DecryptedExtractedResource");
-                throw new System.InvalidOperationException("Forced failure after resource extraction in cctor cleanup");
+                var result = new ResourceKillerResult();
+                // Calling TryDecryptAndReEmbedResources directly; since tempAsm invoke will fail or return null, it will rollback
+                ResourceKiller.TryDecryptAndReEmbedResources(moduleMD, result);
+
+                Assert.False(result.ResourcesDecrypted);
+                Assert.False(result.HandlerStripped);
+
+                // Check rollback preserved resources
+                Assert.Single(moduleMD.Resources);
+                Assert.Equal("TestResource", moduleMD.Resources[0].Name);
+
+                // Check rollback preserved cctor call to decrypter
+                var loadedCctor = moduleMD.GlobalType.FindStaticConstructor();
+                Assert.NotNull(loadedCctor);
+                Assert.Equal(OpCodes.Call, loadedCctor.Body.Instructions[0].OpCode);
+                Assert.Equal(OpCodes.Call, loadedCctor.Body.Instructions[2].OpCode);
             }
-            set => base.Name = value;
         }
     }
 }

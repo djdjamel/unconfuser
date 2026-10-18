@@ -18,66 +18,34 @@ namespace ConfuserExTools.ProxyKiller
 			var proxyMethods = new Dictionary<MethodDef, Instruction>();
 			foreach (var method in module.EnumerateMethods())
 			{
-				if (!method.HasBody)
-					continue;
-				if (!(ignoreAccess || method.IsPrivateScope))
-					continue;
-
-				bool isProxy = true;
-				var realInstruction = default(Instruction);
-				foreach (var instruction in method.Body.Instructions)
+				if (TryAnalyzeClassicProxy(method, ignoreAccess, out var realInstruction, out var failureReason))
 				{
-					switch (instruction.OpCode.Code)
-					{
-					case Code.Nop:
-					case Code.Ldarg:
-					case Code.Ldarg_0:
-					case Code.Ldarg_1:
-					case Code.Ldarg_2:
-					case Code.Ldarg_3:
-					case Code.Ldarg_S:
-					case Code.Ldarga:
-					case Code.Ldarga_S:
-					case Code.Ret:
-						continue;
-					case Code.Call:
-					case Code.Callvirt:
-					case Code.Newobj:
-						if (realInstruction is null)
-						{
-							realInstruction = instruction;
-							continue;
-						}
-						break;
-					}
-					isProxy = false;
-					break;
+					proxyMethods[method] = realInstruction;
 				}
-
-				if (!isProxy || realInstruction == null)
-					continue;
-
-				proxyMethods[method] = realInstruction;
+				else if (method.IsPrivateScope && failureReason != null)
+				{
+					Logger.LogDebugInfo($"[0x{method.MDToken.Raw:X8}] Method {method.Name} not classified as classic proxy: {failureReason}");
+				}
 			}
 
-			if (proxyMethods.Count == 0)
-				return 0;
-
-			// Track rewritten call sites per proxy method for reference counting
-			var proxyReferenceCounts = new Dictionary<MethodDef, int>();
-			var proxyRewrittenCounts = new Dictionary<MethodDef, int>();
-			foreach (var pm in proxyMethods.Keys)
-			{
-				proxyReferenceCounts[pm] = 0;
-				proxyRewrittenCounts[pm] = 0;
-			}
-
+			int totalRestored = 0;
 			var oldAssemblyResolver = module.Context.AssemblyResolver;
 			var oldResolver = module.Context.Resolver;
 			try
 			{
 				module.Context.AssemblyResolver = NullResolver.Instance;
 				module.Context.Resolver = new Resolver(NullResolver.Instance);
+
+				if (proxyMethods.Count > 0)
+				{
+					// Track rewritten call sites per proxy method for reference counting
+					var proxyReferenceCounts = new Dictionary<MethodDef, int>();
+					var proxyRewrittenCounts = new Dictionary<MethodDef, int>();
+					foreach (var pm in proxyMethods.Keys)
+					{
+						proxyReferenceCounts[pm] = 0;
+						proxyRewrittenCounts[pm] = 0;
+					}
 
 				// First pass: count all call sites referencing proxy methods
 				foreach (var method in module.EnumerateMethods())
@@ -99,7 +67,7 @@ namespace ConfuserExTools.ProxyKiller
 				}
 
 				// Second pass: rewrite call sites with per-method error isolation & rollback
-				int totalRestored = 0;
+				totalRestored = 0;
 				foreach (var method in module.EnumerateMethods())
 				{
 					if (!method.HasBody || proxyMethods.ContainsKey(method))
@@ -170,6 +138,7 @@ namespace ConfuserExTools.ProxyKiller
 						}
 					}
 				}
+				}
 
 				int strongCount = InlineStrongDelegateProxies(module);
 				if (strongCount > 0)
@@ -183,6 +152,12 @@ namespace ConfuserExTools.ProxyKiller
 				module.Context.AssemblyResolver = oldAssemblyResolver;
 				module.Context.Resolver = oldResolver;
 			}
+		}
+
+		private class DelegateStackItem
+		{
+			public Instruction SourceLdsfld { get; set; }
+			public FieldDef Field { get; set; }
 		}
 
 		private static int InlineStrongDelegateProxies(ModuleDef module)
@@ -200,7 +175,7 @@ namespace ConfuserExTools.ProxyKiller
 					{
 						if (instrs[i].OpCode == OpCodes.Stsfld && instrs[i].Operand is IField field)
 						{
-							var fieldDef = field.ResolveFieldDef();
+							var fieldDef = (field as FieldDef) ?? field.ResolveFieldDef();
 							if (fieldDef == null || fieldDef.DeclaringType != module.GlobalType)
 								continue;
 
@@ -217,12 +192,12 @@ namespace ConfuserExTools.ProxyKiller
 
 							if (targetMethod != null)
 							{
-								var methodDef = targetMethod.ResolveMethodDef();
+								var methodDef = (targetMethod as MethodDef) ?? targetMethod.ResolveMethodDef();
 								bool isVirtual = methodDef != null && methodDef.IsVirtual;
 								var opCode = isVirtual ? OpCodes.Callvirt : OpCodes.Call;
 								delegateMap[fieldDef] = (targetMethod, opCode);
 
-								var fieldType = fieldDef.FieldSig?.Type?.ToTypeDefOrRef()?.ResolveTypeDef();
+								var fieldType = (fieldDef.FieldSig?.Type?.ToTypeDefOrRef() as TypeDef) ?? fieldDef.FieldSig?.Type?.ToTypeDefOrRef()?.ResolveTypeDef();
 								if (fieldType != null && fieldType.BaseType != null &&
 									fieldType.BaseType.FullName == "System.MulticastDelegate")
 								{
@@ -244,26 +219,123 @@ namespace ConfuserExTools.ProxyKiller
 					continue;
 
 				var instrs = method.Body.Instructions;
+				var branchTargets = new HashSet<Instruction>();
+				foreach (var inst in instrs)
+				{
+					if (inst.Operand is Instruction t && t != null) branchTargets.Add(t);
+					else if (inst.Operand is IList<Instruction> mt) { foreach (var x in mt) if (x != null) branchTargets.Add(x); }
+				}
+				if (method.Body.HasExceptionHandlers)
+				{
+					foreach (var eh in method.Body.ExceptionHandlers)
+					{
+						if (eh.TryStart != null) branchTargets.Add(eh.TryStart);
+						if (eh.TryEnd != null) branchTargets.Add(eh.TryEnd);
+						if (eh.HandlerStart != null) branchTargets.Add(eh.HandlerStart);
+						if (eh.HandlerEnd != null) branchTargets.Add(eh.HandlerEnd);
+					}
+				}
+
+				// Stack simulation to reliably associate ldsfld with its corresponding callvirt Invoke
+				var stack = new List<DelegateStackItem>();
+				var rewritePairs = new List<(Instruction Ldsfld, Instruction Invoke, IMethod Target, OpCode OpCode)>();
+
 				for (int i = 0; i < instrs.Count; i++)
 				{
-					if (instrs[i].OpCode == OpCodes.Ldsfld && instrs[i].Operand is IField field)
+					var inst = instrs[i];
+					if (inst.OpCode == OpCodes.Nop) continue;
+
+					if (inst.OpCode == OpCodes.Ldsfld && inst.Operand is IField field)
 					{
-						var fieldDef = field.ResolveFieldDef();
-						if (fieldDef != null && delegateMap.TryGetValue(fieldDef, out var mapping))
+						var fieldDef = (field as FieldDef) ?? field.ResolveFieldDef();
+						if (fieldDef != null && delegateMap.ContainsKey(fieldDef))
 						{
-							// Scan forward for Invoke call
-							for (int j = i + 1; j < instrs.Count; j++)
+							stack.Add(new DelegateStackItem
 							{
-								if (instrs[j].OpCode == OpCodes.Callvirt && instrs[j].Operand is IMethod called && called.Name == "Invoke")
+								SourceLdsfld = inst,
+								Field = fieldDef
+							});
+							continue;
+						}
+					}
+
+					if (inst.OpCode == OpCodes.Callvirt && inst.Operand is IMethod called && called.Name == "Invoke")
+					{
+						int paramCount = called.MethodSig?.Params?.Count ?? 0;
+						int requiredPops = paramCount + 1; // params + this (delegate instance)
+						if (stack.Count >= requiredPops)
+						{
+							int delegateIndex = stack.Count - requiredPops;
+							var delegateItem = stack[delegateIndex];
+							if (delegateItem != null && delegateItem.Field != null && delegateMap.TryGetValue(delegateItem.Field, out var mapping))
+							{
+								// Verify declaring type and signature compatibility
+								bool typesMatch = called.DeclaringType != null && delegateItem.Field.FieldSig?.Type != null
+									&& string.Equals(called.DeclaringType.FullName, delegateItem.Field.FieldSig.Type.FullName, StringComparison.Ordinal);
+
+								bool paramsMatch = mapping.TargetMethod.MethodSig != null && mapping.TargetMethod.MethodSig.Params.Count == paramCount;
+
+								if (typesMatch && paramsMatch)
 								{
-									instrs[i].OpCode = OpCodes.Nop;
-									instrs[i].Operand = null;
-									instrs[j].OpCode = mapping.CallOpCode;
-									instrs[j].Operand = mapping.TargetMethod;
-									inlinedCount++;
-									break;
+									rewritePairs.Add((delegateItem.SourceLdsfld, inst, mapping.TargetMethod, mapping.CallOpCode));
 								}
 							}
+
+							// Pop arguments and this
+							stack.RemoveRange(delegateIndex, requiredPops);
+
+							// Push return value if non-void
+							if (called.MethodSig != null && called.MethodSig.RetType.ElementType != ElementType.Void)
+							{
+								stack.Add(new DelegateStackItem());
+							}
+							continue;
+						}
+						else
+						{
+							stack.Clear();
+							continue;
+						}
+					}
+
+					// Generic instruction stack update
+					inst.CalculateStackUsage(out int pushes, out int pops);
+					if (pops > 0)
+					{
+						int toPop = Math.Min(pops, stack.Count);
+						if (toPop > 0)
+							stack.RemoveRange(stack.Count - toPop, toPop);
+					}
+					for (int p = 0; p < pushes; p++)
+					{
+						stack.Add(new DelegateStackItem());
+					}
+				}
+
+				// Apply rewrites if no internal branch targets or EH boundaries intersect
+				foreach (var pair in rewritePairs)
+				{
+					int ldsfldIdx = instrs.IndexOf(pair.Ldsfld);
+					int invokeIdx = instrs.IndexOf(pair.Invoke);
+					if (ldsfldIdx >= 0 && invokeIdx > ldsfldIdx)
+					{
+						bool hasInterferingBranch = false;
+						for (int k = ldsfldIdx + 1; k < invokeIdx; k++)
+						{
+							if (branchTargets.Contains(instrs[k]))
+							{
+								hasInterferingBranch = true;
+								break;
+							}
+						}
+
+						if (!hasInterferingBranch)
+						{
+							pair.Ldsfld.OpCode = OpCodes.Nop;
+							pair.Ldsfld.Operand = null;
+							pair.Invoke.OpCode = pair.OpCode;
+							pair.Invoke.Operand = pair.Target;
+							inlinedCount++;
 						}
 					}
 				}
@@ -315,6 +387,192 @@ namespace ConfuserExTools.ProxyKiller
 			}
 
 			return inlinedCount;
+		}
+
+		internal static bool TryAnalyzeClassicProxy(MethodDef method, bool ignoreAccess, out Instruction callInstruction, out string failureReason)
+		{
+			callInstruction = null;
+			failureReason = null;
+
+			if (!method.HasBody)
+			{
+				failureReason = "No method body";
+				return false;
+			}
+
+			if (!(ignoreAccess || method.IsPrivateScope))
+			{
+				failureReason = "Method is not PrivateScope";
+				return false;
+			}
+
+			// ConfuserEx classic proxies are strictly static methods
+			if (!method.IsStatic)
+			{
+				failureReason = "Instance method cannot be classic proxy";
+				return false;
+			}
+
+			if (method.Body.HasExceptionHandlers)
+			{
+				failureReason = "Method contains exception handlers";
+				return false;
+			}
+
+			var nonNops = method.Body.Instructions.Where(i => i.OpCode != OpCodes.Nop).ToList();
+			int paramCount = method.Parameters.Count;
+			if (nonNops.Count != paramCount + 2)
+			{
+				failureReason = $"Instruction count mismatch: expected {paramCount + 2}, got {nonNops.Count}";
+				return false;
+			}
+
+			// Verify parameter loads in exact sequence: 0, 1, ..., paramCount - 1
+			for (int p = 0; p < paramCount; p++)
+			{
+				var inst = nonNops[p];
+				if (!IsExactParameterLoad(inst, p))
+				{
+					failureReason = $"Instruction at position {p} is not exact load of parameter {p} (order or opcode mismatch): {inst}";
+					return false;
+				}
+			}
+
+			var callInst = nonNops[paramCount];
+			if (callInst.OpCode != OpCodes.Call && callInst.OpCode != OpCodes.Callvirt && callInst.OpCode != OpCodes.Newobj)
+			{
+				failureReason = $"Expected Call, Callvirt, or Newobj at position {paramCount}, got {callInst.OpCode}";
+				return false;
+			}
+
+			if (nonNops[paramCount + 1].OpCode != OpCodes.Ret)
+			{
+				failureReason = $"Terminal instruction is not Ret: {nonNops[paramCount + 1].OpCode}";
+				return false;
+			}
+
+			if (!(callInst.Operand is IMethod targetMethod))
+			{
+				failureReason = "Call operand is not an IMethod";
+				return false;
+			}
+
+			var targetSig = targetMethod.MethodSig;
+			if (targetSig == null)
+			{
+				failureReason = "Cannot resolve target method signature";
+				return false;
+			}
+
+			// Signature verification
+			if (callInst.OpCode == OpCodes.Newobj)
+			{
+				if (targetMethod.Name != ".ctor")
+				{
+					failureReason = "Newobj operand is not a constructor";
+					return false;
+				}
+				if (targetSig.Params.Count != paramCount)
+				{
+					failureReason = $"Newobj parameter count mismatch: constructor expects {targetSig.Params.Count}, proxy has {paramCount}";
+					return false;
+				}
+				for (int p = 0; p < paramCount; p++)
+				{
+					if (!TypesMatch(method.Parameters[p].Type, targetSig.Params[p]))
+					{
+						failureReason = $"Parameter {p} type mismatch: proxy has {method.Parameters[p].Type}, constructor expects {targetSig.Params[p]}";
+						return false;
+					}
+				}
+				var targetType = targetMethod.DeclaringType?.ToTypeSig();
+				if (targetType == null || !TypesMatch(method.ReturnType, targetType))
+				{
+					failureReason = $"Return type mismatch: proxy returns {method.ReturnType}, constructor creates {targetType}";
+					return false;
+				}
+			}
+			else if (callInst.OpCode == OpCodes.Call && !targetSig.HasThis)
+			{
+				// Target is static method
+				if (targetSig.Params.Count != paramCount)
+				{
+					failureReason = $"Static call parameter count mismatch: target expects {targetSig.Params.Count}, proxy has {paramCount}";
+					return false;
+				}
+				for (int p = 0; p < paramCount; p++)
+				{
+					if (!TypesMatch(method.Parameters[p].Type, targetSig.Params[p]))
+					{
+						failureReason = $"Parameter {p} type mismatch: proxy has {method.Parameters[p].Type}, target expects {targetSig.Params[p]}";
+						return false;
+					}
+				}
+				if (!TypesMatch(method.ReturnType, targetSig.RetType))
+				{
+					failureReason = $"Return type mismatch: proxy returns {method.ReturnType}, target returns {targetSig.RetType}";
+					return false;
+				}
+			}
+			else if (targetSig.HasThis)
+			{
+				// Target is instance method (requires 'this' as first parameter of the static proxy)
+				if (paramCount != targetSig.Params.Count + 1)
+				{
+					failureReason = $"Instance call parameter count mismatch: target expects 1 + {targetSig.Params.Count}, proxy has {paramCount}";
+					return false;
+				}
+				var declaringTypeSig = targetMethod.DeclaringType?.ToTypeSig();
+				if (declaringTypeSig == null || !TypesMatch(method.Parameters[0].Type, declaringTypeSig))
+				{
+					failureReason = $"Instance 'this' type mismatch: proxy param 0 is {method.Parameters[0].Type}, target declaring type is {declaringTypeSig}";
+					return false;
+				}
+				for (int p = 1; p < paramCount; p++)
+				{
+					if (!TypesMatch(method.Parameters[p].Type, targetSig.Params[p - 1]))
+					{
+						failureReason = $"Parameter {p} type mismatch: proxy has {method.Parameters[p].Type}, target expects {targetSig.Params[p - 1]}";
+						return false;
+					}
+				}
+				if (!TypesMatch(method.ReturnType, targetSig.RetType))
+				{
+					failureReason = $"Return type mismatch: proxy returns {method.ReturnType}, target returns {targetSig.RetType}";
+					return false;
+				}
+			}
+			else
+			{
+				failureReason = "Unsupported call opcode and target signature combination";
+				return false;
+			}
+
+			callInstruction = callInst;
+			return true;
+		}
+
+		private static bool IsExactParameterLoad(Instruction inst, int paramIndex)
+		{
+			if (paramIndex == 0 && inst.OpCode == OpCodes.Ldarg_0) return true;
+			if (paramIndex == 1 && inst.OpCode == OpCodes.Ldarg_1) return true;
+			if (paramIndex == 2 && inst.OpCode == OpCodes.Ldarg_2) return true;
+			if (paramIndex == 3 && inst.OpCode == OpCodes.Ldarg_3) return true;
+			if (inst.OpCode == OpCodes.Ldarg_S || inst.OpCode == OpCodes.Ldarg)
+			{
+				if (inst.Operand is Parameter p && p.Index == paramIndex) return true;
+				if (inst.Operand is int i && i == paramIndex) return true;
+				if (inst.Operand is byte b && b == paramIndex) return true;
+				if (inst.Operand is sbyte sb && sb == paramIndex) return true;
+			}
+			return false;
+		}
+
+		private static bool TypesMatch(TypeSig a, TypeSig b)
+		{
+			if (a == null && b == null) return true;
+			if (a == null || b == null) return false;
+			return string.Equals(a.FullName, b.FullName, StringComparison.Ordinal);
 		}
 	}
 }

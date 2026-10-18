@@ -97,7 +97,7 @@ namespace ConfuserExTools.ConstantKiller {
 								continue;
 
 							if (!TryEvaluateKey(instructions, i, out int key, out int exprStart)) {
-								Logger.LogError($"[0x{method.MDToken.Raw:X8}] 无法解析常量解密器参数表达式");
+								Logger.LogError($"[0x{method.MDToken.Raw:X8}] Failed to evaluate constant decrypter key expression");
 								continue;
 							}
 
@@ -108,7 +108,7 @@ namespace ConfuserExTools.ConstantKiller {
 							var reflType = ToType(elementType);
 							if (reflType is null) {
 								if (elementType != ElementType.SZArray) {
-									Logger.LogError($"[0x{method.MDToken.Raw:X8}] 无效常量解密器泛型参数");
+									Logger.LogError($"[0x{method.MDToken.Raw:X8}] Invalid constant decrypter generic parameter type: {elementType}");
 									continue;
 								}
 
@@ -117,7 +117,7 @@ namespace ConfuserExTools.ConstantKiller {
 								arrayElementType = arrayType.ElementType;
 								reflType = ToType(arrayElementType);
 								if (reflType is null) {
-									Logger.LogError($"[0x{method.MDToken.Raw:X8}] 无效常量解密器泛型参数");
+									Logger.LogError($"[0x{method.MDToken.Raw:X8}] Invalid constant decrypter array element type: {arrayElementType}");
 									continue;
 								}
 							}
@@ -135,48 +135,23 @@ namespace ConfuserExTools.ConstantKiller {
 								}
 							}
 							catch (Exception ex) {
-								Logger.LogError($"[0x{method.MDToken.Raw:X8}] 调用常量解密器失败: {ex.Message}");
+								Logger.LogError($"[0x{method.MDToken.Raw:X8}] Invoking constant decrypter failed: {ex.Message}");
 								Logger.LogException(ex);
 								continue;
 							}
 							if (value is null) {
-								Logger.LogError($"[0x{method.MDToken.Raw:X8}] 常量解密器返回值为空");
+								Logger.LogError($"[0x{method.MDToken.Raw:X8}] Constant decrypter returned null");
 								continue;
 							}
 
 							if (elementType != ElementType.SZArray) {
-								switch (elementType) {
-								case ElementType.Boolean:
-								case ElementType.Char:
-								case ElementType.I1:
-								case ElementType.U1:
-								case ElementType.I2:
-								case ElementType.U2:
-								case ElementType.I4:
-								case ElementType.U4:
-									instruction.OpCode = OpCodes.Ldc_I4;
-									instruction.Operand = Convert.ToInt32(value);
-									break;
-								case ElementType.I8:
-								case ElementType.U8:
-									instruction.OpCode = OpCodes.Ldc_I8;
-									instruction.Operand = Convert.ToInt64(value);
-									break;
-								case ElementType.R4:
-									instruction.OpCode = OpCodes.Ldc_R4;
-									instruction.Operand = value;
-									break;
-								case ElementType.R8:
-									instruction.OpCode = OpCodes.Ldc_R8;
-									instruction.Operand = value;
-									break;
-								case ElementType.String:
-									instruction.OpCode = OpCodes.Ldstr;
-									instruction.Operand = value;
-									break;
-								default:
-									throw new InvalidOperationException();
+								if (!TryGetConstantInstruction(elementType, value, out OpCode targetOp, out object targetOperand)) {
+									Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] Unsupported constant type or value conversion: {elementType} ({value?.GetType().FullName})");
+									continue;
 								}
+
+								instruction.OpCode = targetOp;
+								instruction.Operand = targetOperand;
 
 								// Nop out the key expression arguments [exprStart, i - 1]
 								for (int k = exprStart; k < i; k++) {
@@ -185,6 +160,11 @@ namespace ConfuserExTools.ConstantKiller {
 								}
 							}
 							else {
+								if (!(value is Array arrVal)) {
+									Logger.LogError($"[0x{method.MDToken.Raw:X8}] Constant decrypter did not return an array as expected: {value?.GetType().FullName}");
+									continue;
+								}
+
 								int elementSize;
 								switch (arrayElementType) {
 								case ElementType.Boolean:
@@ -208,11 +188,13 @@ namespace ConfuserExTools.ConstantKiller {
 									elementSize = 8;
 									break;
 								default:
-									throw new InvalidOperationException();
+									Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] Unsupported array element type: {arrayElementType}");
+									continue;
 								}
-								byte[] data = new byte[((Array)value).Length * elementSize];
-								Buffer.BlockCopy((Array)value, 0, data, 0, data.Length);
-								var arrayInitializer = CreateArrayInitializer(module, arrayType.ToTypeDefOrRef(), ((Array)value).Length, data);
+
+								byte[] data = new byte[arrVal.Length * elementSize];
+								Buffer.BlockCopy(arrVal, 0, data, 0, data.Length);
+								var arrayInitializer = CreateArrayInitializer(module, arrayType.ToTypeDefOrRef(), arrVal.Length, data);
 
 								// Nop out the key expression arguments [exprStart, i - 1]
 								for (int k = exprStart; k < i; k++) {
@@ -286,6 +268,108 @@ namespace ConfuserExTools.ConstantKiller {
 			case ElementType.R8: return typeof(double);
 			case ElementType.String: return typeof(string);
 			default: return null;
+			}
+		}
+
+		public static bool TryGetConstantInstruction(ElementType elementType, object value, out OpCode opCode, out object operand) {
+			opCode = default;
+			operand = null;
+			if (value == null) return false;
+
+			try {
+				switch (elementType) {
+				case ElementType.Boolean:
+					opCode = OpCodes.Ldc_I4;
+					operand = Convert.ToBoolean(value) ? 1 : 0;
+					return true;
+
+				case ElementType.Char:
+					opCode = OpCodes.Ldc_I4;
+					operand = (int)Convert.ToChar(value);
+					return true;
+
+				case ElementType.I1:
+					opCode = OpCodes.Ldc_I4;
+					if (value is sbyte sb) operand = (int)sb;
+					else if (value is byte b) operand = (int)(sbyte)b;
+					else operand = unchecked((int)Convert.ToSByte(value));
+					return true;
+
+				case ElementType.U1:
+					opCode = OpCodes.Ldc_I4;
+					if (value is byte b2) operand = (int)b2;
+					else operand = (int)Convert.ToByte(value);
+					return true;
+
+				case ElementType.I2:
+					opCode = OpCodes.Ldc_I4;
+					if (value is short s) operand = (int)s;
+					else if (value is ushort us) operand = (int)(short)us;
+					else operand = unchecked((int)Convert.ToInt16(value));
+					return true;
+
+				case ElementType.U2:
+					opCode = OpCodes.Ldc_I4;
+					if (value is ushort us2) operand = (int)us2;
+					else operand = (int)Convert.ToUInt16(value);
+					return true;
+
+				case ElementType.I4:
+				case ElementType.U4:
+					opCode = OpCodes.Ldc_I4;
+					if (value is int i) operand = i;
+					else if (value is uint u) operand = unchecked((int)u);
+					else if (value is long l) operand = unchecked((int)l);
+					else if (value is ulong ul) operand = unchecked((int)ul);
+					else if (value is short s2) operand = (int)s2;
+					else if (value is ushort us3) operand = (int)us3;
+					else if (value is byte b3) operand = (int)b3;
+					else if (value is sbyte sb2) operand = (int)sb2;
+					else if (value is IConvertible ic) operand = unchecked((int)ic.ToInt64(null));
+					else return false;
+					return true;
+
+				case ElementType.I8:
+				case ElementType.U8:
+					opCode = OpCodes.Ldc_I8;
+					if (value is long l2) operand = l2;
+					else if (value is ulong ul2) operand = unchecked((long)ul2);
+					else if (value is int i2) operand = (long)i2;
+					else if (value is uint u2) operand = (long)u2;
+					else if (value is IConvertible ic2) {
+						if (value is ulong ulongVal) operand = unchecked((long)ulongVal);
+						else operand = ic2.ToInt64(null);
+					}
+					else return false;
+					return true;
+
+				case ElementType.R4:
+					opCode = OpCodes.Ldc_R4;
+					if (value is float f) operand = f;
+					else if (value is double d) operand = (float)d;
+					else if (value is IConvertible ic3) operand = ic3.ToSingle(null);
+					else return false;
+					return true;
+
+				case ElementType.R8:
+					opCode = OpCodes.Ldc_R8;
+					if (value is double d2) operand = d2;
+					else if (value is float f2) operand = (double)f2;
+					else if (value is IConvertible ic4) operand = ic4.ToDouble(null);
+					else return false;
+					return true;
+
+				case ElementType.String:
+					opCode = OpCodes.Ldstr;
+					operand = value is string str ? str : value.ToString();
+					return true;
+
+				default:
+					return false;
+				}
+			}
+			catch {
+				return false;
 			}
 		}
 

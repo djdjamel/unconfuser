@@ -16,7 +16,7 @@ namespace ConfuserExKillerRunner.Killers
 
     public static class CleanerKiller
     {
-        public static CleanerResult StripProtectorHooks(ModuleDef module)
+        public static CleanerResult StripProtectorHooks(ModuleDef module, bool resourcesDecrypted = false, bool constantsDecrypted = false)
         {
             if (module == null) throw new ArgumentNullException(nameof(module));
 
@@ -42,7 +42,7 @@ namespace ConfuserExKillerRunner.Killers
                     continue;
 
                 // Check if target method is a known ConfuserEx protector initializer
-                string hookType = ClassifyProtectorMethod(methodDef);
+                string hookType = ClassifyProtectorMethod(methodDef, resourcesDecrypted, constantsDecrypted);
                 if (hookType != null)
                 {
                     inst.OpCode = OpCodes.Nop;
@@ -102,7 +102,7 @@ namespace ConfuserExKillerRunner.Killers
             return result;
         }
 
-        private static string ClassifyProtectorMethod(MethodDef method)
+        private static string ClassifyProtectorMethod(MethodDef method, bool resourcesDecrypted, bool constantsDecrypted)
         {
             if (method.DeclaringType != null && !method.DeclaringType.IsGlobalModuleType)
                 return null;
@@ -147,12 +147,28 @@ namespace ConfuserExKillerRunner.Killers
                 return "Anti-Debug";
             if (hasVirtualProtect)
                 return "Anti-Dump";
-            if (hasResourceResolve)
+            if (hasResourceResolve && resourcesDecrypted)
                 return "Resource-Resolver";
-            if (hasInitializeArray)
+            if (hasInitializeArray && constantsDecrypted && method.Parameters.Count == 0 && IsConfuserConstantBufferInitializer(method))
                 return "Constant-Buffer";
 
             return null;
+        }
+
+        private static bool IsConfuserConstantBufferInitializer(MethodDef method)
+        {
+            // Verify method initializes a static byte/int array from a private implementation field in <Module>
+            bool loadsFieldToken = false;
+            foreach (var inst in method.Body.Instructions)
+            {
+                if (inst.OpCode == OpCodes.Ldtoken && inst.Operand is IField field)
+                {
+                    var fd = field.ResolveFieldDef();
+                    if (fd != null && fd.DeclaringType != null && fd.DeclaringType.IsGlobalModuleType && fd.HasFieldRVA)
+                        loadsFieldToken = true;
+                }
+            }
+            return loadsFieldToken;
         }
 
         private static bool IsProtectorPinvoke(string name)

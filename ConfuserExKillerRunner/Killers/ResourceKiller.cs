@@ -47,37 +47,40 @@ namespace ConfuserExKillerRunner.Killers
                 Logger.LogInfo("[ResourceKiller] Dynamic execution disabled; skipping resource decryption & re-embedding.");
             }
 
-            // Stage 2: Strip resource / assembly resolution hooks in <Module>.cctor
-            var cctor = module.GlobalType?.FindStaticConstructor();
-            if (cctor != null && cctor.HasBody)
+            // Stage 2: Strip resource / assembly resolution hooks in <Module>.cctor ONLY if resources were decrypted
+            if (result.ResourcesDecrypted)
             {
-                var instrs = cctor.Body.Instructions;
-                for (int i = 0; i < instrs.Count; i++)
+                var cctor = module.GlobalType?.FindStaticConstructor();
+                if (cctor != null && cctor.HasBody)
                 {
-                    var inst = instrs[i];
-                    if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
+                    var instrs = cctor.Body.Instructions;
+                    for (int i = 0; i < instrs.Count; i++)
                     {
-                        if (inst.Operand is IMethod called)
+                        var inst = instrs[i];
+                        if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
                         {
-                            string fullName = called.FullName;
-                            if (fullName.IndexOf("add_ResourceResolve", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                fullName.IndexOf("add_AssemblyResolve", StringComparison.OrdinalIgnoreCase) >= 0)
+                            if (inst.Operand is IMethod called)
                             {
-                                inst.OpCode = OpCodes.Nop;
-                                inst.Operand = null;
-                                for (int j = i - 1; j >= 0 && j >= i - 5; j--)
+                                string fullName = called.FullName;
+                                if (fullName.IndexOf("add_ResourceResolve", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    fullName.IndexOf("add_AssemblyResolve", StringComparison.OrdinalIgnoreCase) >= 0)
                                 {
-                                    if (instrs[j].OpCode == OpCodes.Newobj ||
-                                        instrs[j].OpCode == OpCodes.Ldftn ||
-                                        instrs[j].OpCode == OpCodes.Ldnull ||
-                                        instrs[j].OpCode == OpCodes.Call)
+                                    inst.OpCode = OpCodes.Nop;
+                                    inst.Operand = null;
+                                    for (int j = i - 1; j >= 0 && j >= i - 5; j--)
                                     {
-                                        instrs[j].OpCode = OpCodes.Nop;
-                                        instrs[j].Operand = null;
+                                        if (instrs[j].OpCode == OpCodes.Newobj ||
+                                            instrs[j].OpCode == OpCodes.Ldftn ||
+                                            instrs[j].OpCode == OpCodes.Ldnull ||
+                                            instrs[j].OpCode == OpCodes.Call)
+                                        {
+                                            instrs[j].OpCode = OpCodes.Nop;
+                                            instrs[j].Operand = null;
+                                        }
                                     }
+                                    result.HandlerStripped = true;
+                                    Logger.LogInfo($"[ResourceKiller] Stripped resource resolver hook ({called.Name}) from <Module>.cctor");
                                 }
-                                result.HandlerStripped = true;
-                                Logger.LogInfo($"[ResourceKiller] Stripped resource resolver hook ({called.Name}) from <Module>.cctor");
                             }
                         }
                     }
@@ -126,6 +129,7 @@ namespace ConfuserExKillerRunner.Killers
                 result.DecryptedResourcesCount = 0;
                 result.ExtractedResourcesCount = 0;
                 result.ResourcesDecrypted = false;
+                result.HandlerStripped = false;
             }
 
             try
@@ -282,7 +286,7 @@ namespace ConfuserExKillerRunner.Killers
                     {
                         if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
                         {
-                            if (inst.Operand is IMethod called && (called == decrypterMethod || called.Name == decrypterMethod.Name))
+                            if (inst.Operand is IMethod called && (called == decrypterMethod || called.ResolveMethodDef() == decrypterMethod))
                             {
                                 inst.OpCode = OpCodes.Nop;
                                 inst.Operand = null;
