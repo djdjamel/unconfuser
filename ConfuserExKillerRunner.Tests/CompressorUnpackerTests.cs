@@ -185,5 +185,56 @@ namespace ConfuserExKillerRunner.Tests
                 }
             }
         }
+
+        [Fact]
+        public void DecompressBounded_ExceedingSizeLimit_ReturnsNullAndProtectsMemory()
+        {
+            byte[] original = new byte[1024 * 1024];
+            for (int i = 0; i < original.Length; i++)
+                original[i] = (byte)(i % 251);
+
+            byte[] compressed;
+            using (var ms = new MemoryStream())
+            {
+                using (var deflate = new System.IO.Compression.DeflateStream(ms, System.IO.Compression.CompressionMode.Compress, true))
+                {
+                    deflate.Write(original, 0, original.Length);
+                }
+                compressed = ms.ToArray();
+            }
+
+            byte[] decompNormal = CompressorUnpacker.TryDeflateDecompress(compressed, maxSize: 2 * 1024 * 1024);
+            Assert.NotNull(decompNormal);
+            Assert.Equal(original.Length, decompNormal.Length);
+            Assert.Equal(original, decompNormal);
+
+            byte[] decompExceeded = CompressorUnpacker.TryDeflateDecompress(compressed, maxSize: 50 * 1024);
+            Assert.Null(decompExceeded);
+        }
+
+        [Fact]
+        public void TryGzipDecompress_ExceedingSizeLimit_ReturnsNull()
+        {
+            byte[] original = new byte[512 * 1024];
+            for (int i = 0; i < original.Length; i++)
+                original[i] = (byte)(i % 17);
+
+            byte[] compressed;
+            using (var ms = new MemoryStream())
+            {
+                using (var gzip = new System.IO.Compression.GZipStream(ms, System.IO.Compression.CompressionMode.Compress, true))
+                {
+                    gzip.Write(original, 0, original.Length);
+                }
+                compressed = ms.ToArray();
+            }
+
+            byte[] decompNormal = CompressorUnpacker.TryGzipDecompress(compressed, maxSize: 1024 * 1024);
+            Assert.NotNull(decompNormal);
+            Assert.Equal(original.Length, decompNormal.Length);
+
+            byte[] decompExceeded = CompressorUnpacker.TryGzipDecompress(compressed, maxSize: 10 * 1024);
+            Assert.Null(decompExceeded);
+        }
     }
 }

@@ -25,6 +25,16 @@ namespace ConfuserExKillerRunner.Killers
     {
         private static readonly string[] KnownFileTableModuleNames = { "koi", "netmodule" };
 
+        /// <summary>
+        /// Default maximum allowed decompressed size (128 MB) to prevent decompression bomb vulnerabilities.
+        /// </summary>
+        public const int DefaultMaxDecompressedSize = 128 * 1024 * 1024; // 128 MB
+
+        /// <summary>
+        /// Configurable maximum allowed decompressed size in bytes.
+        /// </summary>
+        public static int MaxDecompressedSize { get; set; } = DefaultMaxDecompressedSize;
+
         public static UnpackResult TryUnpack(ModuleDefMD module, byte[] rawBytes, bool allowExecution = false)
         {
             if (module == null) throw new ArgumentNullException(nameof(module));
@@ -85,7 +95,7 @@ namespace ConfuserExKillerRunner.Killers
                 }
 
                 // Standard Deflate
-                byte[] deflated = TryDeflateDecompress(data);
+                byte[] deflated = TryDeflateDecompress(data, MaxDecompressedSize);
                 if (deflated != null && IsPeFile(deflated))
                 {
                     unpackedBytes = deflated;
@@ -98,7 +108,7 @@ namespace ConfuserExKillerRunner.Killers
                 {
                     byte[] dataNoHeader = new byte[data.Length - 4];
                     Buffer.BlockCopy(data, 4, dataNoHeader, 0, dataNoHeader.Length);
-                    byte[] deflated2 = TryDeflateDecompress(dataNoHeader);
+                    byte[] deflated2 = TryDeflateDecompress(dataNoHeader, MaxDecompressedSize);
                     if (deflated2 != null && IsPeFile(deflated2))
                     {
                         unpackedBytes = deflated2;
@@ -108,7 +118,7 @@ namespace ConfuserExKillerRunner.Killers
                 }
 
                 // GZip
-                byte[] gzipped = TryGzipDecompress(data);
+                byte[] gzipped = TryGzipDecompress(data, MaxDecompressedSize);
                 if (gzipped != null && IsPeFile(gzipped))
                 {
                     unpackedBytes = gzipped;
@@ -333,16 +343,35 @@ namespace ConfuserExKillerRunner.Killers
             return peSig == 0x00004550; // 'PE\0\0'
         }
 
-        private static byte[] TryDeflateDecompress(byte[] compressed)
+        private static byte[] DecompressBounded(Stream decompressStream, int maxSize)
+        {
+            byte[] buffer = new byte[81920]; // 80 KB chunks
+            using (var output = new MemoryStream())
+            {
+                int read;
+                long totalRead = 0;
+                while ((read = decompressStream.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    totalRead += read;
+                    if (totalRead > maxSize)
+                    {
+                        Logger.LogWarning($"[CompressorUnpacker] Decompressed payload exceeded safety limit ({maxSize} bytes, read {totalRead}). Potential decompression bomb detected; aborting decompression.");
+                        return null;
+                    }
+                    output.Write(buffer, 0, read);
+                }
+                return output.ToArray();
+            }
+        }
+
+        internal static byte[] TryDeflateDecompress(byte[] compressed, int maxSize = DefaultMaxDecompressedSize)
         {
             try
             {
                 using (var input = new MemoryStream(compressed))
                 using (var deflate = new DeflateStream(input, CompressionMode.Decompress))
-                using (var output = new MemoryStream())
                 {
-                    deflate.CopyTo(output);
-                    return output.ToArray();
+                    return DecompressBounded(deflate, maxSize);
                 }
             }
             catch
@@ -351,16 +380,14 @@ namespace ConfuserExKillerRunner.Killers
             }
         }
 
-        private static byte[] TryGzipDecompress(byte[] compressed)
+        internal static byte[] TryGzipDecompress(byte[] compressed, int maxSize = DefaultMaxDecompressedSize)
         {
             try
             {
                 using (var input = new MemoryStream(compressed))
                 using (var gzip = new GZipStream(input, CompressionMode.Decompress))
-                using (var output = new MemoryStream())
                 {
-                    gzip.CopyTo(output);
-                    return output.ToArray();
+                    return DecompressBounded(gzip, maxSize);
                 }
             }
             catch

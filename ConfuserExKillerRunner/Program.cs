@@ -66,6 +66,8 @@ namespace ConfuserExKillerRunner
                 }
             }
 
+            Tool.Logger.Initialize(verbose);
+
             if (string.IsNullOrEmpty(assemblyPath))
             {
                 Console.WriteLine("[ERROR] No target assembly specified.");
@@ -82,7 +84,7 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("===============================================================");
             Console.WriteLine("          ConfuserExKillerRunner - Deobfuscation Engine        ");
             Console.WriteLine("===============================================================");
-            string originalInputPath = assemblyPath;
+            string originalInputPath = Path.GetFullPath(assemblyPath);
             Console.WriteLine($"[*] Target: {assemblyPath}");
             Console.WriteLine($"[*] Process Bitness: {(Environment.Is64BitProcess ? "64-bit" : "32-bit")}");
 
@@ -98,13 +100,32 @@ namespace ConfuserExKillerRunner
                 Console.ResetColor();
             }
 
-            // Hook target directory assembly resolution to prevent DLL hijacking
-            string targetDir = Path.GetDirectoryName(assemblyPath);
+            // Dedicated temporary directory for intermediate pipeline artifacts (.unwrapped, .cexk, -cleaned, .candidate)
+            string executionTempDir = Path.Combine(Path.GetTempPath(), "unconfuser_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(executionTempDir);
+
+            // Target dependency resolver (only active when dynamic execution is explicitly permitted)
+            string targetDir = Path.GetDirectoryName(originalInputPath);
             AppDomain.CurrentDomain.AssemblyResolve += (sender, resolveArgs) =>
             {
+                if (!allowExecution)
+                    return null;
+
                 try
                 {
                     string simpleName = new AssemblyName(resolveArgs.Name).Name;
+                    if (string.IsNullOrEmpty(simpleName)) return null;
+
+                    // Do not load core or framework assemblies from target folder
+                    if (simpleName.Equals("mscorlib", StringComparison.OrdinalIgnoreCase) ||
+                        simpleName.StartsWith("System.", StringComparison.OrdinalIgnoreCase) ||
+                        simpleName.StartsWith("Microsoft.", StringComparison.OrdinalIgnoreCase) ||
+                        simpleName.Equals("dnlib", StringComparison.OrdinalIgnoreCase) ||
+                        simpleName.Equals("de4dot.blocks", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return null;
+                    }
+
                     string candidate = Path.Combine(targetDir, simpleName + ".dll");
                     if (File.Exists(candidate))
                         return Assembly.LoadFrom(candidate);
@@ -116,97 +137,160 @@ namespace ConfuserExKillerRunner
                 return null;
             };
 
-            byte[] peImageOld = File.ReadAllBytes(assemblyPath);
-            byte[] peImage = (byte[])peImageOld.Clone();
-            Module reflModule = null;
-
-            NetDetectScanResult preScan = null;
-            if (!skipNetDetect)
-            {
-                preScan = NetDetectIntegration.RunScan(assemblyPath);
-                NetDetectIntegration.PrintPreScanReport(preScan);
-            }
-
-            // Stage 0: Unpack ConfuserEx Compressor if present
             try
             {
-                using (var probeMod = ModuleDefMD.Load(peImage))
-                {
-                    var unpackResult = CompressorUnpacker.TryUnpack(probeMod, peImage, allowExecution);
-                    if (unpackResult.SuccessfullyUnpacked)
-                    {
-                        Console.WriteLine($"[+] CompressorUnpacker: {unpackResult.Message}");
-                        peImage = unpackResult.UnpackedAssemblyBytes;
-                        peImageOld = (byte[])peImage.Clone();
-                        string unwrappedPath = Path.Combine(targetDir, Path.GetFileNameWithoutExtension(assemblyPath) + ".unwrapped" + Path.GetExtension(assemblyPath));
-                        File.WriteAllBytes(unwrappedPath, peImage);
-                        assemblyPath = unwrappedPath;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[!] CompressorUnpacker probing failed: {ex.Message}");
-            }
+                byte[] peImageOld = File.ReadAllBytes(assemblyPath);
+                byte[] peImage = (byte[])peImageOld.Clone();
+                Module reflModule = null;
 
-            // Step 1: Safety Gate & Anti-Tamper
-            if (!allowExecution)
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine();
-                Console.WriteLine("[!] ========================== SAFETY GATE ==========================");
-                Console.WriteLine("[!] Execution mode is DISABLED (omitted --allow-execution).");
-                Console.WriteLine("[!] Untrusted target constructors (<Module>.cctor) will NOT be executed.");
-                Console.WriteLine("[!] Running in Pure Static Analysis mode.");
-                Console.WriteLine("[!] To enable runtime AntiTamper and dynamic Constant decryption,");
-                Console.WriteLine("[!] re-run with '--allow-execution' (executes target assembly code in the runner process).");
-                Console.WriteLine("[!] =================================================================");
-                Console.WriteLine();
-                Console.ResetColor();
-            }
-            else
-            {
-                Console.WriteLine("[*] Step 1: Running AntiTamperKiller (Dynamic Execution Enabled)...");
+                NetDetectScanResult preScan = null;
+                if (!skipNetDetect)
+                {
+                    preScan = NetDetectIntegration.RunScan(assemblyPath);
+                    NetDetectIntegration.PrintPreScanReport(preScan);
+                }
+
+                // Stage 0: Unpack ConfuserEx Compressor if present
                 try
                 {
-                    reflModule = Assembly.LoadFile(assemblyPath).ManifestModule;
-                    var atResult = AntiTamperKiller.Execute(reflModule, peImageOld);
-                    peImage = atResult.DecryptedPeImage;
-                    if (atResult.Modified)
-                        Console.WriteLine($"[+] AntiTamper: Decrypted {atResult.DecryptedSections.Count} sections ({string.Join(", ", atResult.DecryptedSections)})");
-                    else
-                        Console.WriteLine("[-] AntiTamper: No section changes detected");
+                    using (var probeMod = ModuleDefMD.Load(peImage))
+                    {
+                        var unpackResult = CompressorUnpacker.TryUnpack(probeMod, peImage, allowExecution);
+                        if (unpackResult.SuccessfullyUnpacked)
+                        {
+                            Console.WriteLine($"[+] CompressorUnpacker: {unpackResult.Message}");
+                            peImage = unpackResult.UnpackedAssemblyBytes;
+                            peImageOld = (byte[])peImage.Clone();
+                            string unwrappedPath = Path.Combine(executionTempDir, Path.GetFileNameWithoutExtension(assemblyPath) + ".unwrapped" + Path.GetExtension(assemblyPath));
+                            File.WriteAllBytes(unwrappedPath, peImage);
+                            assemblyPath = unwrappedPath;
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"[!] AntiTamper dynamic execution failed: {ex.Message}");
-                    Console.ResetColor();
-                    peImage = (byte[])peImageOld.Clone();
+                    Console.WriteLine($"[!] CompressorUnpacker probing failed: {ex.Message}");
                 }
-            }
 
-            // Bounds-checked COR20 header repair
-            var repairResult = Cor20Repair.Repair(peImage, peImageOld);
-            if (repairResult.CbRepaired)
-                Console.WriteLine($"[+] Anti-Dump: Fixed COR20 header cb from {repairResult.OriginalCb} to 72");
-            if (repairResult.MetaDataRvaRepaired)
-                Console.WriteLine($"[+] Anti-Dump: Restored MetaData RVA to 0x{repairResult.RepairedMetaDataRva:X8}");
+                // Step 1: Safety Gate & Anti-Tamper
+                if (!allowExecution)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine();
+                    Console.WriteLine("[!] ========================== SAFETY GATE ==========================");
+                    Console.WriteLine("[!] Execution mode is DISABLED (default: pure static analysis).");
+                    Console.WriteLine("[!] Untrusted target constructors (<Module>.cctor) will NOT be executed.");
+                    Console.WriteLine("[!] Running in Pure Static Analysis mode.");
+                    Console.WriteLine("[!] To enable runtime AntiTamper and dynamic Constant decryption,");
+                    Console.WriteLine("[!] re-run with '--allow-execution'.");
+                    Console.WriteLine("[!] =================================================================");
+                    Console.WriteLine();
+                    Console.ResetColor();
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine();
+                    Console.WriteLine("[!] ==================== SECURITY WARNING: DYNAMIC EXECUTION ====================");
+                    Console.WriteLine("[!] Dynamic execution mode (--allow-execution) is ACTIVE.");
+                    Console.WriteLine("[!] Target module code (<Module>.cctor and initializers) will be EXECUTED in this process.");
+                    Console.WriteLine("[!] THIS MODE DOES NOT PROVIDE AN OS SECURITY SANDBOX.");
+                    Console.WriteLine("[!] UNTRUSTED OR MALICIOUS SAMPLES MUST BE RUN IN AN ISOLATED VM WITHOUT NETWORK ACCESS.");
+                    Console.WriteLine("[!] ==============================================================================");
+                    Console.WriteLine();
+                    Console.ResetColor();
 
-            byte[] bytesToLoad = peImage;
-            try
-            {
-                using (var testMod = ModuleDefMD.Load(peImage)) { }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[!] ModuleDefMD load check: {ex.Message}");
-                Cor20Repair.Repair(bytesToLoad, peImageOld);
-            }
+                    Console.WriteLine("[*] Step 1: Running AntiTamperKiller (Dynamic Execution Enabled)...");
+                    try
+                    {
+                        reflModule = Assembly.LoadFile(assemblyPath).ManifestModule;
+                        var atResult = AntiTamperKiller.Execute(reflModule, peImageOld);
+                        peImage = atResult.DecryptedPeImage;
+                        if (atResult.Modified)
+                            Console.WriteLine($"[+] AntiTamper: Decrypted {atResult.DecryptedSections.Count} sections ({string.Join(", ", atResult.DecryptedSections)})");
+                        else
+                            Console.WriteLine("[-] AntiTamper: No section changes detected");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"[!] AntiTamper dynamic execution failed: {ex.Message}");
+                        Console.ResetColor();
+                        peImage = (byte[])peImageOld.Clone();
+                    }
+                }
 
-            string fileExt = Path.GetExtension(assemblyPath);
-            string baseName = Path.GetFileNameWithoutExtension(assemblyPath);
-            string cexkPath = Path.Combine(targetDir, baseName + ".cexk" + fileExt);
+                byte[] bytesToLoad = (byte[])peImage.Clone();
+                bool initialLoadOk = false;
+                try
+                {
+                    using (var testMod = ModuleDefMD.Load(bytesToLoad)) { }
+                    initialLoadOk = true;
+                }
+                catch (Exception initialEx)
+                {
+                    Tool.Logger.LogInfo($"Initial ModuleDefMD load failed: {initialEx.Message}. Evaluating COR20 repair...");
+                }
+
+                if (!initialLoadOk)
+                {
+                    byte[] candidateBytes = (byte[])peImage.Clone();
+                    var repairResult = Cor20Repair.Repair(candidateBytes, peImageOld);
+
+                    if (repairResult.Success && (repairResult.CbRepaired || repairResult.MetaDataRvaRepaired))
+                    {
+                        if (repairResult.CbRepaired)
+                            Console.WriteLine($"[+] Anti-Dump: Fixed COR20 header cb from {repairResult.OriginalCb} to 72");
+                        if (repairResult.MetaDataRvaRepaired)
+                            Console.WriteLine($"[+] Anti-Dump: Restored MetaData RVA to 0x{repairResult.RepairedMetaDataRva:X8}");
+
+                        try
+                        {
+                            using (var testMod = ModuleDefMD.Load(candidateBytes)) { }
+                            bytesToLoad = candidateBytes;
+                            initialLoadOk = true;
+                        }
+                        catch (Exception postRepairEx)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Red;
+                            Console.WriteLine($"[!] ModuleDefMD load failed after COR20 repair attempt: {postRepairEx.Message}");
+                            Console.ResetColor();
+                        }
+                    }
+                    else
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"[!] COR20 repair inapplicable or failed: {repairResult.Message}");
+                        Console.ResetColor();
+                    }
+
+                    if (!initialLoadOk)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"[!] Fatal: Cannot load target assembly as a valid .NET module: {assemblyPath}");
+                        Console.ResetColor();
+                        return 1;
+                    }
+                }
+                else
+                {
+                    // If initial load succeeded, check if COR20 header cb or RVA needs normalization
+                    var repairResult = Cor20Repair.Repair(bytesToLoad, peImageOld);
+                    if (repairResult.Success && (repairResult.CbRepaired || repairResult.MetaDataRvaRepaired))
+                    {
+                        if (repairResult.CbRepaired)
+                            Console.WriteLine($"[+] Anti-Dump: Fixed COR20 header cb from {repairResult.OriginalCb} to 72");
+                        if (repairResult.MetaDataRvaRepaired)
+                            Console.WriteLine($"[+] Anti-Dump: Restored MetaData RVA to 0x{repairResult.RepairedMetaDataRva:X8}");
+                    }
+                }
+
+                string fileExt = Path.GetExtension(assemblyPath);
+                string baseName = Path.GetFileNameWithoutExtension(assemblyPath);
+                string cexkPath = Path.Combine(executionTempDir, baseName + ".cexk" + fileExt);
+
+                bool resourcesDecrypted = false;
+                bool constantsDecrypted = false;
 
             // Step 2: Proxy + Constants via dnlib
             Console.WriteLine("[*] Step 2: Running FieldRvaKiller, ProxyKiller, and ConstantKiller...");
@@ -229,6 +313,7 @@ namespace ConfuserExKillerRunner
                 // Step 2.1: In-memory Resource Extraction & Re-Embedding (runs before method AST deletions)
                 Console.WriteLine("[*] Step 2.1: Running ResourceKiller (Extracting decrypted resources)...");
                 var resResult = ResourceKiller.Execute(module, reflModule);
+                resourcesDecrypted = resResult.ResourcesDecrypted;
                 if (resResult.HandlerStripped)
                     Console.WriteLine("[+] ResourceKiller: Stripped runtime ResourceResolve hook");
                 if (resResult.ResourcesDecrypted)
@@ -239,11 +324,12 @@ namespace ConfuserExKillerRunner
                 Console.WriteLine($"[+] ProxyKiller: {proxyCount} proxy methods/delegates inlined");
 
                 int constCount = ConstantKillerImpl.Execute(module, reflModule);
+                constantsDecrypted = constCount > 0;
                 Console.WriteLine($"[+] ConstantKiller: {constCount} constants decrypted (with stack evaluation)");
 
                 // Step 3: Protector hook stripping
                 Console.WriteLine("[*] Step 3: Cleaning Protector Hooks...");
-                var cleanResult = CleanerKiller.StripProtectorHooks(module);
+                var cleanResult = CleanerKiller.StripProtectorHooks(module, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted);
                 if (cleanResult.StrippedHooksCount > 0)
                     Console.WriteLine($"[+] CleanerKiller: Stripped {cleanResult.StrippedHooksCount} protector initializers from <Module>.cctor");
 
@@ -275,7 +361,7 @@ namespace ConfuserExKillerRunner
             string currentIntermediate = cexkPath;
 
             // Step 5: de4dot-cex
-            string cleanedPath = Path.Combine(targetDir, baseName + "-cleaned" + fileExt);
+            string cleanedPath = Path.Combine(executionTempDir, baseName + "-cleaned" + fileExt);
             string de4dotExecutable = skipDe4dot ? null : ProcessRunner.ResolveDe4dotPath(explicitDe4dotPath);
 
             if (!skipDe4dot && de4dotExecutable != null)
@@ -288,7 +374,7 @@ namespace ConfuserExKillerRunner
 
                 Console.WriteLine($"[*] Step 5: Running de4dot-cex ({de4dotExecutable})...");
                 string de4dotArgs = $"\"{cexkPath}\" -p crx -o \"{cleanedPath}\"";
-                var de4dotResult = ProcessRunner.Run(de4dotExecutable, de4dotArgs, targetDir, timeoutMs: 180000);
+                var de4dotResult = ProcessRunner.Run(de4dotExecutable, de4dotArgs, executionTempDir, timeoutMs: 180000);
 
                 if (verbose || !de4dotResult.Success)
                 {
@@ -341,16 +427,17 @@ namespace ConfuserExKillerRunner
 
             string candidateExt = Path.GetExtension(finalOutputPath);
             string candidateBase = Path.GetFileNameWithoutExtension(finalOutputPath);
-            string candidatePath = Path.Combine(finalOutputDir, candidateBase + ".candidate." + Guid.NewGuid().ToString("N").Substring(0, 8) + candidateExt);
+            string candidatePath = Path.Combine(executionTempDir, candidateBase + ".candidate." + Guid.NewGuid().ToString("N").Substring(0, 8) + candidateExt);
 
             using (var module2 = ModuleDefMD.Load(currentIntermediate))
             {
-                CleanerKiller.StripProtectorHooks(module2);
+                CleanerKiller.StripProtectorHooks(module2, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted);
                 PredicateKiller.Execute(module2);
                 DeadCodeStripper.Execute(module2);
                 int switchCount2 = SwitchKillerImpl.Execute(module2);
                 DeadCodeStripper.Execute(module2);
                 Console.WriteLine($"[+] Final SwitchKiller: {switchCount2} switches resolved");
+                FinalizeMethodBodies(module2);
                 var writerOpts2 = new ModuleWriterOptions(module2) { Logger = DnlibLogger.Instance };
                 writerOpts2.MetaDataOptions.Flags |= MetaDataFlags.KeepOldMaxStack;
                 module2.Write(candidatePath, writerOpts2);
@@ -363,9 +450,14 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("===============================================================");
             var auditReport = QualityAuditor.Audit(candidatePath);
             Console.WriteLine($"[*] Status:                 [{auditReport.Status}]");
+            Console.WriteLine($"[*] Loadable (dnlib):       [{(auditReport.CanLoad ? "YES" : "NO")}]");
+            Console.WriteLine($"[*] Structural Integrity:   [{(auditReport.StructuralAuditPassed ? "PASSED" : "FAILED")}]");
+            Console.WriteLine($"[*] IL Verification:        [{auditReport.ILVerificationStatus}] ({auditReport.ILVerificationNotes})");
+            Console.WriteLine($"[*] Dynamic Execution:      [{(allowExecution ? "ACTIVE" : "DISABLED")}]");
             Console.WriteLine($"[*] Types Audited:          {auditReport.TotalTypes}");
             Console.WriteLine($"[*] Methods Audited:        {auditReport.TotalMethods} ({auditReport.MethodsWithBody} with IL bodies)");
             Console.WriteLine($"[*] Invalid Instructions:   {auditReport.InvalidInstructionsCount}");
+            Console.WriteLine($"[*] Stack Underflows:       {auditReport.StackUnderflowCount}");
             Console.WriteLine($"[*] Unresolved Call Sites:  {auditReport.UnresolvedCallSitesCount}");
 
             if (auditReport.Warnings.Count > 0)
@@ -399,24 +491,16 @@ namespace ConfuserExKillerRunner
                         File.Replace(candidatePath, finalOutputPath, backupPath, ignoreMetadataErrors: true);
                         try { File.Delete(backupPath); } catch { }
                     }
-                    catch (PlatformNotSupportedException)
+                    catch
                     {
-                        File.Move(finalOutputPath, backupPath);
-                        try
-                        {
-                            File.Move(candidatePath, finalOutputPath);
-                            try { File.Delete(backupPath); } catch { }
-                        }
-                        catch
-                        {
-                            try { File.Move(backupPath, finalOutputPath); } catch { }
-                            throw;
-                        }
+                        File.Copy(candidatePath, finalOutputPath, overwrite: true);
+                        try { File.Delete(candidatePath); } catch { }
                     }
                 }
                 else
                 {
-                    File.Move(candidatePath, finalOutputPath);
+                    File.Copy(candidatePath, finalOutputPath, overwrite: true);
+                    try { File.Delete(candidatePath); } catch { }
                 }
             }
             catch (Exception ex)
@@ -449,6 +533,21 @@ namespace ConfuserExKillerRunner
             }
 
             return 0;
+            }
+            finally
+            {
+                try
+                {
+                    if (Directory.Exists(executionTempDir))
+                    {
+                        Directory.Delete(executionTempDir, recursive: true);
+                    }
+                }
+                catch
+                {
+                    // Ignore temp directory deletion errors on exit
+                }
+            }
         }
 
         static void PrintUsage()
@@ -465,6 +564,34 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("  --no-netdetect          Skip NetDetect pre/post obfuscation audit");
             Console.WriteLine("  --verbose               Enable verbose console output");
             Console.WriteLine("  -h, --help              Show this help message");
+        }
+
+        private static void FinalizeMethodBodies(ModuleDef module)
+        {
+            foreach (var method in module.EnumerateMethods())
+            {
+                if (!method.HasBody || method.Body == null)
+                    continue;
+
+                var body = method.Body;
+                try
+                {
+                    body.SimplifyBranches();
+                    body.OptimizeBranches();
+                    body.OptimizeMacros();
+                    body.UpdateInstructionOffsets();
+
+                    uint calc = dnlib.DotNet.Writer.MaxStackCalculator.GetMaxStack(body.Instructions, body.ExceptionHandlers);
+                    ushort safeMax = (ushort)Math.Max((uint)body.MaxStack, calc);
+                    body.MaxStack = Math.Max(safeMax, (ushort)8);
+                    body.KeepOldMaxStack = true;
+                }
+                catch (Exception ex)
+                {
+                    Tool.Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] FinalizeMethodBodies for {method.Name}: {ex.Message}. Keeping existing MaxStack {body.MaxStack}.");
+                    body.KeepOldMaxStack = true;
+                }
+            }
         }
     }
 }
