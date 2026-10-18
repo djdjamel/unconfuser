@@ -431,5 +431,85 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
             Assert.DoesNotContain(atMethod, globalType.Methods);
         }
+
+        [Fact]
+        public void StripProtectorHooks_HelperWithApplicationLogicAndGetHINSTANCE_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // A helper that calls GetHINSTANCE, but also has local variables and arithmetic
+            var helperMethod = new MethodDefUser("AntiTamperHelper", MethodSig.CreateStatic(module.CorLibTypes.Int32))
+            {
+                Body = new CilBody()
+            };
+            helperMethod.Body.Variables.Add(new Local(module.CorLibTypes.Int32));
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            helperMethod.Body.Instructions.Add(Instruction.CreateLdcI4(123));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            helperMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(helperMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, helperMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            // Because helperMethod is NOT a pure 2-4 instruction stub, it MUST be preserved
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Contains(helperMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_ExactStubWithGetHINSTANCE_IsStripped()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Exact 4-instruction stub with random arbitrary name (name-independent!)
+            var stubMethod = new MethodDefUser("ArbitraryStubName_12345", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(stubMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, stubMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            // Structurally verified stub is stripped
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            Assert.Equal(1, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
+            Assert.DoesNotContain(stubMethod, globalType.Methods);
+        }
     }
 }

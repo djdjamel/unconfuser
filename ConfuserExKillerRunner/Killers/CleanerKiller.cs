@@ -110,7 +110,6 @@ namespace ConfuserExKillerRunner.Killers
             bool hasVirtualProtect = false;
             bool hasDebuggerCheck = false;
             bool hasSectionLoop = false;
-            bool hasHINSTANCE = false;
             bool hasResourceResolve = false;
             bool hasInitializeArray = false;
 
@@ -119,8 +118,6 @@ namespace ConfuserExKillerRunner.Killers
                 if (inst.Operand is IMethod called)
                 {
                     string fullName = called.FullName;
-                    if (fullName.IndexOf("GetHINSTANCE", StringComparison.OrdinalIgnoreCase) >= 0)
-                        hasHINSTANCE = true;
                     if (fullName.IndexOf("IsAttached", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         fullName.IndexOf("CheckRemoteDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         fullName.IndexOf("IsDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -146,13 +143,12 @@ namespace ConfuserExKillerRunner.Killers
                 if (antiTamperDecrypted)
                     return "Anti-Tamper";
 
-                Logger.LogWarning($"[CleanerKiller] Retaining Anti-Tamper hook in <Module>.cctor: Anti-Tamper sections have not been decrypted (execution disabled or decryption unconfirmed).");
+                Logger.LogWarning($"[CleanerKiller] Retaining Anti-Tamper hook in <Module>.cctor: Anti-Tamper sections have not been confirmed as decrypted (execution disabled or decryption unconfirmed).");
                 return null;
             }
-            if (hasHINSTANCE && (method.Name.String.IndexOf("AntiTamper", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                 method.Name.String.IndexOf("Cleaner", StringComparison.OrdinalIgnoreCase) >= 0))
+            if (IsExactStubProtectorCall(method))
             {
-                return "Anti-Tamper-Stub";
+                return "Protector-Stub";
             }
             if (hasDebuggerCheck)
                 return "Anti-Debug";
@@ -164,6 +160,50 @@ namespace ConfuserExKillerRunner.Killers
                 return "Constant-Buffer";
 
             return null;
+        }
+
+        private static bool IsExactStubProtectorCall(MethodDef method)
+        {
+            if (method == null || !method.HasBody || method.Body.Instructions == null)
+                return false;
+
+            // Stubs must have no exception handlers and no local variables
+            if (method.Body.HasExceptionHandlers || method.Body.Variables.Count > 0)
+                return false;
+
+            var nonNops = method.Body.Instructions.Where(i => i.OpCode != OpCodes.Nop).ToList();
+            if (nonNops.Count < 2 || nonNops.Count > 4)
+                return false;
+
+            if (nonNops[nonNops.Count - 1].OpCode != OpCodes.Ret)
+                return false;
+
+            bool hasProtectorCall = false;
+            for (int i = 0; i < nonNops.Count - 1; i++)
+            {
+                var inst = nonNops[i];
+                if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
+                {
+                    if (inst.Operand is IMethod m && m.Name == "GetHINSTANCE")
+                    {
+                        hasProtectorCall = true;
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                else if (inst.OpCode == OpCodes.Ldnull || inst.IsLdarg() || inst.OpCode == OpCodes.Pop)
+                {
+                    continue;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+
+            return hasProtectorCall;
         }
 
         private static bool IsConfuserConstantBufferInitializer(MethodDef method)

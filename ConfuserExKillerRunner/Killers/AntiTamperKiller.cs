@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -9,9 +10,18 @@ using Tool;
 
 namespace ConfuserExKillerRunner.Killers
 {
+    public enum AntiTamperStatus
+    {
+        NotAttempted,
+        ChangesDetected,
+        DecryptionConfirmed,
+        Failed
+    }
+
     public sealed class AntiTamperResult
     {
         public bool Modified { get; set; }
+        public AntiTamperStatus Status { get; set; } = AntiTamperStatus.NotAttempted;
         public byte[] DecryptedPeImage { get; set; }
         public List<string> DecryptedSections { get; set; } = new List<string>();
         public bool JitModeDetected { get; set; }
@@ -28,22 +38,27 @@ namespace ConfuserExKillerRunner.Killers
             var result = new AntiTamperResult
             {
                 Modified = false,
+                Status = AntiTamperStatus.NotAttempted,
                 DecryptedPeImage = (byte[])peImage.Clone()
             };
 
             // Run module constructor to let runtime AntiTamper unpack sections in memory
+            bool cctorSucceeded = false;
             try
             {
                 RuntimeHelpers.RunModuleConstructor(module.ModuleHandle);
+                cctorSucceeded = true;
             }
             catch (Exception ex)
             {
                 Logger.LogWarning($"[AntiTamper] Runtime module constructor execution warning: {ex.Message}");
+                cctorSucceeded = false;
             }
 
             void* hModule = (void*)Marshal.GetHINSTANCE(module);
             if (hModule == null)
             {
+                result.Status = AntiTamperStatus.Failed;
                 result.Message = "Failed to obtain HINSTANCE for target module";
                 return result;
             }
@@ -59,6 +74,7 @@ namespace ConfuserExKillerRunner.Killers
                 // Validate PE signature
                 if (*(uint*)ntHeader != 0x00004550)
                 {
+                    result.Status = AntiTamperStatus.Failed;
                     result.Message = "Invalid in-memory PE header signature";
                     return result;
                 }
@@ -130,8 +146,36 @@ namespace ConfuserExKillerRunner.Killers
             catch (Exception ex)
             {
                 Logger.LogError($"[AntiTamper] Section diffing failed: {ex.Message}");
+                result.Status = AntiTamperStatus.Failed;
                 result.Message = ex.Message;
                 return result;
+            }
+
+            if (result.Modified)
+            {
+                result.Status = AntiTamperStatus.ChangesDetected;
+                if (cctorSucceeded)
+                {
+                    try
+                    {
+                        using (var verifyMod = dnlib.DotNet.ModuleDefMD.Load(result.DecryptedPeImage))
+                        {
+                            bool hasValidMethods = verifyMod.GetTypes().SelectMany(t => t.Methods).Any(m => m.HasBody && m.Body.Instructions.Count > 0);
+                            if (hasValidMethods)
+                            {
+                                result.Status = AntiTamperStatus.DecryptionConfirmed;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogWarning($"[AntiTamper] Decrypted image validation warning: {ex.Message}");
+                    }
+                }
+            }
+            else
+            {
+                result.Status = cctorSucceeded ? AntiTamperStatus.NotAttempted : AntiTamperStatus.Failed;
             }
 
             result.Message = result.Modified

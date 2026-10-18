@@ -207,10 +207,15 @@ namespace ConfuserExKillerRunner
                         reflModule = Assembly.LoadFile(assemblyPath).ManifestModule;
                         var atResult = AntiTamperKiller.Execute(reflModule, peImageOld);
                         peImage = atResult.DecryptedPeImage;
-                        if (atResult.Modified)
+                        if (atResult.Status == AntiTamperStatus.DecryptionConfirmed)
                         {
                             antiTamperDecrypted = true;
-                            Console.WriteLine($"[+] AntiTamper: Decrypted {atResult.DecryptedSections.Count} sections ({string.Join(", ", atResult.DecryptedSections)})");
+                            Console.WriteLine($"[+] AntiTamper: Decryption confirmed across {atResult.DecryptedSections.Count} sections ({string.Join(", ", atResult.DecryptedSections)})");
+                        }
+                        else if (atResult.Status == AntiTamperStatus.ChangesDetected)
+                        {
+                            antiTamperDecrypted = false;
+                            Console.WriteLine($"[!] AntiTamper: Changes detected in {atResult.DecryptedSections.Count} sections, but full decryption unconfirmed. Retaining hooks.");
                         }
                         else
                         {
