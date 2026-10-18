@@ -185,6 +185,7 @@ namespace ConfuserExTools.ProxyKiller
 							if (eh.TryEnd != null) cctorBranchTargets.Add(eh.TryEnd);
 							if (eh.HandlerStart != null) cctorBranchTargets.Add(eh.HandlerStart);
 							if (eh.HandlerEnd != null) cctorBranchTargets.Add(eh.HandlerEnd);
+							if (eh.FilterStart != null) cctorBranchTargets.Add(eh.FilterStart);
 						}
 					}
 
@@ -227,14 +228,14 @@ namespace ConfuserExTools.ProxyKiller
 									continue;
 
 								var methodDef = (targetMethod as MethodDef) ?? targetMethod.ResolveMethodDef();
-								bool hasThis = targetMethod.MethodSig != null ? targetMethod.MethodSig.HasThis : (methodDef != null && !methodDef.IsStatic);
-								if (hasThis)
-								{
-									// Closed instance delegates cannot be inlined safely without extracting the captured target object
+								// Target method must be successfully resolved and explicitly static
+								if (methodDef == null || !methodDef.IsStatic)
 									continue;
-								}
 
-								bool isVirtual = methodDef != null && methodDef.IsVirtual;
+								if (targetMethod.MethodSig != null && targetMethod.MethodSig.HasThis)
+									continue;
+
+								bool isVirtual = methodDef.IsVirtual;
 								var opCode = isVirtual ? OpCodes.Callvirt : OpCodes.Call;
 								delegateMap[fieldDef] = (targetMethod, opCode);
 
@@ -274,6 +275,7 @@ namespace ConfuserExTools.ProxyKiller
 						if (eh.TryEnd != null) branchTargets.Add(eh.TryEnd);
 						if (eh.HandlerStart != null) branchTargets.Add(eh.HandlerStart);
 						if (eh.HandlerEnd != null) branchTargets.Add(eh.HandlerEnd);
+						if (eh.FilterStart != null) branchTargets.Add(eh.FilterStart);
 					}
 				}
 

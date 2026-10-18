@@ -157,11 +157,13 @@ namespace ConfuserExKillerRunner.Tests
             var globalType = module.GlobalType;
 
             // Target 1: int AddTen(int x)
-            var targetAddTen = new MethodDefUser("AddTen", MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32));
+            var targetAddTen = new MethodDefUser("AddTen", MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Public | MethodAttributes.Static);
             globalType.Methods.Add(targetAddTen);
 
             // Target 2: int MultiplyTwo(int x)
-            var targetMulTwo = new MethodDefUser("MultiplyTwo", MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32));
+            var targetMulTwo = new MethodDefUser("MultiplyTwo", MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Public | MethodAttributes.Static);
             globalType.Methods.Add(targetMulTwo);
 
             // Delegate Type 1

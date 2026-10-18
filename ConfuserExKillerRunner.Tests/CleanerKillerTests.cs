@@ -361,14 +361,16 @@ namespace ConfuserExKillerRunner.Tests
             var module = new ModuleDefUser("TestMod");
             var globalType = module.GlobalType;
 
-            var atMethod = new MethodDefUser("AntiTamperInit", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            var atMethod = new MethodDefUser("RealAntiTamperInit", MethodSig.CreateStatic(module.CorLibTypes.Void))
             {
                 Body = new CilBody()
             };
-            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
-                MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
-                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
-            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+            var secField = new FieldDefUser("VirtualAddress", new FieldSig(module.CorLibTypes.Int32));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldfld, secField));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
             globalType.Methods.Add(atMethod);
@@ -383,7 +385,7 @@ namespace ConfuserExKillerRunner.Tests
             cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
             globalType.Methods.Add(cctor);
 
-            // When antiTamperDecrypted = false (e.g. pure static analysis mode), Anti-Tamper hook MUST be retained
+            // When antiTamperDecrypted = false (e.g. pure static analysis mode or section changes unconfirmed), Anti-Tamper hook MUST be retained
             var result = CleanerKiller.StripProtectorHooks(module, antiTamperDecrypted: false);
 
             Assert.Equal(0, result.StrippedHooksCount);
@@ -398,14 +400,16 @@ namespace ConfuserExKillerRunner.Tests
             var module = new ModuleDefUser("TestMod");
             var globalType = module.GlobalType;
 
-            var atMethod = new MethodDefUser("AntiTamperInit", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            var atMethod = new MethodDefUser("RealAntiTamperInit", MethodSig.CreateStatic(module.CorLibTypes.Void))
             {
                 Body = new CilBody()
             };
-            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
-                MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
-                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
-            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+            var secField = new FieldDefUser("VirtualAddress", new FieldSig(module.CorLibTypes.Int32));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldfld, secField));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
             globalType.Methods.Add(atMethod);
@@ -420,7 +424,7 @@ namespace ConfuserExKillerRunner.Tests
             cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
             globalType.Methods.Add(cctor);
 
-            // When antiTamperDecrypted = true (dynamic execution or unpacker succeeded), hook is safely stripped
+            // When antiTamperDecrypted = true (dynamic execution or unpacker confirmed section decryption), hook is safely stripped
             var result = CleanerKiller.StripProtectorHooks(module, antiTamperDecrypted: true);
 
             Assert.Equal(1, result.StrippedHooksCount);

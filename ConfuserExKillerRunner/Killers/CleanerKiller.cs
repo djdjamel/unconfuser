@@ -141,13 +141,18 @@ namespace ConfuserExKillerRunner.Killers
                 }
             }
 
-            if (hasHINSTANCE || (hasVirtualProtect && hasSectionLoop))
+            if (hasVirtualProtect && hasSectionLoop)
             {
                 if (antiTamperDecrypted)
                     return "Anti-Tamper";
 
                 Logger.LogWarning($"[CleanerKiller] Retaining Anti-Tamper hook in <Module>.cctor: Anti-Tamper sections have not been decrypted (execution disabled or decryption unconfirmed).");
                 return null;
+            }
+            if (hasHINSTANCE && (method.Name.String.IndexOf("AntiTamper", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                 method.Name.String.IndexOf("Cleaner", StringComparison.OrdinalIgnoreCase) >= 0))
+            {
+                return "Anti-Tamper-Stub";
             }
             if (hasDebuggerCheck)
                 return "Anti-Debug";
