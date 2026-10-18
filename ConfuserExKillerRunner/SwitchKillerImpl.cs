@@ -122,7 +122,21 @@ namespace ConfuserExKillerRunner
                     var instrs = method.Body.Instructions;
                     var branchTargets = CollectBranchTargets(method.Body);
 
-                    // Build incoming branches map for each target instruction
+                    // Collect exception handler boundaries explicitly
+                    var ehBoundaries = new HashSet<Instruction>();
+                    if (method.Body.HasExceptionHandlers)
+                    {
+                        foreach (var eh in method.Body.ExceptionHandlers)
+                        {
+                            if (eh.TryStart != null) ehBoundaries.Add(eh.TryStart);
+                            if (eh.TryEnd != null) ehBoundaries.Add(eh.TryEnd);
+                            if (eh.HandlerStart != null) ehBoundaries.Add(eh.HandlerStart);
+                            if (eh.HandlerEnd != null) ehBoundaries.Add(eh.HandlerEnd);
+                            if (eh.FilterStart != null) ehBoundaries.Add(eh.FilterStart);
+                        }
+                    }
+
+                    // Build incoming branches map for each target instruction (supporting both single targets and switch multi-targets)
                     var incomingBranches = new Dictionary<Instruction, List<int>>();
                     for (int k = 0; k < instrs.Count; k++)
                     {
@@ -136,6 +150,21 @@ namespace ConfuserExKillerRunner
                             }
                             list.Add(k);
                         }
+                        else if (inst.Operand is IList<Instruction> multiTargets)
+                        {
+                            foreach (var t in multiTargets)
+                            {
+                                if (t != null)
+                                {
+                                    if (!incomingBranches.TryGetValue(t, out var list))
+                                    {
+                                        list = new List<int>();
+                                        incomingBranches[t] = list;
+                                    }
+                                    list.Add(k);
+                                }
+                            }
+                        }
                     }
 
                     for (int j = 0; j < instrs.Count; j++)
@@ -146,9 +175,16 @@ namespace ConfuserExKillerRunner
                             var ldcInst = instrs[j];
                             var popInst = instrs[j + 1];
 
+                            // Reject if either instruction is a protected exception boundary
+                            if (ehBoundaries.Contains(ldcInst) || ehBoundaries.Contains(popInst))
+                                continue;
+
+                            // Reject if ldc is targeted by any branch
                             if (branchTargets.Contains(ldcInst))
                                 continue;
 
+                            // If pop is targeted by branches, verify that EVERY incoming branch is a valid pairing:
+                            // a branch from an instruction whose preceding instruction is ldc.i4 (not targeted).
                             bool canRemove = true;
                             var matchingBranches = new List<int>();
                             if (incomingBranches.TryGetValue(popInst, out var branches))
@@ -159,7 +195,8 @@ namespace ConfuserExKillerRunner
                                     if ((brInst.OpCode == OpCodes.Br || brInst.OpCode == OpCodes.Br_S)
                                         && brIdx - 1 >= 0
                                         && instrs[brIdx - 1].IsLdcI4()
-                                        && !branchTargets.Contains(instrs[brIdx - 1]))
+                                        && !branchTargets.Contains(instrs[brIdx - 1])
+                                        && !ehBoundaries.Contains(instrs[brIdx - 1]))
                                     {
                                         matchingBranches.Add(brIdx - 1);
                                     }
@@ -169,6 +206,10 @@ namespace ConfuserExKillerRunner
                                         break;
                                     }
                                 }
+                            }
+                            else if (branchTargets.Contains(popInst))
+                            {
+                                canRemove = false;
                             }
 
                             if (canRemove)
@@ -190,6 +231,11 @@ namespace ConfuserExKillerRunner
                             var dupInst = instrs[j];
                             var popInst = instrs[j + 1];
 
+                            // Reject if either instruction is a protected exception boundary
+                            if (ehBoundaries.Contains(dupInst) || ehBoundaries.Contains(popInst))
+                                continue;
+
+                            // Reject if dup is targeted by any branch
                             if (branchTargets.Contains(dupInst))
                                 continue;
 
@@ -203,7 +249,8 @@ namespace ConfuserExKillerRunner
                                     if ((brInst.OpCode == OpCodes.Br || brInst.OpCode == OpCodes.Br_S)
                                         && brIdx - 1 >= 0
                                         && instrs[brIdx - 1].OpCode == OpCodes.Dup
-                                        && !branchTargets.Contains(instrs[brIdx - 1]))
+                                        && !branchTargets.Contains(instrs[brIdx - 1])
+                                        && !ehBoundaries.Contains(instrs[brIdx - 1]))
                                     {
                                         matchingBranches.Add(brIdx - 1);
                                     }
@@ -213,6 +260,10 @@ namespace ConfuserExKillerRunner
                                         break;
                                     }
                                 }
+                            }
+                            else if (branchTargets.Contains(popInst))
+                            {
+                                canRemove = false;
                             }
 
                             if (canRemove)

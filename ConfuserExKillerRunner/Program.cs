@@ -173,6 +173,7 @@ namespace ConfuserExKillerRunner
                 }
 
                 // Step 1: Safety Gate & Anti-Tamper
+                bool antiTamperDecrypted = false;
                 if (!allowExecution)
                 {
                     Console.ForegroundColor = ConsoleColor.Yellow;
@@ -206,6 +207,7 @@ namespace ConfuserExKillerRunner
                         reflModule = Assembly.LoadFile(assemblyPath).ManifestModule;
                         var atResult = AntiTamperKiller.Execute(reflModule, peImageOld);
                         peImage = atResult.DecryptedPeImage;
+                        antiTamperDecrypted = true;
                         if (atResult.Modified)
                             Console.WriteLine($"[+] AntiTamper: Decrypted {atResult.DecryptedSections.Count} sections ({string.Join(", ", atResult.DecryptedSections)})");
                         else
@@ -329,7 +331,7 @@ namespace ConfuserExKillerRunner
 
                 // Step 3: Protector hook stripping
                 Console.WriteLine("[*] Step 3: Cleaning Protector Hooks...");
-                var cleanResult = CleanerKiller.StripProtectorHooks(module, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted);
+                var cleanResult = CleanerKiller.StripProtectorHooks(module, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
                 if (cleanResult.StrippedHooksCount > 0)
                     Console.WriteLine($"[+] CleanerKiller: Stripped {cleanResult.StrippedHooksCount} protector initializers from <Module>.cctor");
 
@@ -431,7 +433,7 @@ namespace ConfuserExKillerRunner
 
             using (var module2 = ModuleDefMD.Load(currentIntermediate))
             {
-                CleanerKiller.StripProtectorHooks(module2, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted);
+                CleanerKiller.StripProtectorHooks(module2, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
                 PredicateKiller.Execute(module2);
                 DeadCodeStripper.Execute(module2);
                 int switchCount2 = SwitchKillerImpl.Execute(module2);

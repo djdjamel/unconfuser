@@ -16,7 +16,7 @@ namespace ConfuserExKillerRunner.Killers
 
     public static class CleanerKiller
     {
-        public static CleanerResult StripProtectorHooks(ModuleDef module, bool resourcesDecrypted = false, bool constantsDecrypted = false)
+        public static CleanerResult StripProtectorHooks(ModuleDef module, bool resourcesDecrypted = false, bool constantsDecrypted = false, bool antiTamperDecrypted = false)
         {
             if (module == null) throw new ArgumentNullException(nameof(module));
 
@@ -42,7 +42,7 @@ namespace ConfuserExKillerRunner.Killers
                     continue;
 
                 // Check if target method is a known ConfuserEx protector initializer
-                string hookType = ClassifyProtectorMethod(methodDef, resourcesDecrypted, constantsDecrypted);
+                string hookType = ClassifyProtectorMethod(methodDef, resourcesDecrypted, constantsDecrypted, antiTamperDecrypted);
                 if (hookType != null)
                 {
                     inst.OpCode = OpCodes.Nop;
@@ -102,7 +102,7 @@ namespace ConfuserExKillerRunner.Killers
             return result;
         }
 
-        private static string ClassifyProtectorMethod(MethodDef method, bool resourcesDecrypted, bool constantsDecrypted)
+        private static string ClassifyProtectorMethod(MethodDef method, bool resourcesDecrypted, bool constantsDecrypted, bool antiTamperDecrypted)
         {
             if (method.DeclaringType != null && !method.DeclaringType.IsGlobalModuleType)
                 return null;
@@ -142,7 +142,13 @@ namespace ConfuserExKillerRunner.Killers
             }
 
             if (hasHINSTANCE || (hasVirtualProtect && hasSectionLoop))
-                return "Anti-Tamper";
+            {
+                if (antiTamperDecrypted)
+                    return "Anti-Tamper";
+
+                Logger.LogWarning($"[CleanerKiller] Retaining Anti-Tamper hook in <Module>.cctor: Anti-Tamper sections have not been decrypted (execution disabled or decryption unconfirmed).");
+                return null;
+            }
             if (hasDebuggerCheck)
                 return "Anti-Debug";
             if (hasVirtualProtect)

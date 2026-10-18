@@ -108,8 +108,8 @@ namespace ConfuserExKillerRunner.Tests
             };
             userType.Methods.Add(otherCaller);
 
-            // Execute StripProtectorHooks
-            var result = CleanerKiller.StripProtectorHooks(module);
+            // Execute StripProtectorHooks with antiTamperDecrypted: true
+            var result = CleanerKiller.StripProtectorHooks(module, antiTamperDecrypted: true);
 
             // cctor call was stripped (nulled)
             Assert.Equal(1, result.StrippedHooksCount);
@@ -353,6 +353,79 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(1, result.StrippedHooksCount);
             Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
             Assert.DoesNotContain(constMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_AntiTamper_WhenAntiTamperNotDecrypted_IsRetained()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            var atMethod = new MethodDefUser("AntiTamperInit", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(atMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, atMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            // When antiTamperDecrypted = false (e.g. pure static analysis mode), Anti-Tamper hook MUST be retained
+            var result = CleanerKiller.StripProtectorHooks(module, antiTamperDecrypted: false);
+
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(atMethod, cctor.Body.Instructions[0].Operand);
+            Assert.Contains(atMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_AntiTamper_WhenAntiTamperDecrypted_IsStripped()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            var atMethod = new MethodDefUser("AntiTamperInit", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(atMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, atMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            // When antiTamperDecrypted = true (dynamic execution or unpacker succeeded), hook is safely stripped
+            var result = CleanerKiller.StripProtectorHooks(module, antiTamperDecrypted: true);
+
+            Assert.Equal(1, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
+            Assert.DoesNotContain(atMethod, globalType.Methods);
         }
     }
 }

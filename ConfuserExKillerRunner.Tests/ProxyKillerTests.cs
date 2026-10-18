@@ -243,5 +243,119 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(OpCodes.Call, callInvoke1.OpCode);
             Assert.Equal(targetAddTen, callInvoke1.Operand);
         }
+
+        [Fact]
+        public void Execute_ClosedInstanceDelegateProxy_IsRetained()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            var userType = new TypeDefUser("UserType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+
+            // Target is an INSTANCE method (requires this)
+            var targetInstanceMethod = new MethodDefUser("InstanceMethod", MethodSig.CreateInstance(module.CorLibTypes.Int32))
+            {
+                Body = new CilBody()
+            };
+            userType.Methods.Add(targetInstanceMethod);
+
+            // Delegate type
+            var delType = new TypeDefUser("MyAction", module.CorLibTypes.GetTypeRef("System", "MulticastDelegate"));
+            module.Types.Add(delType);
+            var invoke = new MethodDefUser("Invoke", MethodSig.CreateInstance(module.CorLibTypes.Int32));
+            delType.Methods.Add(invoke);
+
+            // Field in <Module>
+            var field = new FieldDefUser("FieldInstance", new FieldSig(delType.ToTypeSig()), FieldAttributes.Public | FieldAttributes.Static);
+            globalType.Fields.Add(field);
+
+            // <Module>..cctor loads token of targetInstanceMethod
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, targetInstanceMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Stsfld, field));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            // Caller tries to invoke the delegate
+            var caller = new MethodDefUser("CallDelegate", MethodSig.CreateStatic(module.CorLibTypes.Int32))
+            {
+                Body = new CilBody()
+            };
+            var ldsfld = Instruction.Create(OpCodes.Ldsfld, field);
+            var callInvoke = Instruction.Create(OpCodes.Callvirt, invoke);
+            var ret = Instruction.Create(OpCodes.Ret);
+            caller.Body.Instructions.Add(ldsfld);
+            caller.Body.Instructions.Add(callInvoke);
+            caller.Body.Instructions.Add(ret);
+            userType.Methods.Add(caller);
+
+            int inlined = ProxyKillerImpl.Execute(module, ignoreAccess: true, removeProxyMethods: false);
+
+            // Must NOT inline because instance delegate cannot be called directly without captured instance on stack
+            Assert.Equal(0, inlined);
+            Assert.Equal(OpCodes.Ldsfld, ldsfld.OpCode);
+            Assert.Equal(OpCodes.Callvirt, callInvoke.OpCode);
+            Assert.Equal(invoke, callInvoke.Operand);
+        }
+
+        [Fact]
+        public void Execute_DelegateProxyWithInterveningBranchInInit_IsRetained()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            var targetStatic = new MethodDefUser("TargetStatic", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            globalType.Methods.Add(targetStatic);
+
+            var delType = new TypeDefUser("MyVoidAction", module.CorLibTypes.GetTypeRef("System", "MulticastDelegate"));
+            module.Types.Add(delType);
+            var invoke = new MethodDefUser("Invoke", MethodSig.CreateInstance(module.CorLibTypes.Void));
+            delType.Methods.Add(invoke);
+
+            var field = new FieldDefUser("FieldBranch", new FieldSig(delType.ToTypeSig()), FieldAttributes.Public | FieldAttributes.Static);
+            globalType.Fields.Add(field);
+
+            // <Module>..cctor with a branch between ldtoken and stsfld
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            var brTarget = Instruction.Create(OpCodes.Nop);
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, targetStatic));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Br_S, brTarget));
+            cctor.Body.Instructions.Add(brTarget);
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Stsfld, field));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var userType = new TypeDefUser("UserType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+            var caller = new MethodDefUser("CallBranchDel", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var ldsfld = Instruction.Create(OpCodes.Ldsfld, field);
+            var callInvoke = Instruction.Create(OpCodes.Callvirt, invoke);
+            var ret = Instruction.Create(OpCodes.Ret);
+            caller.Body.Instructions.Add(ldsfld);
+            caller.Body.Instructions.Add(callInvoke);
+            caller.Body.Instructions.Add(ret);
+            userType.Methods.Add(caller);
+
+            int inlined = ProxyKillerImpl.Execute(module, ignoreAccess: true, removeProxyMethods: false);
+
+            // Intervening branch prevents ambiguous delegate mapping
+            Assert.Equal(0, inlined);
+            Assert.Equal(OpCodes.Ldsfld, ldsfld.OpCode);
+        }
     }
 }

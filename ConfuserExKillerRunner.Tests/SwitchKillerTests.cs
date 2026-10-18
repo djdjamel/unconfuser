@@ -147,5 +147,67 @@ namespace ConfuserExKillerRunner.Tests
             // callerBr should now target target1 directly
             Assert.Equal(target1, callerBr.Operand);
         }
+
+        [Fact]
+        public void RemoveNopPatterns_WhenPopIsTargetedBySwitch_IsRetained()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var method = new MethodDefUser("TestMethod", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+
+            var ldc = Instruction.CreateLdcI4(42);
+            var pop = Instruction.Create(OpCodes.Pop);
+            var otherTarget = Instruction.Create(OpCodes.Nop);
+            var ret = Instruction.Create(OpCodes.Ret);
+            var sw = Instruction.Create(OpCodes.Switch, new Instruction[] { otherTarget, pop });
+
+            method.Body.Instructions.Add(sw);
+            method.Body.Instructions.Add(otherTarget);
+            method.Body.Instructions.Add(ldc);
+            method.Body.Instructions.Add(pop);
+            method.Body.Instructions.Add(ret);
+
+            SwitchKillerImpl.RemoveNopPatterns(new List<MethodDef> { method });
+
+            // Because pop is a switch target, it must NOT be converted to nop
+            Assert.Equal(OpCodes.Pop, pop.OpCode);
+            Assert.True(ldc.IsLdcI4());
+        }
+
+        [Fact]
+        public void RemoveNopPatterns_WhenPopIsExceptionHandlerBoundary_IsRetained()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var method = new MethodDefUser("TestMethod", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+
+            var ldc = Instruction.CreateLdcI4(100);
+            var pop = Instruction.Create(OpCodes.Pop);
+            var ret = Instruction.Create(OpCodes.Ret);
+
+            method.Body.Instructions.Add(ldc);
+            method.Body.Instructions.Add(pop);
+            method.Body.Instructions.Add(ret);
+
+            // Set pop as an ExceptionHandler HandlerStart
+            var eh = new ExceptionHandler(ExceptionHandlerType.Catch)
+            {
+                TryStart = ldc,
+                TryEnd = pop,
+                HandlerStart = pop,
+                HandlerEnd = ret
+            };
+            method.Body.ExceptionHandlers.Add(eh);
+
+            SwitchKillerImpl.RemoveNopPatterns(new List<MethodDef> { method });
+
+            // Because pop is an exception handler boundary, it must NOT be converted to nop
+            Assert.Equal(OpCodes.Pop, pop.OpCode);
+            Assert.True(ldc.IsLdcI4());
+        }
     }
 }

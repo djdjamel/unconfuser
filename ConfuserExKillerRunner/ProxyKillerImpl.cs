@@ -171,6 +171,23 @@ namespace ConfuserExTools.ProxyKiller
 				{
 					if (!method.HasBody) continue;
 					var instrs = method.Body.Instructions;
+					var cctorBranchTargets = new HashSet<Instruction>();
+					foreach (var inst in instrs)
+					{
+						if (inst.Operand is Instruction t && t != null) cctorBranchTargets.Add(t);
+						else if (inst.Operand is IList<Instruction> mt) { foreach (var x in mt) if (x != null) cctorBranchTargets.Add(x); }
+					}
+					if (method.Body.HasExceptionHandlers)
+					{
+						foreach (var eh in method.Body.ExceptionHandlers)
+						{
+							if (eh.TryStart != null) cctorBranchTargets.Add(eh.TryStart);
+							if (eh.TryEnd != null) cctorBranchTargets.Add(eh.TryEnd);
+							if (eh.HandlerStart != null) cctorBranchTargets.Add(eh.HandlerStart);
+							if (eh.HandlerEnd != null) cctorBranchTargets.Add(eh.HandlerEnd);
+						}
+					}
+
 					for (int i = 0; i < instrs.Count; i++)
 					{
 						if (instrs[i].OpCode == OpCodes.Stsfld && instrs[i].Operand is IField field)
@@ -181,18 +198,42 @@ namespace ConfuserExTools.ProxyKiller
 
 							// Trace backwards for ldtoken IMethod
 							IMethod targetMethod = null;
+							int ldtokenIdx = -1;
 							for (int j = i - 1; j >= 0 && j >= i - 10; j--)
 							{
 								if (instrs[j].OpCode == OpCodes.Ldtoken && instrs[j].Operand is IMethod target)
 								{
 									targetMethod = target;
+									ldtokenIdx = j;
 									break;
 								}
 							}
 
-							if (targetMethod != null)
+							if (targetMethod != null && ldtokenIdx >= 0)
 							{
+								// Verify no intervening branch instructions or branch targets between ldtoken and stsfld
+								bool hasBranch = false;
+								for (int k = ldtokenIdx; k <= i; k++)
+								{
+									if (instrs[k].OpCode.FlowControl == FlowControl.Branch ||
+										instrs[k].OpCode.FlowControl == FlowControl.Cond_Branch ||
+										(k > ldtokenIdx && cctorBranchTargets.Contains(instrs[k])))
+									{
+										hasBranch = true;
+										break;
+									}
+								}
+								if (hasBranch)
+									continue;
+
 								var methodDef = (targetMethod as MethodDef) ?? targetMethod.ResolveMethodDef();
+								bool hasThis = targetMethod.MethodSig != null ? targetMethod.MethodSig.HasThis : (methodDef != null && !methodDef.IsStatic);
+								if (hasThis)
+								{
+									// Closed instance delegates cannot be inlined safely without extracting the captured target object
+									continue;
+								}
+
 								bool isVirtual = methodDef != null && methodDef.IsVirtual;
 								var opCode = isVirtual ? OpCodes.Callvirt : OpCodes.Call;
 								delegateMap[fieldDef] = (targetMethod, opCode);
