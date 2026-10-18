@@ -4,6 +4,7 @@ using System.Linq;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
 using Tool;
+using ConfuserExKillerRunner.Analysis;
 
 namespace ConfuserExKillerRunner.Killers
 {
@@ -28,6 +29,41 @@ namespace ConfuserExKillerRunner.Killers
             var methodsToRemove = new HashSet<MethodDef>();
             var instructions = cctor.Body.Instructions;
 
+            // Collect all branch targets within <Module>..cctor to protect control-flow targets
+            var branchTargets = new HashSet<Instruction>();
+            foreach (var ins in instructions)
+            {
+                if (ins == null) continue;
+                if (ins.Operand is Instruction singleTarget)
+                {
+                    if (singleTarget != null) branchTargets.Add(singleTarget);
+                }
+                else if (ins.Operand is IList<Instruction> switchTargets)
+                {
+                    foreach (var st in switchTargets)
+                        if (st != null) branchTargets.Add(st);
+                }
+                else if (ins.Operand is Instruction[] switchArray)
+                {
+                    foreach (var st in switchArray)
+                        if (st != null) branchTargets.Add(st);
+                }
+            }
+
+            // Collect all exception handler boundaries within <Module>..cctor
+            var ehBoundaries = new HashSet<Instruction>();
+            if (cctor.Body.HasExceptionHandlers)
+            {
+                foreach (var eh in cctor.Body.ExceptionHandlers)
+                {
+                    if (eh.TryStart != null) ehBoundaries.Add(eh.TryStart);
+                    if (eh.TryEnd != null) ehBoundaries.Add(eh.TryEnd);
+                    if (eh.HandlerStart != null) ehBoundaries.Add(eh.HandlerStart);
+                    if (eh.HandlerEnd != null) ehBoundaries.Add(eh.HandlerEnd);
+                    if (eh.FilterStart != null) ehBoundaries.Add(eh.FilterStart);
+                }
+            }
+
             for (int i = 0; i < instructions.Count; i++)
             {
                 var inst = instructions[i];
@@ -45,27 +81,46 @@ namespace ConfuserExKillerRunner.Killers
                 string hookType = ClassifyProtectorMethod(methodDef, resourcesDecrypted, constantsDecrypted, antiTamperDecrypted);
                 if (hookType != null)
                 {
-                    inst.OpCode = OpCodes.Nop;
-                    inst.Operand = null;
-
-                    // Clean up preceding argument push instructions if the stripped method consumed parameters
                     int paramsCount = methodDef.Parameters?.Count ?? 0;
-                    for (int p = 1; p <= paramsCount && (i - p) >= 0; p++)
+                    if (calledMethod.MethodSig != null && calledMethod.MethodSig.HasThis)
+                        paramsCount++;
+
+                    // Verify that all arguments consumed by the hook call can be unambiguously identified,
+                    // do not conflict with branch targets or EH boundaries, and do not involve complex multi-instruction sequences.
+                    if (!TryIdentifyArgumentProducers(cctor, i, paramsCount, branchTargets, ehBoundaries, out var toNeutralize))
                     {
-                        var prev = instructions[i - p];
-                        if (prev.OpCode == OpCodes.Ldnull || prev.OpCode == OpCodes.Ldarg_0 ||
-                            prev.OpCode == OpCodes.Ldc_I4 || prev.OpCode == OpCodes.Ldc_I4_0 ||
-                            prev.OpCode == OpCodes.Ldtoken)
-                        {
-                            prev.OpCode = OpCodes.Nop;
-                            prev.Operand = null;
-                        }
+                        Logger.LogWarning($"[CleanerKiller] Retaining {hookType} hook {methodDef.Name} in <Module>.cctor: argument producers cannot be safely or unambiguously identified.");
+                        continue;
+                    }
+
+                    // Save atomic snapshot of instructions before applying changes
+                    var originalSnapshot = instructions.Select(ins => new Instruction(ins.OpCode, ins.Operand)).ToList();
+
+                    // Apply transformation: nop call and all unambiguous argument producer instructions
+                    foreach (var n in toNeutralize)
+                    {
+                        n.OpCode = OpCodes.Nop;
+                        n.Operand = null;
+                    }
+
+                    // Atomic post-strip audit: ensure <Module>..cctor remains structurally valid
+                    var auditReport = new AuditReport { CanLoad = true };
+                    QualityAuditor.AuditMethod(cctor, auditReport);
+                    if (!auditReport.StructuralAuditPassed)
+                    {
+                        // Rollback to original instructions
+                        cctor.Body.Instructions.Clear();
+                        foreach (var orig in originalSnapshot)
+                            cctor.Body.Instructions.Add(orig);
+
+                        Logger.LogWarning($"[CleanerKiller] Rollback in <Module>.cctor: stripping hook {methodDef.Name} failed structural IL audit ({string.Join("; ", auditReport.Errors)}). Original IL restored.");
+                        continue;
                     }
 
                     methodsToRemove.Add(methodDef);
                     result.StrippedHooksCount++;
                     result.StrippedDetails.Add($"{hookType} hook removed from <Module>.cctor: {methodDef.Name}");
-                    Logger.LogInfo($"[CleanerKiller] Nulled {hookType} initializer call to {methodDef.Name} in <Module>.cctor");
+                    Logger.LogInfo($"[CleanerKiller] Safely stripped {hookType} initializer call to {methodDef.Name} and {toNeutralize.Count - 1} argument producer(s) in <Module>.cctor");
                 }
             }
 
@@ -353,6 +408,148 @@ namespace ConfuserExKillerRunner.Killers
                    string.Equals(name, "CheckRemoteDebuggerPresent", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(name, "OutputDebugStringA", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(name, "OutputDebugStringW", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool TryIdentifyArgumentProducers(
+            MethodDef cctor,
+            int callIndex,
+            int expectedParams,
+            HashSet<Instruction> branchTargets,
+            HashSet<Instruction> ehBoundaries,
+            out List<Instruction> instructionsToNeutralize)
+        {
+            instructionsToNeutralize = new List<Instruction>();
+            var instructions = cctor.Body.Instructions;
+            var callInst = instructions[callIndex];
+
+            // The call instruction itself cannot be a branch target or EH boundary
+            if (branchTargets.Contains(callInst) || ehBoundaries.Contains(callInst))
+                return false;
+
+            instructionsToNeutralize.Add(callInst);
+
+            if (expectedParams == 0)
+                return true;
+
+            int needed = expectedParams;
+            int curr = callIndex - 1;
+
+            while (needed > 0 && curr >= 0)
+            {
+                var prev = instructions[curr];
+
+                // Skip existing nops
+                if (prev.OpCode == OpCodes.Nop)
+                {
+                    curr--;
+                    continue;
+                }
+
+                // Must not be a branch target or EH boundary
+                if (branchTargets.Contains(prev) || ehBoundaries.Contains(prev))
+                    return false;
+
+                // An argument must be produced by an unambiguous, single-instruction pure push.
+                // If an argument is produced by multiple instructions, a field access (ldfld/ldsfld),
+                // a method call (call/callvirt), or any unsupported sequence, refuse!
+                if (IsPureSingleArgumentProducer(prev))
+                {
+                    instructionsToNeutralize.Add(prev);
+                    needed--;
+                    curr--;
+                }
+                else
+                {
+                    // Unsupported producer (call, field load, binary op, multi-instruction, etc.)
+                    return false;
+                }
+            }
+
+            if (needed > 0)
+                return false;
+
+            // Verify exception handlers: no instruction to neutralize may cross an EH boundary or be inside an EH clause
+            // if the call instruction is not inside the exact same clause
+            if (cctor.Body.HasExceptionHandlers)
+            {
+                foreach (var eh in cctor.Body.ExceptionHandlers)
+                {
+                    bool callInTry = IsInstructionInClause(instructions, eh.TryStart, eh.TryEnd, callInst);
+                    bool callInHandler = IsInstructionInClause(instructions, eh.HandlerStart, eh.HandlerEnd, callInst);
+
+                    foreach (var inst in instructionsToNeutralize)
+                    {
+                        bool instInTry = IsInstructionInClause(instructions, eh.TryStart, eh.TryEnd, inst);
+                        bool instInHandler = IsInstructionInClause(instructions, eh.HandlerStart, eh.HandlerEnd, inst);
+
+                        if (instInTry != callInTry || instInHandler != callInHandler)
+                            return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static bool IsPureSingleArgumentProducer(Instruction inst)
+        {
+            if (inst == null) return false;
+
+            // Reject all field loads (ldfld, ldsfld, ldflda, ldsflda)
+            if (inst.OpCode == OpCodes.Ldfld || inst.OpCode == OpCodes.Ldsfld ||
+                inst.OpCode == OpCodes.Ldflda || inst.OpCode == OpCodes.Ldsflda)
+                return false;
+
+            // Reject all calls
+            if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt || inst.OpCode == OpCodes.Calli)
+                return false;
+
+            // Check stack usage: must have pops == 0 and pushes == 1
+            inst.CalculateStackUsage(out int pushes, out int pops);
+            if (pops != 0 || pushes != 1)
+                return false;
+
+            // Allowed pure push opcodes:
+            // Constants & literals
+            if (inst.OpCode == OpCodes.Ldnull) return true;
+            if (inst.OpCode == OpCodes.Ldc_I4 || inst.OpCode == OpCodes.Ldc_I4_S ||
+                inst.OpCode == OpCodes.Ldc_I4_0 || inst.OpCode == OpCodes.Ldc_I4_1 ||
+                inst.OpCode == OpCodes.Ldc_I4_2 || inst.OpCode == OpCodes.Ldc_I4_3 ||
+                inst.OpCode == OpCodes.Ldc_I4_4 || inst.OpCode == OpCodes.Ldc_I4_5 ||
+                inst.OpCode == OpCodes.Ldc_I4_6 || inst.OpCode == OpCodes.Ldc_I4_7 ||
+                inst.OpCode == OpCodes.Ldc_I4_8 || inst.OpCode == OpCodes.Ldc_I4_M1)
+                return true;
+            if (inst.OpCode == OpCodes.Ldc_I8 || inst.OpCode == OpCodes.Ldc_R4 || inst.OpCode == OpCodes.Ldc_R8)
+                return true;
+            if (inst.OpCode == OpCodes.Ldstr) return true;
+            if (inst.OpCode == OpCodes.Ldtoken) return true;
+
+            // Arguments and locals
+            if (inst.OpCode == OpCodes.Ldarg || inst.OpCode == OpCodes.Ldarg_S ||
+                inst.OpCode == OpCodes.Ldarg_0 || inst.OpCode == OpCodes.Ldarg_1 ||
+                inst.OpCode == OpCodes.Ldarg_2 || inst.OpCode == OpCodes.Ldarg_3)
+                return true;
+            if (inst.OpCode == OpCodes.Ldloc || inst.OpCode == OpCodes.Ldloc_S ||
+                inst.OpCode == OpCodes.Ldloc_0 || inst.OpCode == OpCodes.Ldloc_1 ||
+                inst.OpCode == OpCodes.Ldloc_2 || inst.OpCode == OpCodes.Ldloc_3)
+                return true;
+
+            return false;
+        }
+
+        private static bool IsInstructionInClause(IList<Instruction> instructions, Instruction start, Instruction end, Instruction target)
+        {
+            if (start == null || target == null) return false;
+            int s = instructions.IndexOf(start);
+            int t = instructions.IndexOf(target);
+            if (s < 0 || t < 0) return false;
+            if (end == null)
+            {
+                return t >= s;
+            }
+            int e = instructions.IndexOf(end);
+            if (e < 0) return false;
+            return t >= s && t < e;
         }
 
         internal static bool IsReferencedInModule(ModuleDef module, MethodDef target)

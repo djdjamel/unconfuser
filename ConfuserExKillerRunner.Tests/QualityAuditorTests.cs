@@ -243,5 +243,119 @@ namespace ConfuserExKillerRunner.Tests
             Assert.False(report.StructuralAuditPassed);
             Assert.Equal("FAILED", report.Status);
         }
+
+        [Fact]
+        public void AuditMethod_VoidMethodLeavesValueOnStackAfterBranch_StatusIsFailed()
+        {
+            var method = CreateDummyMethod(); // static void TestMethod()
+            var body = new CilBody();
+            var targetRet = Instruction.Create(OpCodes.Ret);
+            var brInst = Instruction.Create(OpCodes.Br_S, targetRet);
+
+            // Path branches with 1 element on stack to a void return
+            body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1));
+            body.Instructions.Add(brInst);
+            body.Instructions.Add(targetRet);
+            method.Body = body;
+
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.AuditMethod(method, report);
+
+            Assert.False(report.StructuralAuditPassed);
+            Assert.True(report.StackUnderflowCount > 0);
+            Assert.Contains(report.Errors, e => e.Contains("Non-empty stack") && e.Contains("void return"));
+        }
+
+        [Fact]
+        public void AuditMethod_VoidMethodLeavesValueOnStackAfterSwitch_StatusIsFailed()
+        {
+            var method = CreateDummyMethod(); // static void TestMethod()
+            var body = new CilBody();
+            var targetBranch = Instruction.Create(OpCodes.Ldc_I4_2);
+            var switchInst = Instruction.Create(OpCodes.Switch, new List<Instruction> { targetBranch });
+
+            body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            body.Instructions.Add(switchInst);
+            body.Instructions.Add(Instruction.Create(OpCodes.Ret)); // fallthrough return (stack 0)
+            body.Instructions.Add(targetBranch); // switch target pushes 2
+            body.Instructions.Add(Instruction.Create(OpCodes.Ret)); // void return with stack 1!
+            method.Body = body;
+
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.AuditMethod(method, report);
+
+            Assert.False(report.StructuralAuditPassed);
+            Assert.True(report.StackUnderflowCount > 0);
+            Assert.Contains(report.Errors, e => e.Contains("Non-empty stack") && e.Contains("void return"));
+        }
+
+        [Fact]
+        public void AuditMethod_VoidMethodLeavesValueOnStackInExceptionHandler_StatusIsFailed()
+        {
+            var method = CreateDummyMethod(); // static void TestMethod()
+            var body = new CilBody();
+            var exitRet = Instruction.Create(OpCodes.Ret);
+            var tryLeave = Instruction.Create(OpCodes.Leave_S, exitRet);
+            var handlerPop = Instruction.Create(OpCodes.Pop); // pop caught exception
+            var handlerPush = Instruction.Create(OpCodes.Ldc_I4_3); // push integer
+            var handlerRet = Instruction.Create(OpCodes.Ret); // void return with stack 1!
+
+            body.Instructions.Add(tryLeave);
+            body.Instructions.Add(handlerPop);
+            body.Instructions.Add(handlerPush);
+            body.Instructions.Add(handlerRet);
+            body.Instructions.Add(exitRet);
+
+            body.ExceptionHandlers.Add(new ExceptionHandler(ExceptionHandlerType.Catch)
+            {
+                TryStart = tryLeave,
+                TryEnd = handlerPop,
+                HandlerStart = handlerPop,
+                HandlerEnd = exitRet,
+                CatchType = method.Module.CorLibTypes.Object.TypeDefOrRef
+            });
+            method.Body = body;
+
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.AuditMethod(method, report);
+
+            Assert.False(report.StructuralAuditPassed);
+            Assert.True(report.StackUnderflowCount > 0);
+            Assert.Contains(report.Errors, e => e.Contains("Non-empty stack") && e.Contains("void return"));
+        }
+
+        [Fact]
+        public void AuditMethod_StackHeightMismatchAtCFGMergePoint_StatusIsFailed()
+        {
+            var method = CreateDummyMethod(); // static void TestMethod()
+            var body = new CilBody();
+            var mergeRet = Instruction.Create(OpCodes.Ret);
+            var pathB = Instruction.Create(OpCodes.Ldc_I4_1);
+
+            // brfalse: if condition false, branches to pathB; otherwise continues path A
+            var condBr = Instruction.Create(OpCodes.Brfalse_S, pathB);
+
+            // Entry: push condition for branch
+            body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            body.Instructions.Add(condBr);
+
+            // Path A: pushes 0 items then branches to mergeRet
+            body.Instructions.Add(Instruction.Create(OpCodes.Br_S, mergeRet));
+
+            // Path B: pushes 1 item then branches to mergeRet
+            body.Instructions.Add(pathB);
+            body.Instructions.Add(Instruction.Create(OpCodes.Br_S, mergeRet));
+
+            // Merge point: incoming stack height from Path A is 0, from Path B is 1!
+            body.Instructions.Add(mergeRet);
+            method.Body = body;
+
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.AuditMethod(method, report);
+
+            Assert.False(report.StructuralAuditPassed);
+            Assert.True(report.StackUnderflowCount > 0);
+            Assert.Contains(report.Errors, e => e.Contains("Stack height mismatch at CFG merge point"));
+        }
     }
 }

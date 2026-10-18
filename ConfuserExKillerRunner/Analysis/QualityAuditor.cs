@@ -89,6 +89,25 @@ namespace ConfuserExKillerRunner.Analysis
             return report;
         }
 
+        /// <summary>
+        /// Audits a method body for structural integrity, operand bounds, branch targets, exception handler boundaries,
+        /// and evaluation stack balance across all CFG paths.
+        ///
+        /// Scope and verification limits:
+        /// - In-Scope (Structural &amp; CFG Analysis):
+        ///   * Instruction operand validity and local/parameter index bounds.
+        ///   * Branch and switch target validity (no unlisted/orphaned targets).
+        ///   * Exception handler clause ordering (TryStart &lt;= TryEnd) and boundary containment.
+        ///   * Evaluation stack depth simulation across all control-flow paths (underflows, CFG merge point consistency).
+        ///   * Verification of stack depth at every reachable ret instruction (0 for void methods, 1 for value-returning methods).
+        /// - Out-of-Scope (Full CLI ECMA-335 Verification):
+        ///   * Complete ECMA-335 type-safety (e.g. verifying that an instruction argument is assignment-compatible with
+        ///     the declared parameter type, or ref/byref pointer lifespan and aliasing rules).
+        ///   * Member accessibility constraints across assemblies (private, internal, protected visibility).
+        ///   * Generic type parameter constraints and variance.
+        ///   These rules require disk resolution of all referenced assemblies and are typically verified by an external
+        ///   CLI verification tool such as ILVerify or PEVerify.
+        /// </summary>
         public static void AuditMethod(MethodDef method, AuditReport report)
         {
             var instructions = method.Body.Instructions;
@@ -308,61 +327,12 @@ namespace ConfuserExKillerRunner.Analysis
                 }
             }
 
-            // Evaluation stack simulation & underflow check
-            int stackDepth = 0;
-            bool hasControlFlow = method.Body.HasExceptionHandlers || instructions.Any(inst => inst != null && (inst.OpCode.OperandType == OperandType.InlineBrTarget || inst.OpCode.OperandType == OperandType.ShortInlineBrTarget || inst.OpCode.OperandType == OperandType.InlineSwitch));
+            // Comprehensive CFG evaluation stack verification:
+            // Simulates stack depths along all control-flow paths (including branch joins, switches, and EH blocks)
+            // and verifies stack heights at ret, merge points, and underflows.
+            AuditEvaluationStackCFG(method, report);
 
-            for (int i = 0; i < instructions.Count; i++)
-            {
-                var inst = instructions[i];
-                if (inst == null) continue;
-
-                inst.CalculateStackUsage(out int pushes, out int pops);
-                if (pops > 0 && pops > stackDepth && (!hasControlFlow || i == 0))
-                {
-                    report.StackUnderflowCount++;
-                    report.InvalidInstructionsCount++;
-                    report.Errors.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Stack underflow at IL_{inst.Offset:X4} ({inst.OpCode}): required pop {pops} but stack depth is {stackDepth}");
-                    report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Stack underflow at IL_{inst.Offset:X4} ({inst.OpCode}): required pop {pops} but stack depth is {stackDepth}");
-                    stackDepth = 0;
-                }
-                else
-                {
-                    stackDepth = Math.Max(0, stackDepth - pops);
-                    stackDepth += pushes;
-                }
-
-                if (!hasControlFlow)
-                {
-                    if (inst.OpCode == OpCodes.Ret)
-                    {
-                        bool isVoid = method.ReturnType == null ||
-                                      method.ReturnType.ElementType == ElementType.Void ||
-                                      (method.ReturnType.TypeName == "Void" && method.ReturnType.Namespace == "System");
-                        if (isVoid && stackDepth > 0)
-                        {
-                            report.InvalidInstructionsCount++;
-                            report.StackUnderflowCount++;
-                            report.Errors.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Non-empty stack ({stackDepth}) at void return");
-                            report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Non-empty stack ({stackDepth}) at void return");
-                        }
-                        else if (!isVoid && stackDepth != 1)
-                        {
-                            report.InvalidInstructionsCount++;
-                            report.StackUnderflowCount++;
-                            report.Errors.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Invalid stack depth ({stackDepth}) at non-void return (expected 1)");
-                            report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Invalid stack depth ({stackDepth}) at non-void return (expected 1)");
-                        }
-                        stackDepth = 0;
-                    }
-                    else if (inst.OpCode == OpCodes.Throw || inst.OpCode == OpCodes.Rethrow)
-                    {
-                        stackDepth = 0;
-                    }
-                }
-            }
-
-            // CFG-aware evaluation stack validation via dnlib MaxStackCalculator
+            // Cross-check max stack calculation via dnlib
             try
             {
                 dnlib.DotNet.Writer.MaxStackCalculator.GetMaxStack(instructions, method.Body.ExceptionHandlers);
@@ -382,6 +352,221 @@ namespace ConfuserExKillerRunner.Analysis
                 if (last != null && !IsTerminatingOpCode(last.OpCode))
                 {
                     report.Warnings.Add($"[0x{method.MDToken.Raw:X8}] Method {method.Name} does not terminate with ret/throw/br at IL_{last.Offset:X4} ({last.OpCode})");
+                }
+            }
+        }
+
+        private static void AuditEvaluationStackCFG(MethodDef method, AuditReport report)
+        {
+            var instructions = method.Body.Instructions;
+            if (instructions == null || instructions.Count == 0) return;
+
+            var instToIndex = new Dictionary<Instruction, int>(instructions.Count);
+            for (int i = 0; i < instructions.Count; i++)
+            {
+                var inst = instructions[i];
+                if (inst != null && !instToIndex.ContainsKey(inst))
+                    instToIndex[inst] = i;
+            }
+
+            int?[] entryStack = new int?[instructions.Count];
+            var queue = new Queue<int>();
+
+            void Enqueue(int idx, int stack)
+            {
+                if (idx < 0 || idx >= instructions.Count) return;
+
+                if (!entryStack[idx].HasValue)
+                {
+                    entryStack[idx] = stack;
+                    queue.Enqueue(idx);
+                }
+                else if (entryStack[idx].Value != stack)
+                {
+                    // Stack height mismatch at CFG merge point
+                    report.StackUnderflowCount++;
+                    report.InvalidInstructionsCount++;
+                    string msg = $"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Stack height mismatch at CFG merge point IL_{instructions[idx].Offset:X4}: incoming stack height {stack} differs from existing {entryStack[idx].Value}";
+                    report.Errors.Add(msg);
+                    report.Warnings.Add(msg);
+                }
+            }
+
+            // 1. Initial entry point (method start)
+            Enqueue(0, 0);
+
+            // 2. Exception handler entry points
+            if (method.Body.HasExceptionHandlers)
+            {
+                foreach (var eh in method.Body.ExceptionHandlers)
+                {
+                    if (eh.HandlerType == ExceptionHandlerType.Catch)
+                    {
+                        // CLR pushes the caught exception object on entry to catch block
+                        if (eh.HandlerStart != null && instToIndex.TryGetValue(eh.HandlerStart, out int hIdx))
+                            Enqueue(hIdx, 1);
+                    }
+                    else if (eh.HandlerType == ExceptionHandlerType.Filter)
+                    {
+                        // CLR pushes the exception object on entry to filter block
+                        if (eh.FilterStart != null && instToIndex.TryGetValue(eh.FilterStart, out int fIdx))
+                            Enqueue(fIdx, 1);
+                        if (eh.HandlerStart != null && instToIndex.TryGetValue(eh.HandlerStart, out int hIdx))
+                            Enqueue(hIdx, 1);
+                    }
+                    else if (eh.HandlerType == ExceptionHandlerType.Finally || eh.HandlerType == ExceptionHandlerType.Fault)
+                    {
+                        // Stack is empty on entry to finally or fault block
+                        if (eh.HandlerStart != null && instToIndex.TryGetValue(eh.HandlerStart, out int hIdx))
+                            Enqueue(hIdx, 0);
+                    }
+                }
+            }
+
+            bool isVoid = method.ReturnType == null ||
+                          method.ReturnType.ElementType == ElementType.Void ||
+                          (method.ReturnType.TypeName == "Void" && method.ReturnType.Namespace == "System");
+
+            while (queue.Count > 0)
+            {
+                int idx = queue.Dequeue();
+                var inst = instructions[idx];
+                if (inst == null) continue;
+
+                int curStack = entryStack[idx].Value;
+
+                inst.CalculateStackUsage(out int pushes, out int pops);
+                int popsUsed = pops == -1 ? curStack : pops;
+                int pushesUsed = pushes > 0 ? pushes : 0;
+
+                if (popsUsed > 0 && popsUsed > curStack)
+                {
+                    report.StackUnderflowCount++;
+                    report.InvalidInstructionsCount++;
+                    string err = $"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Stack underflow on CFG path at IL_{inst.Offset:X4} ({inst.OpCode}): required pop {popsUsed} but stack depth is {curStack}";
+                    report.Errors.Add(err);
+                    report.Warnings.Add(err);
+                }
+
+                int exitStack = Math.Max(0, curStack - popsUsed) + pushesUsed;
+
+                if (inst.OpCode == OpCodes.Ret)
+                {
+                    if (isVoid && exitStack > 0)
+                    {
+                        report.InvalidInstructionsCount++;
+                        report.StackUnderflowCount++;
+                        string err = $"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Non-empty stack ({exitStack}) at void return on CFG path at IL_{inst.Offset:X4}";
+                        report.Errors.Add(err);
+                        report.Warnings.Add(err);
+                    }
+                    else if (!isVoid && exitStack != 1)
+                    {
+                        report.InvalidInstructionsCount++;
+                        report.StackUnderflowCount++;
+                        string err = $"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Invalid stack depth ({exitStack}) at non-void return (expected 1) on CFG path at IL_{inst.Offset:X4}";
+                        report.Errors.Add(err);
+                        report.Warnings.Add(err);
+                    }
+                    continue;
+                }
+
+                if (inst.OpCode == OpCodes.Throw || inst.OpCode == OpCodes.Rethrow)
+                {
+                    continue;
+                }
+
+                if (inst.OpCode == OpCodes.Leave || inst.OpCode == OpCodes.Leave_S)
+                {
+                    // ECMA-335 Partition III Section 3.42: leave instruction empties evaluation stack
+                    if (inst.Operand is Instruction leaveTarget && instToIndex.TryGetValue(leaveTarget, out int tIdx))
+                    {
+                        Enqueue(tIdx, 0);
+                    }
+                    continue;
+                }
+
+                if (inst.OpCode == OpCodes.Endfinally)
+                {
+                    if (curStack != 0)
+                    {
+                        report.InvalidInstructionsCount++;
+                        report.StackUnderflowCount++;
+                        string err = $"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Non-empty stack ({curStack}) at endfinally at IL_{inst.Offset:X4}";
+                        report.Errors.Add(err);
+                        report.Warnings.Add(err);
+                    }
+                    continue;
+                }
+
+                if (inst.OpCode == OpCodes.Endfilter)
+                {
+                    continue;
+                }
+
+                if (inst.OpCode == OpCodes.Br || inst.OpCode == OpCodes.Br_S)
+                {
+                    if (inst.Operand is Instruction brTarget && instToIndex.TryGetValue(brTarget, out int tIdx))
+                    {
+                        Enqueue(tIdx, exitStack);
+                    }
+                    continue;
+                }
+
+                if (inst.OpCode == OpCodes.Jmp)
+                {
+                    continue;
+                }
+
+                if (inst.OpCode.OperandType == OperandType.InlineBrTarget || inst.OpCode.OperandType == OperandType.ShortInlineBrTarget)
+                {
+                    if (inst.Operand is Instruction condTarget && instToIndex.TryGetValue(condTarget, out int tIdx))
+                    {
+                        Enqueue(tIdx, exitStack);
+                    }
+                    if (idx + 1 < instructions.Count)
+                    {
+                        Enqueue(idx + 1, exitStack);
+                    }
+                    continue;
+                }
+
+                if (inst.OpCode == OpCodes.Switch)
+                {
+                    if (inst.Operand is IList<Instruction> switchList)
+                    {
+                        foreach (var st in switchList)
+                        {
+                            if (st != null && instToIndex.TryGetValue(st, out int tIdx))
+                                Enqueue(tIdx, exitStack);
+                        }
+                    }
+                    else if (inst.Operand is Instruction[] switchArray)
+                    {
+                        foreach (var st in switchArray)
+                        {
+                            if (st != null && instToIndex.TryGetValue(st, out int tIdx))
+                                Enqueue(tIdx, exitStack);
+                        }
+                    }
+                    if (idx + 1 < instructions.Count)
+                    {
+                        Enqueue(idx + 1, exitStack);
+                    }
+                    continue;
+                }
+
+                if (idx + 1 < instructions.Count)
+                {
+                    Enqueue(idx + 1, exitStack);
+                }
+                else
+                {
+                    // Linear flow falls off the end of instruction stream
+                    report.InvalidInstructionsCount++;
+                    string err = $"[0x{method.MDToken.Raw:X8}] Method {method.Name}: Control flow falls off the end of the method body at IL_{inst.Offset:X4} ({inst.OpCode}) without ret/throw";
+                    report.Errors.Add(err);
+                    report.Warnings.Add(err);
                 }
             }
         }
