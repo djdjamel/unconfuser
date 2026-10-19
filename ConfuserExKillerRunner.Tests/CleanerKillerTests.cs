@@ -1,6 +1,8 @@
+using System;
 using ConfuserExKillerRunner.Killers;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
+using dnlib.PE;
 using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
@@ -3007,6 +3009,156 @@ namespace ConfuserExKillerRunner.Tests
             // Hook MUST be preserved because ldind.u1 is a partial 1-byte read, not full 32-bit e_lfanew!
             Assert.Equal(0, result.StrippedHooksCount);
             Assert.Contains(hook, globalType.Methods);
+        }
+
+        private static (MethodDef hook, MethodDef cctor) CreateLdindIHook(ModuleDefUser module)
+        {
+            var hook = new MethodDefUser("LdindIHook_" + Guid.NewGuid().ToString("N").Substring(0, 8),
+                MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localPe = new Local(module.CorLibTypes.IntPtr);
+            var localVal = new Local(module.CorLibTypes.IntPtr);
+            var localQ = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            hook.Body.Variables.Add(localBase);
+            hook.Body.Variables.Add(localPe);
+            hook.Body.Variables.Add(localVal);
+            hook.Body.Variables.Add(localQ);
+            hook.Body.Variables.Add(localOldProtect);
+
+            var marshalType = new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef);
+            var moduleType = new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef);
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, moduleType.ToTypeSig()),
+                marshalType);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // 1. base = Marshal.GetHINSTANCE(null) -> ModuleBase
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+
+            // 2. pe = base + 0x3C -> PeDerivedAddress(0x3C)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+
+            // 3. val = *(IntPtr*)pe -> ldloc.1; ldind.i; stloc.2 (native int read!)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldind_I));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_2));
+
+            // 4. q = base + val -> ldloc.0; ldloc.2; add; stloc.3
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_2));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_3));
+
+            // VirtualProtect(q, 0x1000, 0x04, out oldProtect)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_3));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // 5. *(int*)q = 0
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_3));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            module.GlobalType.Methods.Add(hook);
+
+            var cctor = module.GlobalType.FindStaticConstructor();
+            if (cctor == null)
+            {
+                cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                    MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                    MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+                {
+                    Body = new CilBody()
+                };
+                cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                module.GlobalType.Methods.Add(cctor);
+            }
+            cctor.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Call, hook));
+
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(hook, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+
+            return (hook, cctor);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_HookWithNativeIntReadOfELfanew_64BitModule_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestMod64Bit");
+            module.Machine = Machine.AMD64;
+
+            var (hook, _) = CreateLdindIHook(module);
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // On 64-bit target, ldind.i reads 8 bytes, which overflows 4-byte e_lfanew.
+            // Hook MUST be preserved!
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Contains(hook, module.GlobalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_HookWithNativeIntReadOfELfanew_AmbiguousAnyCPUModule_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestModAnyCPU");
+            module.Machine = Machine.I386;
+            module.Is32BitRequired = false;
+            module.IsILOnly = true;
+
+            var (hook, _) = CreateLdindIHook(module);
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // AnyCPU module without 32BitRequired has ambiguous runtime bitness (runs as 64-bit on 64-bit OS/hosts).
+            // Conservative analyzer must reject ldind.i as proof of 4-byte read, preserving the hook!
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Contains(hook, module.GlobalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_HookWithNativeIntReadOfELfanew_UnknownArchitecture_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestModUnknownArch");
+            module.Machine = Machine.Unknown;
+
+            var (hook, _) = CreateLdindIHook(module);
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Unknown architecture cannot guarantee 32-bit execution. Hook must be preserved!
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Contains(hook, module.GlobalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_HookWithNativeIntReadOfELfanew_Guaranteed32BitModule_IsStripped()
+        {
+            var module = new ModuleDefUser("TestMod32BitReq");
+            module.Machine = Machine.I386;
+            module.Is32BitRequired = true;
+
+            var (hook, _) = CreateLdindIHook(module);
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Target module is guaranteed to execute as 32-bit, so ldind.i is strictly 4 bytes and reads e_lfanew.
+            // Hook is properly recognized as Anti-Dump and stripped!
+            Assert.Equal(1, result.StrippedHooksCount);
+            Assert.DoesNotContain(hook, module.GlobalType.Methods);
         }
 
         [Fact]

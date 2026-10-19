@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
+using dnlib.PE;
 using Tool;
 using ConfuserExKillerRunner.Analysis;
+using ConfuserExKillerRunner.Core;
 
 namespace ConfuserExKillerRunner.Killers
 {
@@ -757,7 +760,7 @@ namespace ConfuserExKillerRunner.Killers
                     var curLocals = new PeSymbolicSlot[state.Locals.Length];
                     Array.Copy(state.Locals, curLocals, curLocals.Length);
 
-                    ExecuteSymbolicInstruction(inst, curStack, curLocals, ref zeroingDetected);
+                    ExecuteSymbolicInstruction(inst, curStack, curLocals, ref zeroingDetected, method.Module);
 
                     var successors = GetSuccessorIndices(inst, i, instructions.Count, instToIndex);
                     if (successors.Count == 0) continue;
@@ -807,7 +810,8 @@ namespace ConfuserExKillerRunner.Killers
             Instruction inst,
             List<PeSymbolicSlot> stack,
             PeSymbolicSlot[] locals,
-            ref bool zeroingDetected)
+            ref bool zeroingDetected,
+            ModuleDef module)
         {
             var op = inst.OpCode;
             var code = op.Code;
@@ -1049,7 +1053,7 @@ namespace ConfuserExKillerRunner.Killers
                 code == Code.Ldind_I8 || code == Code.Ldind_U1 || code == Code.Ldind_U2 || code == Code.Ldind_U4)
             {
                 var addr = PopStack(stack);
-                PushStack(stack, EvaluateLdind(addr, code));
+                PushStack(stack, EvaluateLdind(addr, code, module));
                 return;
             }
 
@@ -1357,15 +1361,81 @@ namespace ConfuserExKillerRunner.Killers
             return PeSymbolicSlot.None;
         }
 
-        private static PeSymbolicSlot EvaluateLdind(PeSymbolicSlot addr, Code code)
+        private static bool IsGuaranteed32BitModule(ModuleDef module)
+        {
+            if (module == null)
+                return false;
+
+            // 64-bit architectures
+            if (module.IsAMD64 || module.IsARM64 || module.IsIA64)
+                return false;
+
+            if (module.Machine == Machine.AMD64 ||
+                module.Machine == Machine.ARM64 ||
+                module.Machine == Machine.IA64)
+            {
+                return false;
+            }
+
+            // Must be a recognized 32-bit machine (e.g. I386 / ARMNT)
+            if (module.Machine != Machine.I386 && module.Machine != Machine.ARMNT)
+                return false;
+
+            // If a file path is available on disk, also check full PE/COR20 header architecture info
+            if (!string.IsNullOrEmpty(module.Location) && File.Exists(module.Location))
+            {
+                try
+                {
+                    var arch = ArchitectureDetector.Detect(module.Location);
+                    if (arch.Architecture == TargetArchitecture.X86Required)
+                        return true;
+                    if (arch.Architecture == TargetArchitecture.X64 ||
+                        arch.Architecture == TargetArchitecture.AnyCPU ||
+                        arch.Architecture == TargetArchitecture.Unknown)
+                    {
+                        return false;
+                    }
+                }
+                catch
+                {
+                    // Fall back to module metadata inspection below
+                }
+            }
+
+            // For in-memory / metadata modules:
+            // 1. If 32-bit execution is explicitly required, OS loader guarantees 32-bit execution (WoW64 or 32-bit OS),
+            //    so native int (IntPtr) is guaranteed to be 4 bytes.
+            if (module.Is32BitRequired)
+                return true;
+
+            // 2. If the module is not IL-only (mixed-mode / contains native x86 code), it cannot execute as 64-bit.
+            if (!module.IsILOnly)
+                return true;
+
+            // 3. IL-only AnyCPU (even with 32BitPreferred) or unconfigured module:
+            //    Runtime bitness is ambiguous (executes as 64-bit on 64-bit OS / 64-bit CLR hosts).
+            //    Conservatively reject ldind.i as proof of a 4-byte read.
+            return false;
+        }
+
+        private static PeSymbolicSlot EvaluateLdind(PeSymbolicSlot addr, Code code, ModuleDef module)
         {
             // In the PE specification, offset 0x3C (IMAGE_DOS_HEADER.e_lfanew) specifically holds
             // the 4-byte (32-bit) relative file offset to IMAGE_NT_HEADERS.
-            // Only a full 32-bit (or native int) dereference (ldind.i4, ldind.u4, ldind.i) directly at
-            // (ModuleBase + 0x3C) yields the proven e_lfanew field.
+            // Full 32-bit integer reads (ldind.i4, ldind.u4) directly at (ModuleBase + 0x3C)
+            // qualify as a proven e_lfanew field regardless of platform architecture.
+            // Native int reads (ldind.i) are only 4 bytes if the analyzed target module is guaranteed
+            // to execute as 32-bit (e.g. x86 required or 32-bit mixed mode). On 64-bit or ambiguous/unknown
+            // architectures (e.g. AnyCPU, x64), ldind.i loads 8 bytes or an indeterminate size and
+            // cannot be accepted as proof of reading 32-bit e_lfanew.
             // Narrow partial reads (ldind.u1, ldind.i1, ldind.u2, ldind.i2) or reads at any other offset
-            // do NOT constitute a valid e_lfanew pointer derivation and produce None.
-            bool is32BitRead = code == Code.Ldind_I4 || code == Code.Ldind_U4 || code == Code.Ldind_I;
+            // produce None.
+            bool is32BitRead = code == Code.Ldind_I4 || code == Code.Ldind_U4;
+            if (!is32BitRead && code == Code.Ldind_I)
+            {
+                is32BitRead = IsGuaranteed32BitModule(module);
+            }
+
             if (is32BitRead &&
                 addr.Kind == PeSymbolicKind.PeDerivedAddress &&
                 addr.ConcreteValue.HasValue &&
