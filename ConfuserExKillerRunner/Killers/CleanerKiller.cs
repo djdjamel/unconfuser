@@ -537,52 +537,67 @@ namespace ConfuserExKillerRunner.Killers
                    string.Equals(name, "OutputDebugStringW", StringComparison.OrdinalIgnoreCase);
         }
 
-        [Flags]
-        private enum PeSymbolicTag
+        private enum PeSymbolicValue
         {
             None = 0,
-            ModuleBase = 1 << 0,        // Proven origin from Marshal.GetHINSTANCE(...)
-            PeHeaderOffset = 1 << 1,    // Constant 0x3C / 60 (e_lfanew)
-            PeHeaderField = 1 << 2,     // Field loaded from PE header (e.g. *(ModuleBase + 0x3C))
-            PeDerivedAddress = 1 << 3,  // Derived pointer to PE header: ModuleBase + 0x3C, ModuleBase + e_lfanew, etc.
-            Zero = 1 << 4               // Integer 0, null, or zeroed value
+            ModuleBase = 1,        // Proven origin from Marshal.GetHINSTANCE(...)
+            PeHeaderOffset = 2,    // Constant 0x3C / 60 (e_lfanew)
+            PeHeaderField = 3,     // Field loaded from PE header (e.g. *(ModuleBase + 0x3C))
+            PeDerivedAddress = 4,  // Derived pointer to PE header: ModuleBase + 0x3C, ModuleBase + e_lfanew, etc.
+            Zero = 5               // Integer 0, null, or zeroed value
         }
 
         private sealed class PeSymbolicState
         {
-            public readonly PeSymbolicTag[] Locals;
-            public readonly PeSymbolicTag[] Stack;
+            public readonly PeSymbolicValue[] Locals;
+            public readonly PeSymbolicValue[] Stack;
 
-            public PeSymbolicState(int localCount, PeSymbolicTag[] stack)
+            public PeSymbolicState(int localCount, PeSymbolicValue[] stack)
             {
-                Locals = new PeSymbolicTag[localCount];
-                Stack = stack ?? Array.Empty<PeSymbolicTag>();
+                Locals = new PeSymbolicValue[localCount];
+                Stack = stack ?? Array.Empty<PeSymbolicValue>();
             }
 
-            public PeSymbolicState(PeSymbolicTag[] locals, PeSymbolicTag[] stack)
+            public PeSymbolicState(PeSymbolicValue[] locals, PeSymbolicValue[] stack)
             {
                 Locals = locals;
-                Stack = stack ?? Array.Empty<PeSymbolicTag>();
+                Stack = stack ?? Array.Empty<PeSymbolicValue>();
             }
 
             public PeSymbolicState Clone()
             {
-                var newLocals = new PeSymbolicTag[Locals.Length];
+                var newLocals = new PeSymbolicValue[Locals.Length];
                 Array.Copy(Locals, newLocals, Locals.Length);
-                var newStack = new PeSymbolicTag[Stack.Length];
+                var newStack = new PeSymbolicValue[Stack.Length];
                 Array.Copy(Stack, newStack, Stack.Length);
                 return new PeSymbolicState(newLocals, newStack);
             }
 
-            public bool MergeFrom(PeSymbolicState incoming)
+            public bool MergeFrom(PeSymbolicState incoming, out bool incompatible)
             {
+                incompatible = false;
                 if (incoming == null) return false;
+
+                // Check stack compatibility:
+                // Under ECMA-335 (Partition I, §12.3.2.1), stack depth must be invariant across all paths reaching an instruction.
+                // If stack heights differ, control flow is either malformed or states cannot be soundly unified.
+                if (Stack.Length != incoming.Stack.Length)
+                {
+                    incompatible = true;
+                    return false;
+                }
+
+                if (Locals.Length != incoming.Locals.Length)
+                {
+                    incompatible = true;
+                    return false;
+                }
+
                 bool changed = false;
 
-                int minLocals = Math.Min(Locals.Length, incoming.Locals.Length);
-                for (int i = 0; i < minLocals; i++)
+                for (int i = 0; i < Locals.Length; i++)
                 {
-                    var merged = Locals[i] | incoming.Locals[i];
+                    var merged = MergeValue(Locals[i], incoming.Locals[i]);
                     if (merged != Locals[i])
                     {
                         Locals[i] = merged;
@@ -590,20 +605,26 @@ namespace ConfuserExKillerRunner.Killers
                     }
                 }
 
-                if (Stack.Length == incoming.Stack.Length)
+                for (int i = 0; i < Stack.Length; i++)
                 {
-                    for (int i = 0; i < Stack.Length; i++)
+                    var merged = MergeValue(Stack[i], incoming.Stack[i]);
+                    if (merged != Stack[i])
                     {
-                        var merged = Stack[i] | incoming.Stack[i];
-                        if (merged != Stack[i])
-                        {
-                            Stack[i] = merged;
-                            changed = true;
-                        }
+                        Stack[i] = merged;
+                        changed = true;
                     }
                 }
 
                 return changed;
+            }
+
+            private static PeSymbolicValue MergeValue(PeSymbolicValue a, PeSymbolicValue b)
+            {
+                // Sound conservative join:
+                // Provenance is only guaranteed if both branches agree on the symbolic value.
+                // Disagreeing values (e.g. ModuleBase on path 1 vs PeHeaderOffset on path 2)
+                // must NOT be united into a conjunctive tag, which would fabricate false provenance.
+                return (a == b) ? a : PeSymbolicValue.None;
             }
         }
 
@@ -640,7 +661,7 @@ namespace ConfuserExKillerRunner.Killers
                     instToIndex[instructions[i]] = i;
 
                 var entryStates = new PeSymbolicState[instructions.Count];
-                entryStates[0] = new PeSymbolicState(varCount, Array.Empty<PeSymbolicTag>());
+                entryStates[0] = new PeSymbolicState(varCount, Array.Empty<PeSymbolicValue>());
 
                 var worklist = new Queue<int>();
                 var inWorklist = new bool[instructions.Count];
@@ -658,8 +679,8 @@ namespace ConfuserExKillerRunner.Killers
                     var state = entryStates[i];
                     if (state == null) continue;
 
-                    var curStack = new List<PeSymbolicTag>(state.Stack);
-                    var curLocals = new PeSymbolicTag[state.Locals.Length];
+                    var curStack = new List<PeSymbolicValue>(state.Stack);
+                    var curLocals = new PeSymbolicValue[state.Locals.Length];
                     Array.Copy(state.Locals, curLocals, curLocals.Length);
 
                     ExecuteSymbolicInstruction(inst, curStack, curLocals, ref zeroingDetected);
@@ -681,13 +702,19 @@ namespace ConfuserExKillerRunner.Killers
                         }
                         else
                         {
-                            if (entryStates[sIdx].MergeFrom(outState))
+                            if (entryStates[sIdx].MergeFrom(outState, out bool incompatible))
                             {
                                 if (!inWorklist[sIdx])
                                 {
                                     worklist.Enqueue(sIdx);
                                     inWorklist[sIdx] = true;
                                 }
+                            }
+
+                            if (incompatible)
+                            {
+                                Logger.LogWarning($"[CleanerKiller] Incompatible stack or local state when merging into instruction IL_{instructions[sIdx].Offset:X4} in {method.Name}. Inconclusive analysis: safely retaining hook.");
+                                return false;
                             }
                         }
                     }
@@ -704,8 +731,8 @@ namespace ConfuserExKillerRunner.Killers
 
         private static void ExecuteSymbolicInstruction(
             Instruction inst,
-            List<PeSymbolicTag> stack,
-            PeSymbolicTag[] locals,
+            List<PeSymbolicValue> stack,
+            PeSymbolicValue[] locals,
             ref bool zeroingDetected)
         {
             var op = inst.OpCode;
@@ -717,7 +744,7 @@ namespace ConfuserExKillerRunner.Killers
             {
                 inst.CalculateStackUsage(out int pushes, out int pops);
                 for (int p = 0; p < pops; p++) PopStack(stack);
-                PushStack(stack, PeSymbolicTag.ModuleBase);
+                PushStack(stack, PeSymbolicValue.ModuleBase);
                 return;
             }
 
@@ -739,18 +766,18 @@ namespace ConfuserExKillerRunner.Killers
                 else if (inst.Operand is byte b) val = b;
 
                 if (val == 0x3C || val == 60)
-                    PushStack(stack, PeSymbolicTag.PeHeaderOffset);
+                    PushStack(stack, PeSymbolicValue.PeHeaderOffset);
                 else if (val == 0)
-                    PushStack(stack, PeSymbolicTag.Zero);
+                    PushStack(stack, PeSymbolicValue.Zero);
                 else
-                    PushStack(stack, PeSymbolicTag.None);
+                    PushStack(stack, PeSymbolicValue.None);
                 return;
             }
 
             if (code == Code.Ldc_I4_0 || code == Code.Ldnull ||
                 (code == Code.Ldc_I8 && Equals(inst.Operand, 0L)))
             {
-                PushStack(stack, PeSymbolicTag.Zero);
+                PushStack(stack, PeSymbolicValue.Zero);
                 return;
             }
 
@@ -761,7 +788,7 @@ namespace ConfuserExKillerRunner.Killers
                 if (TryGetVariableIndex(inst, out int idx) && idx >= 0 && idx < locals.Length)
                     PushStack(stack, locals[idx]);
                 else
-                    PushStack(stack, PeSymbolicTag.None);
+                    PushStack(stack, PeSymbolicValue.None);
                 return;
             }
 
@@ -778,7 +805,7 @@ namespace ConfuserExKillerRunner.Killers
             // 6. Local variable address (Ldloca)
             if (code == Code.Ldloca || code == Code.Ldloca_S)
             {
-                PushStack(stack, PeSymbolicTag.None);
+                PushStack(stack, PeSymbolicValue.None);
                 return;
             }
 
@@ -787,28 +814,7 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var b = PopStack(stack);
                 var a = PopStack(stack);
-
-                PeSymbolicTag res = PeSymbolicTag.None;
-
-                // Proven ModuleBase + 0x3C -> PeDerivedAddress
-                if ((a.HasFlag(PeSymbolicTag.ModuleBase) && b.HasFlag(PeSymbolicTag.PeHeaderOffset)) ||
-                    (b.HasFlag(PeSymbolicTag.ModuleBase) && a.HasFlag(PeSymbolicTag.PeHeaderOffset)))
-                {
-                    res = PeSymbolicTag.PeDerivedAddress;
-                }
-                // Proven ModuleBase + PeHeaderField (e.g. *(ModuleBase + 0x3C)) -> PeDerivedAddress
-                else if ((a.HasFlag(PeSymbolicTag.ModuleBase) && b.HasFlag(PeSymbolicTag.PeHeaderField)) ||
-                         (b.HasFlag(PeSymbolicTag.ModuleBase) && a.HasFlag(PeSymbolicTag.PeHeaderField)))
-                {
-                    res = PeSymbolicTag.PeDerivedAddress;
-                }
-                // Offset calculation from already derived PE address -> PeDerivedAddress
-                else if (a.HasFlag(PeSymbolicTag.PeDerivedAddress) || b.HasFlag(PeSymbolicTag.PeDerivedAddress))
-                {
-                    res = PeSymbolicTag.PeDerivedAddress;
-                }
-
-                PushStack(stack, res);
+                PushStack(stack, CombineAdd(a, b));
                 return;
             }
 
@@ -817,10 +823,7 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var b = PopStack(stack);
                 var a = PopStack(stack);
-                PeSymbolicTag res = PeSymbolicTag.None;
-                if (a.HasFlag(PeSymbolicTag.PeDerivedAddress))
-                    res = PeSymbolicTag.PeDerivedAddress;
-                PushStack(stack, res);
+                PushStack(stack, CombineSub(a, b));
                 return;
             }
 
@@ -829,10 +832,7 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var b = PopStack(stack);
                 var a = PopStack(stack);
-                PeSymbolicTag res = PeSymbolicTag.None;
-                if (a.HasFlag(PeSymbolicTag.PeDerivedAddress) || b.HasFlag(PeSymbolicTag.PeDerivedAddress))
-                    res = PeSymbolicTag.PeDerivedAddress;
-                PushStack(stack, res);
+                PushStack(stack, CombineAnd(a, b));
                 return;
             }
 
@@ -841,10 +841,7 @@ namespace ConfuserExKillerRunner.Killers
                 code == Code.Ldind_I8 || code == Code.Ldind_U1 || code == Code.Ldind_U2 || code == Code.Ldind_U4)
             {
                 var addr = PopStack(stack);
-                if (addr.HasFlag(PeSymbolicTag.PeDerivedAddress))
-                    PushStack(stack, PeSymbolicTag.PeHeaderField);
-                else
-                    PushStack(stack, PeSymbolicTag.None);
+                PushStack(stack, EvaluateLdind(addr));
                 return;
             }
 
@@ -853,8 +850,8 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var val = PopStack(stack);
                 var addr = PopStack(stack);
-                if ((addr.HasFlag(PeSymbolicTag.PeDerivedAddress) || addr.HasFlag(PeSymbolicTag.ModuleBase)) &&
-                    val.HasFlag(PeSymbolicTag.Zero))
+                if ((addr == PeSymbolicValue.PeDerivedAddress || addr == PeSymbolicValue.ModuleBase) &&
+                    val == PeSymbolicValue.Zero)
                 {
                     zeroingDetected = true;
                 }
@@ -867,8 +864,8 @@ namespace ConfuserExKillerRunner.Killers
                 var size = PopStack(stack);
                 var val = PopStack(stack);
                 var addr = PopStack(stack);
-                if ((addr.HasFlag(PeSymbolicTag.PeDerivedAddress) || addr.HasFlag(PeSymbolicTag.ModuleBase)) &&
-                    val.HasFlag(PeSymbolicTag.Zero))
+                if ((addr == PeSymbolicValue.PeDerivedAddress || addr == PeSymbolicValue.ModuleBase) &&
+                    val == PeSymbolicValue.Zero)
                 {
                     zeroingDetected = true;
                 }
@@ -883,7 +880,7 @@ namespace ConfuserExKillerRunner.Killers
                 {
                     var count = PopStack(stack);
                     var dest = PopStack(stack);
-                    if (dest.HasFlag(PeSymbolicTag.PeDerivedAddress) || dest.HasFlag(PeSymbolicTag.ModuleBase))
+                    if (dest == PeSymbolicValue.PeDerivedAddress || dest == PeSymbolicValue.ModuleBase)
                         zeroingDetected = true;
                     return;
                 }
@@ -892,8 +889,8 @@ namespace ConfuserExKillerRunner.Killers
                     var count = PopStack(stack);
                     var c = PopStack(stack);
                     var dest = PopStack(stack);
-                    if ((dest.HasFlag(PeSymbolicTag.PeDerivedAddress) || dest.HasFlag(PeSymbolicTag.ModuleBase)) &&
-                        c.HasFlag(PeSymbolicTag.Zero))
+                    if ((dest == PeSymbolicValue.PeDerivedAddress || dest == PeSymbolicValue.ModuleBase) &&
+                        c == PeSymbolicValue.Zero)
                     {
                         zeroingDetected = true;
                     }
@@ -919,10 +916,53 @@ namespace ConfuserExKillerRunner.Killers
             // 15. Fallback for all other instructions
             inst.CalculateStackUsage(out int pushesCount, out int popsCount);
             for (int p = 0; p < popsCount; p++) PopStack(stack);
-            for (int p = 0; p < pushesCount; p++) PushStack(stack, PeSymbolicTag.None);
+            for (int p = 0; p < pushesCount; p++) PushStack(stack, PeSymbolicValue.None);
         }
 
-        private static PeSymbolicTag PopStack(List<PeSymbolicTag> stack)
+        private static PeSymbolicValue CombineAdd(PeSymbolicValue a, PeSymbolicValue b)
+        {
+            // Proven ModuleBase + 0x3C -> PeDerivedAddress
+            if ((a == PeSymbolicValue.ModuleBase && b == PeSymbolicValue.PeHeaderOffset) ||
+                (b == PeSymbolicValue.ModuleBase && a == PeSymbolicValue.PeHeaderOffset))
+            {
+                return PeSymbolicValue.PeDerivedAddress;
+            }
+            // Proven ModuleBase + PeHeaderField (e.g. *(ModuleBase + 0x3C)) -> PeDerivedAddress
+            if ((a == PeSymbolicValue.ModuleBase && b == PeSymbolicValue.PeHeaderField) ||
+                (b == PeSymbolicValue.ModuleBase && a == PeSymbolicValue.PeHeaderField))
+            {
+                return PeSymbolicValue.PeDerivedAddress;
+            }
+            // Offset calculation from already derived PE address -> PeDerivedAddress
+            if (a == PeSymbolicValue.PeDerivedAddress || b == PeSymbolicValue.PeDerivedAddress)
+            {
+                return PeSymbolicValue.PeDerivedAddress;
+            }
+            return PeSymbolicValue.None;
+        }
+
+        private static PeSymbolicValue CombineSub(PeSymbolicValue a, PeSymbolicValue b)
+        {
+            if (a == PeSymbolicValue.PeDerivedAddress)
+                return PeSymbolicValue.PeDerivedAddress;
+            return PeSymbolicValue.None;
+        }
+
+        private static PeSymbolicValue CombineAnd(PeSymbolicValue a, PeSymbolicValue b)
+        {
+            if (a == PeSymbolicValue.PeDerivedAddress || b == PeSymbolicValue.PeDerivedAddress)
+                return PeSymbolicValue.PeDerivedAddress;
+            return PeSymbolicValue.None;
+        }
+
+        private static PeSymbolicValue EvaluateLdind(PeSymbolicValue addr)
+        {
+            if (addr == PeSymbolicValue.PeDerivedAddress)
+                return PeSymbolicValue.PeHeaderField;
+            return PeSymbolicValue.None;
+        }
+
+        private static PeSymbolicValue PopStack(List<PeSymbolicValue> stack)
         {
             if (stack != null && stack.Count > 0)
             {
@@ -930,10 +970,10 @@ namespace ConfuserExKillerRunner.Killers
                 stack.RemoveAt(stack.Count - 1);
                 return tag;
             }
-            return PeSymbolicTag.None;
+            return PeSymbolicValue.None;
         }
 
-        private static void PushStack(List<PeSymbolicTag> stack, PeSymbolicTag tag)
+        private static void PushStack(List<PeSymbolicValue> stack, PeSymbolicValue tag)
         {
             stack?.Add(tag);
         }

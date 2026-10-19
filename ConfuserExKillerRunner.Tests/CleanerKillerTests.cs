@@ -1639,6 +1639,287 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
+        public void StripProtectorHooks_HookWithBranchDivergentBaseAndOffset_IsPreservedDueToNonCorrelatedProvenance()
+        {
+            var module = new ModuleDefUser("TestModDivergentBranch");
+            var globalType = module.GlobalType;
+
+            // Scenario requested by code review:
+            // A method contains a conditional branch.
+            // On Path 1: local variables 'a' (loc.0) and 'b' (loc.1) both receive ModuleBase.
+            // On Path 2: local variables 'a' (loc.0) and 'b' (loc.1) both receive the constant 0x3C.
+            // The paths merge into a join point, which then computes 'a + b' and zeroes memory at *(a + b).
+            // Under naive bitwise-OR union, 'a' and 'b' would each hold (ModuleBase | 0x3C), falsely suggesting
+            // that 'a + b' could compute (ModuleBase + 0x3C).
+            // Under our sound conservative join, MergeValue(ModuleBase, 0x3C) yields None.
+            // CleanerKiller must establish that neither concrete path computed a PE header address,
+            // and strictly preserve the hook!
+            var hook = new MethodDefUser("DivergentBranchHook", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localA = new Local(module.CorLibTypes.IntPtr);
+            var localB = new Local(module.CorLibTypes.IntPtr);
+            var localSum = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            hook.Body.Variables.Add(localA);
+            hook.Body.Variables.Add(localB);
+            hook.Body.Variables.Add(localSum);
+            hook.Body.Variables.Add(localOldProtect);
+            hook.Body.Variables.Add(localBase);
+
+            var marshalType = new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef);
+            var moduleType = new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef);
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, moduleType.ToTypeSig()),
+                marshalType);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // localBase = Marshal.GetHINSTANCE(null) -> stloc.s localBase (loc.4)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_S, localBase));
+
+            // VirtualProtect call on localBase
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_S, localBase));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // Branch: if (arg0 != 0) goto PATH2
+            var path2Label = Instruction.Create(OpCodes.Ldc_I4, 0x3C);
+            var mergeLabel = Instruction.Create(OpCodes.Ldloc_0);
+
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Brtrue_S, path2Label));
+
+            // PATH 1: Both a and b receive ModuleBase
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_S, localBase));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0)); // a = ModuleBase
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_S, localBase));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1)); // b = ModuleBase
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Br_S, mergeLabel));
+
+            // PATH 2: Both a and b receive 0x3C
+            hook.Body.Instructions.Add(path2Label);
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Conv_I));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0)); // a = 0x3C
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Conv_I));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1)); // b = 0x3C
+
+            // MERGE: compute a + b, zero memory
+            hook.Body.Instructions.Add(mergeLabel);
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_2));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_2));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(hook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, hook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(hook, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Hook MUST be preserved because neither path computed (ModuleBase + 0x3C)!
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[1].OpCode);
+            Assert.Equal(hook, cctor.Body.Instructions[1].Operand);
+            Assert.Contains(hook, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_HookWithIncompatibleStackHeightsAtMerge_IsPreservedDueToInconclusiveAnalysis()
+        {
+            var module = new ModuleDefUser("TestModIncompatibleStack");
+            var globalType = module.GlobalType;
+
+            // Scenario: Method with an inconsistent branch that leaves different stack depths at merge point.
+            // CleanerKiller must abort symbolic analysis as inconclusive and safely preserve the hook.
+            var hook = new MethodDefUser("IncompatibleStackHook", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            hook.Body.Variables.Add(localBase);
+            hook.Body.Variables.Add(localOldProtect);
+
+            var marshalType = new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef);
+            var moduleType = new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef);
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, moduleType.ToTypeSig()),
+                marshalType);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            var mergeLabel = Instruction.Create(OpCodes.Ret);
+
+            // Path 1 branches to mergeLabel with 1 element on stack (e.g. ldc.i4.1)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Br_S, mergeLabel));
+
+            // Path 2 falls through to mergeLabel with 0 elements on stack
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Nop));
+            hook.Body.Instructions.Add(mergeLabel);
+            globalType.Methods.Add(hook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, hook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Inconclusive analysis due to incompatible stack heights at merge -> hook must be safely preserved!
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Contains(hook, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_AntiDump_WithPeHeaderDereferenceAndZeroing_IsStripped()
+        {
+            var module = new ModuleDefUser("TestModDereferenceAntiDump");
+            var globalType = module.GlobalType;
+
+            // Scenario requested by code review:
+            // Multi-step PE header resolution mirroring ConfuserEx AntiDump runtime:
+            // 1. Marshal.GetHINSTANCE -> localBase (loc.0)
+            // 2. peOffset = localBase + 0x3C -> localPeOffset (loc.1)
+            // 3. ntHeaderOffset = *(uint*)localPeOffset -> localNtOffset (loc.2)
+            // 4. ntHeader = localBase + ntHeaderOffset -> localNtHeader (loc.3)
+            // 5. VirtualProtect(ntHeader, 0x1000, 0x04, out localOldProtect)
+            // 6. *(int*)ntHeader = 0 -> header wiped!
+            var hook = new MethodDefUser("AntiDumpDereferencePattern", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localPeOffset = new Local(module.CorLibTypes.IntPtr);
+            var localNtOffset = new Local(module.CorLibTypes.UInt32);
+            var localNtHeader = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            hook.Body.Variables.Add(localBase);
+            hook.Body.Variables.Add(localPeOffset);
+            hook.Body.Variables.Add(localNtOffset);
+            hook.Body.Variables.Add(localNtHeader);
+            hook.Body.Variables.Add(localOldProtect);
+
+            var marshalType = new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef);
+            var moduleType = new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef);
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, moduleType.ToTypeSig()),
+                marshalType);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // 1. Marshal.GetHINSTANCE(null) -> stloc.0 (localBase)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+
+            // 2. peOffset = localBase + 0x3C -> stloc.1
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+
+            // 3. ntHeaderOffset = *(uint*)peOffset -> ldloc.1; ldind.u4; stloc.2
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldind_U4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_2));
+
+            // 4. ntHeader = localBase + ntHeaderOffset -> ldloc.0; ldloc.2; add; stloc.3
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_2));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_3));
+
+            // 5. VirtualProtect(ntHeader, 0x1000, 0x04, out oldProtect)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_3));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // 6. Zero NT header memory: *(int*)ntHeader = 0
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_3));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(hook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, hook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(hook, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Hook is properly recognized as Anti-Dump and stripped!
+            Assert.Equal(1, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
+            Assert.DoesNotContain(hook, globalType.Methods);
+        }
+
+        [Fact]
         public void StripProtectorHooks_AmbiguousVirtualProtectHook_IsPreserved()
         {
             var module = new ModuleDefUser("TestMod");
