@@ -1335,6 +1335,153 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
+        public void StripProtectorHooks_HookWithVirtualProtectAndUnlinkedZeroing_IsPreservedAsAmbiguous()
+        {
+            var module = new ModuleDefUser("TestModUnlinked");
+            var globalType = module.GlobalType;
+
+            // Method calls VirtualProtect, loads 0x3c for an unrelated local calculation,
+            // and zeros an unrelated local variable/buffer.
+            // There is NO structural link between the zeroing and the PE header or module base!
+            // CleanerKiller must treat it as ambiguous and retain it.
+            var hook = new MethodDefUser("UnlinkedZeroHook", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            var localUnrelated = new Local(module.CorLibTypes.Int32);
+            hook.Body.Variables.Add(localBase);
+            hook.Body.Variables.Add(localOldProtect);
+            hook.Body.Variables.Add(localUnrelated);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // VirtualProtect call
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // Unrelated use of 0x3C: e.g. int val = 0x3c;
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_2));
+
+            // Zero an unrelated pointer/variable: localUnrelated = 0
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localUnrelated));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(hook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, hook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(hook, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(hook, cctor.Body.Instructions[0].Operand);
+            Assert.Contains(hook, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_AntiDump_WithMarshalGetHinstanceAndZeroing_IsStripped()
+        {
+            var module = new ModuleDefUser("TestModGetHinstance");
+            var globalType = module.GlobalType;
+
+            // Pattern mirroring Confuser.Runtime.AntiDump:
+            // Calls Marshal.GetHINSTANCE, offsets to e_lfanew (0x3c), calls VirtualProtect,
+            // and zeroes PE header memory at that linked pointer.
+            var hook = new MethodDefUser("AntiDumpRealPattern", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localPe = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            hook.Body.Variables.Add(localBase);
+            hook.Body.Variables.Add(localPe);
+            hook.Body.Variables.Add(localOldProtect);
+
+            var marshalType = new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef);
+            var moduleType = new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef);
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, moduleType.ToTypeSig()),
+                marshalType);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // Call Marshal.GetHINSTANCE(null) -> stloc.0 (base)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+
+            // Calculate PE header address: pe = base + 0x3c -> stloc.1
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+
+            // Call VirtualProtect on pe
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // Zero PE header: *(int*)pe = 0
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(hook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, hook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(hook, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            Assert.Equal(1, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
+            Assert.DoesNotContain(hook, globalType.Methods);
+        }
+
+        [Fact]
         public void StripProtectorHooks_AmbiguousVirtualProtectHook_IsPreserved()
         {
             var module = new ModuleDefUser("TestMod");

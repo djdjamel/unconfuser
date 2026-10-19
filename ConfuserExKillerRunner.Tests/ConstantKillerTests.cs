@@ -440,5 +440,297 @@ namespace ConfuserExKillerRunner.Tests
                 }
             }
         }
+
+        [Fact]
+        public void ConstantKiller_Execute_IndirectDecrypterChain_WhenCallerRetained_RetainsEntireChain()
+        {
+            var module = new ModuleDefUser("TestIndirectChainMod");
+            var asm = new AssemblyDefUser("TestIndirectChainAsm");
+            asm.Modules.Add(module);
+
+            // DecrypterC: leaf decrypter
+            var decrypterC = new MethodDefUser(
+                "DecrypterC",
+                MethodSig.CreateStaticGeneric(1, new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            decrypterC.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+            decrypterC.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 100));
+            decrypterC.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            module.GlobalType.Methods.Add(decrypterC);
+
+            // DecrypterB: intermediate decrypter calling DecrypterC
+            var decrypterB = new MethodDefUser(
+                "DecrypterB",
+                MethodSig.CreateStaticGeneric(1, new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            decrypterB.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+            var cSpec = new MethodSpecUser(decrypterC, new GenericInstMethodSig(new GenericMVar(0)));
+            decrypterB.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            decrypterB.Body.Instructions.Add(Instruction.Create(OpCodes.Call, cSpec));
+            decrypterB.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            module.GlobalType.Methods.Add(decrypterB);
+
+            // DecrypterA: top decrypter calling DecrypterB
+            var decrypterA = new MethodDefUser(
+                "DecrypterA",
+                MethodSig.CreateStaticGeneric(1, new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            decrypterA.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+            var bSpec = new MethodSpecUser(decrypterB, new GenericInstMethodSig(new GenericMVar(0)));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Call, bSpec));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            module.GlobalType.Methods.Add(decrypterA);
+
+            var userType = new TypeDefUser("UserType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+
+            // User method calls DecrypterA with non-constant argument -> cannot be decrypted statically
+            var userMethod = new MethodDefUser("UserMethod", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.UInt32))
+            {
+                Body = new CilBody()
+            };
+            var aSpec = new MethodSpecUser(decrypterA, new GenericInstMethodSig(module.CorLibTypes.Int32));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, aSpec));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            userType.Methods.Add(userMethod);
+
+            using (var ms = new System.IO.MemoryStream())
+            {
+                module.Write(ms);
+                byte[] rawAsm = ms.ToArray();
+
+                var reflAsm = System.Reflection.Assembly.Load(rawAsm);
+                using (var modMD = ModuleDefMD.Load(rawAsm))
+                {
+                    var result = ConstantKillerImpl.Execute(modMD, reflAsm.ManifestModule);
+
+                    Assert.NotNull(result);
+                    Assert.False(result.AllReferencesResolved);
+
+                    // All 3 decrypters in the transitive dependency chain must be retained!
+                    Assert.NotNull(modMD.GlobalType.FindMethod("DecrypterA"));
+                    Assert.NotNull(modMD.GlobalType.FindMethod("DecrypterB"));
+                    Assert.NotNull(modMD.GlobalType.FindMethod("DecrypterC"));
+                }
+            }
+        }
+
+        [Fact]
+        public void ConstantKiller_Execute_CyclicDecrypters_WhenCallerHasUnrewrittenReference_RetainsBothDecrypters()
+        {
+            var module = new ModuleDefUser("TestCyclicRetainedMod");
+            var asm = new AssemblyDefUser("TestCyclicRetainedAsm");
+            asm.Modules.Add(module);
+
+            // Mutually recursive decrypters: DecrypterA calls DecrypterB, DecrypterB calls DecrypterA
+            var decrypterA = new MethodDefUser(
+                "DecrypterA",
+                MethodSig.CreateStaticGeneric(1, new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            decrypterA.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+
+            var decrypterB = new MethodDefUser(
+                "DecrypterB",
+                MethodSig.CreateStaticGeneric(1, new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            decrypterB.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+
+            var bSpec = new MethodSpecUser(decrypterB, new GenericInstMethodSig(new GenericMVar(0)));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Call, bSpec));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            var aSpec = new MethodSpecUser(decrypterA, new GenericInstMethodSig(new GenericMVar(0)));
+            decrypterB.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            decrypterB.Body.Instructions.Add(Instruction.Create(OpCodes.Call, aSpec));
+            decrypterB.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            module.GlobalType.Methods.Add(decrypterA);
+            module.GlobalType.Methods.Add(decrypterB);
+
+            var userType = new TypeDefUser("UserType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+
+            // User method has unrewritten call to DecrypterA
+            var userMethod = new MethodDefUser("UserMethod", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.UInt32))
+            {
+                Body = new CilBody()
+            };
+            var aCallSpec = new MethodSpecUser(decrypterA, new GenericInstMethodSig(module.CorLibTypes.Int32));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, aCallSpec));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            userType.Methods.Add(userMethod);
+
+            using (var ms = new System.IO.MemoryStream())
+            {
+                module.Write(ms);
+                byte[] rawAsm = ms.ToArray();
+
+                var reflAsm = System.Reflection.Assembly.Load(rawAsm);
+                using (var modMD = ModuleDefMD.Load(rawAsm))
+                {
+                    // Must not enter an infinite loop during transitive closure resolution
+                    var result = ConstantKillerImpl.Execute(modMD, reflAsm.ManifestModule);
+
+                    Assert.NotNull(result);
+                    Assert.False(result.AllReferencesResolved);
+
+                    // Both A and B must be retained due to the cycle
+                    Assert.NotNull(modMD.GlobalType.FindMethod("DecrypterA"));
+                    Assert.NotNull(modMD.GlobalType.FindMethod("DecrypterB"));
+                }
+            }
+        }
+
+        [Fact]
+        public void ConstantKiller_Execute_CyclicDecrypters_WhenAllUserReferencesResolved_PrunesBothDecrypters()
+        {
+            var module = new ModuleDefUser("TestCyclicPrunedMod");
+            var asm = new AssemblyDefUser("TestCyclicPrunedAsm");
+            asm.Modules.Add(module);
+
+            var decrypterA = new MethodDefUser(
+                "DecrypterA",
+                MethodSig.CreateStaticGeneric(1, new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            decrypterA.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+
+            var decrypterB = new MethodDefUser(
+                "DecrypterB",
+                MethodSig.CreateStaticGeneric(1, new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            decrypterB.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+
+            var bSpec = new MethodSpecUser(decrypterB, new GenericInstMethodSig(new GenericMVar(0)));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 42));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            var aSpec = new MethodSpecUser(decrypterA, new GenericInstMethodSig(new GenericMVar(0)));
+            decrypterB.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            decrypterB.Body.Instructions.Add(Instruction.Create(OpCodes.Call, aSpec));
+            decrypterB.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            module.GlobalType.Methods.Add(decrypterA);
+            module.GlobalType.Methods.Add(decrypterB);
+
+            var userType = new TypeDefUser("UserType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+
+            // User calls DecrypterA(10) with constant key -> rewritten!
+            var userMethod = new MethodDefUser("UserMethod", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var aCallSpec = new MethodSpecUser(decrypterA, new GenericInstMethodSig(module.CorLibTypes.Int32));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 10));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, aCallSpec));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            userType.Methods.Add(userMethod);
+
+            using (var ms = new System.IO.MemoryStream())
+            {
+                module.Write(ms);
+                byte[] rawAsm = ms.ToArray();
+
+                var reflAsm = System.Reflection.Assembly.Load(rawAsm);
+                using (var modMD = ModuleDefMD.Load(rawAsm))
+                {
+                    var result = ConstantKillerImpl.Execute(modMD, reflAsm.ManifestModule);
+
+                    Assert.NotNull(result);
+                    Assert.True(result.AllReferencesResolved);
+
+                    // When all user calls are resolved, dead cycle A <-> B is safely pruned
+                    Assert.Null(modMD.GlobalType.FindMethod("DecrypterA"));
+                    Assert.Null(modMD.GlobalType.FindMethod("DecrypterB"));
+                }
+            }
+        }
+
+        [Fact]
+        public void ConstantKiller_Execute_DecrypterReferencedViaLdftn_IsRetained()
+        {
+            var module = new ModuleDefUser("TestLdftnMod");
+            var asm = new AssemblyDefUser("TestLdftnAsm");
+            asm.Modules.Add(module);
+
+            var decrypterA = new MethodDefUser(
+                "DecrypterA",
+                MethodSig.CreateStaticGeneric(1, new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            decrypterA.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 42));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            module.GlobalType.Methods.Add(decrypterA);
+
+            var userType = new TypeDefUser("UserType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+
+            // User takes pointer to decrypter using ldftn
+            var userMethod = new MethodDefUser("UserMethod", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldftn, decrypterA));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            userType.Methods.Add(userMethod);
+
+            using (var ms = new System.IO.MemoryStream())
+            {
+                module.Write(ms);
+                byte[] rawAsm = ms.ToArray();
+
+                var reflAsm = System.Reflection.Assembly.Load(rawAsm);
+                using (var modMD = ModuleDefMD.Load(rawAsm))
+                {
+                    var result = ConstantKillerImpl.Execute(modMD, reflAsm.ManifestModule);
+
+                    Assert.NotNull(result);
+                    Assert.False(result.AllReferencesResolved);
+
+                    // DecrypterA is referenced via ldftn so it must NOT be removed!
+                    Assert.NotNull(modMD.GlobalType.FindMethod("DecrypterA"));
+                }
+            }
+        }
     }
 }

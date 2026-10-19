@@ -204,7 +204,6 @@ namespace ConfuserExKillerRunner.Killers
             bool hasCipherArithmetic = false;
             bool hasBackwardBranch = false;
             bool hasPeHeaderOffset = false;
-            bool hasHeaderZeroing = false;
 
             var instructions = method.Body.Instructions;
             for (int idx = 0; idx < instructions.Count; idx++)
@@ -228,7 +227,6 @@ namespace ConfuserExKillerRunner.Killers
                     if (fullName.IndexOf("ZeroMemory", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         fullName.IndexOf("memset", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        hasHeaderZeroing = true;
                         hasPointerWrite = true;
                     }
                 }
@@ -265,23 +263,11 @@ namespace ConfuserExKillerRunner.Killers
                     code == Code.Stind_I || code == Code.Stind_R4 || code == Code.Stind_R8 || code == Code.Cpblk)
                 {
                     hasPointerWrite = true;
-                    if (idx > 0 && (instructions[idx - 1].OpCode == OpCodes.Ldc_I4_0 ||
-                                    (instructions[idx - 1].OpCode == OpCodes.Ldc_I4 && Equals(instructions[idx - 1].Operand, 0)) ||
-                                    instructions[idx - 1].OpCode == OpCodes.Ldnull))
-                    {
-                        hasHeaderZeroing = true;
-                    }
                 }
 
                 if (code == Code.Initblk)
                 {
                     hasPointerWrite = true;
-                    if (idx >= 2 && (instructions[idx - 2].OpCode == OpCodes.Ldc_I4_0 ||
-                                    (instructions[idx - 2].OpCode == OpCodes.Ldc_I4 && Equals(instructions[idx - 2].Operand, 0)) ||
-                                    instructions[idx - 2].OpCode == OpCodes.Ldnull))
-                    {
-                        hasHeaderZeroing = true;
-                    }
                 }
 
                 if (code == Code.Xor || code == Code.Not || code == Code.Shl || code == Code.Shr || code == Code.Shr_Un)
@@ -330,14 +316,13 @@ namespace ConfuserExKillerRunner.Killers
             }
 
             // 3. Anti-Dump: calls VirtualProtect to wipe/zero headers without decryption cipher arithmetic, debugger checks, or section metadata fields.
-            // MUST explicitly exhibit header zeroing/wiping behavior (e.g. stind/initblk with 0 or ZeroMemory/memset).
-            // Merely reading the PE header offset (0x3c) without zeroing is ambiguous and must NOT classify as Anti-Dump.
+            // MUST explicitly exhibit proven PE header zeroing/wiping behavior (e.g. stind/initblk with 0 or ZeroMemory/memset structurally linked to the module base or PE header pointer).
+            // Merely reading an offset 0x3c, or calling VirtualProtect with an unlinked memory zeroing, is ambiguous and must NOT classify as Anti-Dump.
             bool isAntiDump = hasVirtualProtect &&
-                              hasHeaderZeroing &&
                               !hasCipherArithmetic &&
                               !hasDebuggerCheck &&
                               !hasSectionField &&
-                              (hasPeHeaderOffset || hasPointerConversion || hasPointerIndirection);
+                              HasLinkedPeHeaderZeroing(method);
 
             if (isAntiDump)
             {
@@ -348,7 +333,7 @@ namespace ConfuserExKillerRunner.Killers
             // never strip it via fallback! Retain it to safeguard against undetected Anti-Tamper or runtime requirements.
             if (hasVirtualProtect)
             {
-                Logger.LogWarning($"[CleanerKiller] Retaining hook {method.Name} in <Module>.cctor: ambiguous classification (calls VirtualProtect but does not match pure Anti-Dump).");
+                Logger.LogWarning($"[CleanerKiller] Retaining hook {method.Name} in <Module>.cctor: ambiguous classification (calls VirtualProtect but does not match pure Anti-Dump with verified PE header zeroing).");
                 return null;
             }
 
@@ -550,6 +535,211 @@ namespace ConfuserExKillerRunner.Killers
                    string.Equals(name, "CheckRemoteDebuggerPresent", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(name, "OutputDebugStringA", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(name, "OutputDebugStringW", StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static bool HasLinkedPeHeaderZeroing(MethodDef method)
+        {
+            if (method == null || !method.HasBody || method.Body.Instructions == null)
+                return false;
+
+            var instructions = method.Body.Instructions;
+            var peRelatedVars = new HashSet<int>();
+            var peRelatedInstIndices = new HashSet<int>();
+
+            // 1. Identify module base sources (Marshal.GetHINSTANCE or pointer operations)
+            for (int i = 0; i < instructions.Count; i++)
+            {
+                var inst = instructions[i];
+                if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
+                {
+                    if (inst.Operand is IMethod called && IsMarshalGetHINSTANCE(called))
+                    {
+                        peRelatedInstIndices.Add(i);
+                        // Trace through conv / explicit cast to stloc
+                        int next = i + 1;
+                        while (next < instructions.Count && (instructions[next].OpCode == OpCodes.Conv_I ||
+                                                             instructions[next].OpCode == OpCodes.Conv_U ||
+                                                             instructions[next].OpCode == OpCodes.Conv_U4 ||
+                                                             instructions[next].OpCode == OpCodes.Conv_U8 ||
+                                                             (instructions[next].OpCode == OpCodes.Call && instructions[next].Operand?.ToString().Contains("op_Explicit") == true)))
+                        {
+                            peRelatedInstIndices.Add(next);
+                            next++;
+                        }
+
+                        if (next < instructions.Count && TryGetVariableIndex(instructions[next], out int vIdx))
+                        {
+                            peRelatedVars.Add(vIdx);
+                        }
+                    }
+                }
+            }
+
+            // 2. Identify 0x3C (PE header offset e_lfanew) and pointer arithmetic
+            for (int i = 0; i < instructions.Count; i++)
+            {
+                var inst = instructions[i];
+                bool is3C = (inst.OpCode == OpCodes.Ldc_I4 && inst.Operand is int iv && iv == 0x3c) ||
+                            (inst.OpCode == OpCodes.Ldc_I4_S && inst.Operand is sbyte sb && sb == 0x3c) ||
+                            (inst.OpCode == OpCodes.Ldc_I4_S && inst.Operand is byte b && b == 0x3c);
+
+                if (!is3C)
+                    continue;
+
+                // Check forward for pointer add
+                for (int j = i + 1; j <= Math.Min(i + 4, instructions.Count - 1); j++)
+                {
+                    if (instructions[j].OpCode == OpCodes.Add)
+                    {
+                        peRelatedInstIndices.Add(j);
+                        if (j + 1 < instructions.Count && TryGetVariableIndex(instructions[j + 1], out int vIdx))
+                        {
+                            peRelatedVars.Add(vIdx);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // 3. Propagate to variables assigned from peRelatedVars with pointer arithmetic/dereferences
+            bool varsChanged = true;
+            while (varsChanged)
+            {
+                varsChanged = false;
+                for (int i = 0; i < instructions.Count - 1; i++)
+                {
+                    var inst = instructions[i];
+                    if (TryGetVariableIndex(inst, out int srcVar) && peRelatedVars.Contains(srcVar))
+                    {
+                        for (int j = i + 1; j <= Math.Min(i + 6, instructions.Count - 1); j++)
+                        {
+                            if (instructions[j].OpCode == OpCodes.Add || instructions[j].OpCode == OpCodes.Sub ||
+                                instructions[j].OpCode == OpCodes.Ldind_I || instructions[j].OpCode == OpCodes.Ldind_U4 ||
+                                instructions[j].OpCode == OpCodes.Ldind_I4)
+                            {
+                                if (j + 1 < instructions.Count && TryGetVariableIndex(instructions[j + 1], out int dstVar))
+                                {
+                                    if (peRelatedVars.Add(dstVar))
+                                        varsChanged = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Verify that zeroing targets a PE-related address or variable
+            for (int i = 0; i < instructions.Count; i++)
+            {
+                var inst = instructions[i];
+                var code = inst.OpCode.Code;
+
+                if (code == Code.Stind_I1 || code == Code.Stind_I2 || code == Code.Stind_I4 ||
+                    code == Code.Stind_I8 || code == Code.Stind_I)
+                {
+                    if (i > 0 && IsZeroLoadInstruction(instructions[i - 1]))
+                    {
+                        for (int j = Math.Max(0, i - 6); j < i - 1; j++)
+                        {
+                            if (peRelatedInstIndices.Contains(j))
+                                return true;
+
+                            if (TryGetVariableIndex(instructions[j], out int vIdx) && peRelatedVars.Contains(vIdx))
+                                return true;
+                        }
+                    }
+                }
+
+                if (code == Code.Initblk)
+                {
+                    if (i >= 2 && IsZeroLoadInstruction(instructions[i - 2]))
+                    {
+                        for (int j = Math.Max(0, i - 6); j < i - 2; j++)
+                        {
+                            if (peRelatedInstIndices.Contains(j))
+                                return true;
+
+                            if (TryGetVariableIndex(instructions[j], out int vIdx) && peRelatedVars.Contains(vIdx))
+                                return true;
+                        }
+                    }
+                }
+
+                if (code == Code.Call || code == Code.Callvirt)
+                {
+                    if (inst.Operand is IMethod called)
+                    {
+                        string fn = called.Name;
+                        if (fn.IndexOf("ZeroMemory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            fn.IndexOf("memset", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            for (int j = Math.Max(0, i - 5); j < i; j++)
+                            {
+                                if (peRelatedInstIndices.Contains(j))
+                                    return true;
+
+                                if (TryGetVariableIndex(instructions[j], out int vIdx) && peRelatedVars.Contains(vIdx))
+                                    return true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsZeroLoadInstruction(Instruction inst)
+        {
+            if (inst == null) return false;
+            return inst.OpCode == OpCodes.Ldc_I4_0 ||
+                   (inst.OpCode == OpCodes.Ldc_I4 && Equals(inst.Operand, 0)) ||
+                   inst.OpCode == OpCodes.Ldnull;
+        }
+
+        private static bool TryGetVariableIndex(Instruction inst, out int index)
+        {
+            index = -1;
+            if (inst == null) return false;
+
+            if (inst.OpCode == OpCodes.Ldloc_0 || inst.OpCode == OpCodes.Stloc_0 ||
+                (inst.OpCode == OpCodes.Ldloca_S && inst.Operand is Local l0 && l0.Index == 0))
+            {
+                index = 0;
+                return true;
+            }
+            if (inst.OpCode == OpCodes.Ldloc_1 || inst.OpCode == OpCodes.Stloc_1 ||
+                (inst.OpCode == OpCodes.Ldloca_S && inst.Operand is Local l1 && l1.Index == 1))
+            {
+                index = 1;
+                return true;
+            }
+            if (inst.OpCode == OpCodes.Ldloc_2 || inst.OpCode == OpCodes.Stloc_2 ||
+                (inst.OpCode == OpCodes.Ldloca_S && inst.Operand is Local l2 && l2.Index == 2))
+            {
+                index = 2;
+                return true;
+            }
+            if (inst.OpCode == OpCodes.Ldloc_3 || inst.OpCode == OpCodes.Stloc_3 ||
+                (inst.OpCode == OpCodes.Ldloca_S && inst.Operand is Local l3 && l3.Index == 3))
+            {
+                index = 3;
+                return true;
+            }
+
+            if (inst.Operand is Local loc)
+            {
+                index = loc.Index;
+                return true;
+            }
+
+            if (inst.Operand is int intIdx)
+            {
+                index = intIdx;
+                return true;
+            }
+
+            return false;
         }
 
         private static bool TryIdentifyArgumentProducers(

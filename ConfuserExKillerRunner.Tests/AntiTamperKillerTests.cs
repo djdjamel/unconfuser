@@ -472,7 +472,7 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
-        public void Execute_RealConfuserExAntiTamperBinary_DecryptsSectionAndRestoresValidMethods()
+        public void Execute_RealConfuserExAntiTamperBinary_DynamicDecryption_DecryptsSectionAndRestoresValidMethods()
         {
             // Locate real ConfuserEx v1.0.0 binary protected with Anti-Tamper
             string baseDir = AppContext.BaseDirectory;
@@ -492,40 +492,12 @@ namespace ConfuserExKillerRunner.Tests
             string fixtureDir = Path.Combine(repoRoot, "benchmarks", "fixtures", "real_confuserex_antitamper");
             string fixturePath = Path.Combine(fixtureDir, "BenignSample.exe");
 
-            if (!File.Exists(fixturePath))
-            {
-                string cliPath = Path.Combine(repoRoot, "tools", "ConfuserEx", "Confuser.CLI.exe");
-                string benignPath = Path.Combine(repoRoot, "benchmarks", "BenignSample", "bin", "Release", "net48", "BenignSample.exe");
-                if (File.Exists(cliPath) && File.Exists(benignPath))
-                {
-                    Directory.CreateDirectory(fixtureDir);
-                    string crprojPath = Path.Combine(fixtureDir, "confuser_antitamper.crproj");
-                    string crproj = $@"<project outputDir=""{fixtureDir}"" baseDir=""{Path.GetDirectoryName(benignPath)}"" xmlns=""http://confuser.codeplex.com"">
-  <rule pattern=""true"" inherit=""false"">
-    <protection id=""anti tamper"" />
-  </rule>
-  <module path=""{Path.GetFileName(benignPath)}"" />
-</project>";
-                    File.WriteAllText(crprojPath, crproj);
-                    var psi = new System.Diagnostics.ProcessStartInfo(cliPath, $"-n \"{crprojPath}\"")
-                    {
-                        CreateNoWindow = true,
-                        UseShellExecute = false
-                    };
-                    var proc = System.Diagnostics.Process.Start(psi);
-                    proc?.WaitForExit(20000);
-                }
-            }
-
-            if (!File.Exists(fixturePath))
-            {
-                // In environments without Confuser.CLI.exe or pre-generated fixture, skip
-                return;
-            }
+            // Explicit assertion: the fixture must be present (tracked in git)
+            Assert.True(File.Exists(fixturePath), $"Anti-Tamper fixture binary not found at '{fixturePath}'. Ensure repository fixtures are checked out.");
 
             byte[] originalPeBytes = File.ReadAllBytes(fixturePath);
 
-            // Load module into reflection context for dynamic module constructor execution
+            // Dynamic execution: load module into reflection context for native module constructor execution
             var reflAsm = System.Reflection.Assembly.LoadFile(fixturePath);
             var reflMod = reflAsm.ManifestModule;
 
@@ -559,6 +531,51 @@ namespace ConfuserExKillerRunner.Tests
                 }
 
                 Assert.True(validMethodsCount >= 10, $"Expected at least 10 valid restored methods, found {validMethodsCount}");
+            }
+        }
+
+        [Fact]
+        public void Execute_RealConfuserExAntiTamperBinary_StaticStructure_RecognizesEncryptedSectionsWithoutExecution()
+        {
+            // Verify static identification of the encrypted sections without claiming dynamic decryption
+            string baseDir = AppContext.BaseDirectory;
+            var dir = new DirectoryInfo(baseDir);
+            string repoRoot = null;
+            while (dir != null)
+            {
+                if (File.Exists(Path.Combine(dir.FullName, "unconfuser.sln")))
+                {
+                    repoRoot = dir.FullName;
+                    break;
+                }
+                dir = dir.Parent;
+            }
+
+            Assert.NotNull(repoRoot);
+            string fixturePath = Path.Combine(repoRoot, "benchmarks", "fixtures", "real_confuserex_antitamper", "BenignSample.exe");
+            Assert.True(File.Exists(fixturePath), $"Anti-Tamper fixture binary not found at '{fixturePath}'. Ensure repository fixtures are checked out.");
+
+            byte[] originalPeBytes = File.ReadAllBytes(fixturePath);
+
+            // In static analysis without reflection module, dynamic execution is not allowed.
+            // Executing AntiTamperKiller with a null reflection context strictly throws ArgumentNullException.
+            Assert.Throws<ArgumentNullException>(() => AntiTamperKiller.Execute(null, originalPeBytes));
+
+            // Static inspection: the original binary has an encrypted section created by ConfuserEx
+            using (var originalMod = ModuleDefMD.Load(originalPeBytes))
+            {
+                Assert.NotNull(originalMod);
+                var entryMethod = originalMod.EntryPoint;
+                Assert.NotNull(entryMethod);
+
+                // In static mode (antiTamperDecrypted: false), CleanerKiller recognizes the Anti-Tamper hook
+                // but safely RETAINS it without stripping, because native decryption was not proven!
+                var cleanResult = CleanerKiller.StripProtectorHooks(originalMod, antiTamperDecrypted: false);
+                Assert.Equal(0, cleanResult.StrippedHooksCount);
+
+                var cctor = originalMod.GlobalType?.FindStaticConstructor();
+                Assert.NotNull(cctor);
+                Assert.NotEqual(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
             }
         }
     }

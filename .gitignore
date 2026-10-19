@@ -27,7 +27,9 @@ build/
 *_final.dll
 *.orig.dll
 *.candidate.*
-benchmarks/fixtures/
+benchmarks/fixtures/*
+!benchmarks/fixtures/real_confuserex_antitamper/
+!benchmarks/fixtures/real_confuserex_antitamper/**
 scratch/
 tools/
 

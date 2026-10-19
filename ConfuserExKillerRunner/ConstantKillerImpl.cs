@@ -69,7 +69,10 @@ namespace ConfuserExTools.ConstantKiller {
 				module.Context.Resolver = new Resolver(NullResolver.Instance);
 
 				MethodDef ResolveDecrypterTarget(Instruction instruction) {
-					if (instruction.OpCode.Code != Code.Call && instruction.OpCode.Code != Code.Callvirt)
+					if (instruction.OpCode.Code != Code.Call &&
+					    instruction.OpCode.Code != Code.Callvirt &&
+					    instruction.OpCode.Code != Code.Ldftn &&
+					    instruction.OpCode.Code != Code.Ldtoken)
 						return null;
 
 					MethodDef targetDef = null;
