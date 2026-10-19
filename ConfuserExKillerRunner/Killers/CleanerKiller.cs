@@ -225,6 +225,12 @@ namespace ConfuserExKillerRunner.Killers
                         hasResourceResolve = true;
                     if (fullName.IndexOf("InitializeArray", StringComparison.OrdinalIgnoreCase) >= 0)
                         hasInitializeArray = true;
+                    if (fullName.IndexOf("ZeroMemory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        fullName.IndexOf("memset", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        hasHeaderZeroing = true;
+                        hasPointerWrite = true;
+                    }
                 }
 
                 if (inst.OpCode == OpCodes.Ldfld || inst.OpCode == OpCodes.Stfld || inst.OpCode == OpCodes.Ldflda)
@@ -267,10 +273,18 @@ namespace ConfuserExKillerRunner.Killers
                     }
                 }
 
-                if (code == Code.Xor || code == Code.Sub || code == Code.Sub_Ovf || code == Code.Sub_Ovf_Un ||
-                    code == Code.Add || code == Code.Add_Ovf || code == Code.Add_Ovf_Un ||
-                    code == Code.Mul || code == Code.Mul_Ovf || code == Code.Mul_Ovf_Un ||
-                    code == Code.Not || code == Code.Shl || code == Code.Shr || code == Code.Shr_Un)
+                if (code == Code.Initblk)
+                {
+                    hasPointerWrite = true;
+                    if (idx >= 2 && (instructions[idx - 2].OpCode == OpCodes.Ldc_I4_0 ||
+                                    (instructions[idx - 2].OpCode == OpCodes.Ldc_I4 && Equals(instructions[idx - 2].Operand, 0)) ||
+                                    instructions[idx - 2].OpCode == OpCodes.Ldnull))
+                    {
+                        hasHeaderZeroing = true;
+                    }
+                }
+
+                if (code == Code.Xor || code == Code.Not || code == Code.Shl || code == Code.Shr || code == Code.Shr_Un)
                 {
                     hasCipherArithmetic = true;
                 }
@@ -296,8 +310,8 @@ namespace ConfuserExKillerRunner.Killers
             bool isAntiTamper = hasVirtualProtect && (
                 hasSectionField ||
                 (hasPointerWrite && hasCipherArithmetic) ||
-                ((hasPointerConversion || hasPointerIndirection) && hasBackwardBranch && (hasCipherArithmetic || hasPointerWrite)) ||
-                (hasPeHeaderOffset && (hasCipherArithmetic || hasPointerWrite))
+                ((hasPointerConversion || hasPointerIndirection) && hasBackwardBranch && hasCipherArithmetic) ||
+                (hasPeHeaderOffset && hasCipherArithmetic)
             );
 
             if (isAntiTamper)
@@ -315,11 +329,15 @@ namespace ConfuserExKillerRunner.Killers
                 return "Protector-Stub";
             }
 
-            // 3. Anti-Dump: calls VirtualProtect to wipe/zero headers without decryption cipher arithmetic or debugger checks
+            // 3. Anti-Dump: calls VirtualProtect to wipe/zero headers without decryption cipher arithmetic, debugger checks, or section metadata fields.
+            // MUST explicitly exhibit header zeroing/wiping behavior (e.g. stind/initblk with 0 or ZeroMemory/memset).
+            // Merely reading the PE header offset (0x3c) without zeroing is ambiguous and must NOT classify as Anti-Dump.
             bool isAntiDump = hasVirtualProtect &&
+                              hasHeaderZeroing &&
                               !hasCipherArithmetic &&
                               !hasDebuggerCheck &&
-                              (hasHeaderZeroing || hasPeHeaderOffset);
+                              !hasSectionField &&
+                              (hasPeHeaderOffset || hasPointerConversion || hasPointerIndirection);
 
             if (isAntiDump)
             {

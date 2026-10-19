@@ -53,9 +53,11 @@ namespace ConfuserExTools.ConstantKiller {
 
 			var decrypterRefCounts = new Dictionary<MethodDef, int>();
 			var decrypterRewrittenCounts = new Dictionary<MethodDef, int>();
+			var interDecrypterCalls = new Dictionary<MethodDef, HashSet<MethodDef>>();
 			foreach (var d in decrypters) {
 				decrypterRefCounts[d] = 0;
 				decrypterRewrittenCounts[d] = 0;
+				interDecrypterCalls[d] = new HashSet<MethodDef>();
 			}
 
 			var oldAssemblyResolver = module.Context.AssemblyResolver;
@@ -66,17 +68,46 @@ namespace ConfuserExTools.ConstantKiller {
 				module.Context.AssemblyResolver = NullResolver.Instance;
 				module.Context.Resolver = new Resolver(NullResolver.Instance);
 
-				// Pass 1: Count call sites referencing decrypters
+				MethodDef ResolveDecrypterTarget(Instruction instruction) {
+					if (instruction.OpCode.Code != Code.Call && instruction.OpCode.Code != Code.Callvirt)
+						return null;
+
+					MethodDef targetDef = null;
+					if (instruction.Operand is MethodSpec operandMethod) {
+						if (operandMethod.Method is MethodDef md)
+							targetDef = md;
+						else if (operandMethod.Method is MemberRef mr)
+							targetDef = mr.ResolveMethodDef();
+					}
+					else if (instruction.Operand is MethodDef md) {
+						targetDef = md;
+					}
+					else if (instruction.Operand is MemberRef mr) {
+						targetDef = mr.ResolveMethodDef();
+					}
+
+					if (targetDef != null && decrypters.Contains(targetDef))
+						return targetDef;
+
+					return null;
+				}
+
+				// Pass 1: Count call sites referencing decrypters and map inter-decrypter dependencies
 				foreach (var method in module.EnumerateMethods()) {
-					if (!method.HasBody || decrypters.Contains(method))
+					if (!method.HasBody)
 						continue;
 
+					bool isDecrypterCaller = decrypters.Contains(method);
 					foreach (var instruction in method.Body.Instructions) {
-						if (instruction.OpCode.Code != Code.Call)
+						var targetDef = ResolveDecrypterTarget(instruction);
+						if (targetDef == null)
 							continue;
-						if (instruction.Operand is MethodSpec operandMethod && operandMethod.Method is MethodDef operandDef) {
-							if (decrypterRefCounts.ContainsKey(operandDef))
-								decrypterRefCounts[operandDef]++;
+
+						if (isDecrypterCaller) {
+							interDecrypterCalls[method].Add(targetDef);
+						}
+						else {
+							decrypterRefCounts[targetDef]++;
 						}
 					}
 				}
@@ -244,23 +275,85 @@ namespace ConfuserExTools.ConstantKiller {
 					}
 				}
 
-				// Safely prune decrypter methods only if 100% of their references were rewritten
+				// Compute the set of decrypters that MUST be retained
+				var retainedDecrypters = new HashSet<MethodDef>();
+
+				// Base set: decrypters with unresolved user references
+				foreach (var d in decrypters) {
+					if (decrypterRefCounts[d] > decrypterRewrittenCounts[d]) {
+						retainedDecrypters.Add(d);
+					}
+				}
+
+				// Transitive dependency closure:
+				// If decrypter A is retained and calls decrypter B, B must also be retained!
+				bool closureChanged = true;
+				while (closureChanged) {
+					closureChanged = false;
+					foreach (var retained in retainedDecrypters.ToList()) {
+						if (interDecrypterCalls.TryGetValue(retained, out var callees)) {
+							foreach (var callee in callees) {
+								if (retainedDecrypters.Add(callee)) {
+									closureChanged = true;
+								}
+							}
+						}
+					}
+				}
+
+				// Candidate dead decrypters
+				var deadCandidates = new HashSet<MethodDef>(decrypters.Where(d => !retainedDecrypters.Contains(d)));
+
+				// Verify that no dead candidate is referenced anywhere in the module outside dead candidates
+				foreach (var method in module.EnumerateMethods()) {
+					if (!method.HasBody || deadCandidates.Contains(method))
+						continue;
+
+					foreach (var inst in method.Body.Instructions) {
+						MethodDef target = null;
+						if (inst.Operand is IMethod called)
+							target = called.ResolveMethodDef() ?? (called as MethodDef);
+						else if (inst.Operand is MethodDef md)
+							target = md;
+
+						if (target != null && deadCandidates.Contains(target)) {
+							retainedDecrypters.Add(target);
+						}
+					}
+				}
+
+				// Re-run transitive closure if any candidate was salvaged
+				closureChanged = true;
+				while (closureChanged) {
+					closureChanged = false;
+					foreach (var retained in retainedDecrypters.ToList()) {
+						if (interDecrypterCalls.TryGetValue(retained, out var callees)) {
+							foreach (var callee in callees) {
+								if (retainedDecrypters.Add(callee)) {
+									closureChanged = true;
+								}
+							}
+						}
+					}
+				}
+
+				// Safely prune decrypter methods only if they are not in retainedDecrypters
 				foreach (var decrypter in decrypters) {
-					int totalRefs = decrypterRefCounts[decrypter];
-					int rewrittenRefs = decrypterRewrittenCounts[decrypter];
-					if (totalRefs > 0 && rewrittenRefs >= totalRefs) {
+					if (!retainedDecrypters.Contains(decrypter)) {
 						if (decrypter.DeclaringType != null && decrypter.DeclaringType.Methods.Contains(decrypter))
 							decrypter.DeclaringType.Methods.Remove(decrypter);
 					}
-					else if (totalRefs > rewrittenRefs) {
-						Logger.LogWarning($"[0x{decrypter.MDToken.Raw:X8}] Retaining decrypter method {decrypter.Name} ({totalRefs - rewrittenRefs} unrewritten references remain).");
+					else {
+						int totalRefs = decrypterRefCounts[decrypter];
+						int rewrittenRefs = decrypterRewrittenCounts[decrypter];
+						Logger.LogWarning($"[0x{decrypter.MDToken.Raw:X8}] Retaining decrypter method {decrypter.Name} (active dependency or {Math.Max(0, totalRefs - rewrittenRefs)} unrewritten references remain).");
 					}
 				}
 
 				int totalReferences = decrypterRefCounts.Values.Sum();
 				int rewrittenReferences = decrypterRewrittenCounts.Values.Sum();
 				bool allResolved = totalReferences > 0 &&
-				                   decrypters.All(d => decrypterRefCounts[d] == 0 || decrypterRewrittenCounts[d] >= decrypterRefCounts[d]) &&
+				                   retainedDecrypters.Count == 0 &&
 				                   rewrittenReferences >= totalReferences;
 
 				return new ConstantKillerResult {

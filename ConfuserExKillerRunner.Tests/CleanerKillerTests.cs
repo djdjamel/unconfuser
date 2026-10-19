@@ -1109,41 +1109,75 @@ namespace ConfuserExKillerRunner.Tests
             // Define ConfuserEx normal Anti-Tamper hook based purely on pointer arithmetic:
             // 1. Calls VirtualProtect
             // 2. Reads PE header at offset 0x3c (e_lfanew)
-            // 3. Loops through section bytes: conv.u, xor/sub cipher, stind.i4, backward branch loop
+            // 3. Loops through section bytes: address arithmetic, xor cipher, stind.i4, backward branch loop
             // 4. Contains NO field named "VirtualAddress"
+            // Note: This synthetic fixture validates CleanerKiller's static hook classification
+            // (safeguarding Anti-Tamper hooks from being misclassified as Anti-Dump or stripped when unconfirmed).
+            // It does not simulate native PE section decryption.
             var atMethod = new MethodDefUser("ConfuserNormalAntiTamper", MethodSig.CreateStatic(module.CorLibTypes.Void))
             {
-                Body = new CilBody()
+                Body = new CilBody { InitLocals = true }
             };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localIndex = new Local(module.CorLibTypes.Int32);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            atMethod.Body.Variables.Add(localBase);
+            atMethod.Body.Variables.Add(localIndex);
+            atMethod.Body.Variables.Add(localOldProtect);
+
             var vpRef = new MemberRefUser(module, "VirtualProtect",
                 MethodSig.CreateStatic(module.CorLibTypes.Boolean,
                     module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
                     new ByRefSig(module.CorLibTypes.UInt32)),
                 new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
 
-            var loopStart = Instruction.Create(OpCodes.Conv_U);
+            var loopStart = Instruction.Create(OpCodes.Ldloc_0);
 
-            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            // 1. Call VirtualProtect(base, 0x1000, 0x40, out oldProtect)
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x40));
-            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
 
-            // PE header access at offset 0x3c
+            // 2. PE header access at offset 0x3c
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldind_U4));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
 
-            // Cipher loop writing to memory via stind.i4
+            // 3. Initialize loop counter
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+
+            // 4. Decryption loop: * (base + index) ^= 0x5A5A5A5A
             atMethod.Body.Instructions.Add(loopStart);
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Dup));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldind_U4));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x5A5A5A5A));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Xor));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
-            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1));
-            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Brtrue_S, loopStart)); // backward branch loop
+
+            // 5. Increment index and branch back
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_4));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x100));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Blt_S, loopStart));
             atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
             globalType.Methods.Add(atMethod);
+
+            // Verify structural IL validity of the synthetic fixture
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(atMethod, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+            Assert.Equal(0, auditReport.StackUnderflowCount);
 
             var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
                 MethodImplAttributes.IL | MethodImplAttributes.Managed,
@@ -1169,6 +1203,135 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(1, resultDecrypted.StrippedHooksCount);
             Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
             Assert.DoesNotContain(atMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_AntiDump_WithPeHeaderOffsetAndHeaderZeroing_IsStripped()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Legitimate Anti-Dump hook: calls VirtualProtect, navigates PE header offset 0x3c,
+            // and explicitly zeros headers (ldc.i4.0 + stind.i4) without cipher arithmetic or debugger checks.
+            var antiDumpMethod = new MethodDefUser("AntiDumpHook", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            antiDumpMethod.Body.Variables.Add(localBase);
+            antiDumpMethod.Body.Variables.Add(localOldProtect);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // VirtualProtect call
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // Locate PE offset 0x3c and zero it: *(uint*)(base + 0x3c) = 0
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0)); // Zero value
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4)); // Header zeroing!
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(antiDumpMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, antiDumpMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            // Audit structural validity
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(antiDumpMethod, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+
+            // Anti-Dump with verified header zeroing is cleanly stripped
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            Assert.Equal(1, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
+            Assert.DoesNotContain(antiDumpMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_HookWithPeHeaderOffsetAndVirtualProtect_WithoutZeroing_IsPreservedAsAmbiguous()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Hook that calls VirtualProtect and reads offset 0x3c, but DOES NOT wipe or zero headers.
+            // E.g., it writes a non-zero configuration value or reads headers for runtime inspection.
+            // Under tightened classification, lack of explicit zeroing makes its Anti-Dump role unestablished.
+            // CleanerKiller must treat it as ambiguous and retain it!
+            var ambiguousHook = new MethodDefUser("AmbiguousPeHook", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            ambiguousHook.Body.Variables.Add(localBase);
+            ambiguousHook.Body.Variables.Add(localOldProtect);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // VirtualProtect call
+            ambiguousHook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            ambiguousHook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            ambiguousHook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            ambiguousHook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            ambiguousHook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            ambiguousHook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // Reads offset 0x3c and writes a non-zero marker (0x12345678) instead of zeroing!
+            ambiguousHook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            ambiguousHook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            ambiguousHook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            ambiguousHook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x12345678)); // Non-zero!
+            ambiguousHook.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            ambiguousHook.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(ambiguousHook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, ambiguousHook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            // Audit structural validity
+            var auditAmbiguous = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(ambiguousHook, auditAmbiguous);
+            Assert.Equal("CLEAN", auditAmbiguous.Status);
+
+            // Ambiguous hook MUST be preserved in <Module>.cctor
+            var result = CleanerKiller.StripProtectorHooks(module, antiTamperDecrypted: false);
+
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(ambiguousHook, cctor.Body.Instructions[0].Operand);
+            Assert.Contains(ambiguousHook, globalType.Methods);
         }
 
         [Fact]
