@@ -733,8 +733,17 @@ namespace ConfuserExKillerRunner.Tests
             }
         }
 
+        /// <summary>
+        /// Defensive test for malformed / obfuscated IL:
+        /// Under ECMA-335 (Partition III, §4.18), the 'ldvirtftn' instruction is strictly defined
+        /// for virtual instance methods of an object and is invalid on static methods.
+        /// However, in ConfuserEx, all constant decrypters are static generic methods on &lt;Module&gt;.
+        /// This test defensively verifies that ConstantKillerImpl's inter-decrypter dependency tracking
+        /// protects against malformed or obfuscated bytecode constructs using 'ldvirtftn' targeting
+        /// a static decrypter token, ensuring that the target decrypter is preserved when its caller is live.
+        /// </summary>
         [Fact]
-        public void ConstantKiller_Execute_InterDecrypterLdvirtftn_WhenCallerRetained_RetainsTargetDecrypter()
+        public void ConstantKiller_Execute_InterDecrypterLdvirtftn_DefensiveMalformedIL_RetainsTargetDecrypter()
         {
             var module = new ModuleDefUser("TestLdvirtftnMod");
             var asm = new AssemblyDefUser("TestLdvirtftnAsm");

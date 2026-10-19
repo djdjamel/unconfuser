@@ -72,7 +72,7 @@ namespace ConfuserExTools.ConstantKiller {
 					if (instruction.OpCode.Code != Code.Call &&
 					    instruction.OpCode.Code != Code.Callvirt &&
 					    instruction.OpCode.Code != Code.Ldftn &&
-					    instruction.OpCode.Code != Code.Ldvirtftn &&
+					    instruction.OpCode.Code != Code.Ldvirtftn && // Defensive: handle obfuscated/malformed IL targeting static decrypters
 					    instruction.OpCode.Code != Code.Ldtoken)
 						return null;
 

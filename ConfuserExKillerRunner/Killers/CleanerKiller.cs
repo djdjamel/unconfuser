@@ -537,199 +537,443 @@ namespace ConfuserExKillerRunner.Killers
                    string.Equals(name, "OutputDebugStringW", StringComparison.OrdinalIgnoreCase);
         }
 
+        [Flags]
+        private enum PeSymbolicTag
+        {
+            None = 0,
+            ModuleBase = 1 << 0,        // Proven origin from Marshal.GetHINSTANCE(...)
+            PeHeaderOffset = 1 << 1,    // Constant 0x3C / 60 (e_lfanew)
+            PeHeaderField = 1 << 2,     // Field loaded from PE header (e.g. *(ModuleBase + 0x3C))
+            PeDerivedAddress = 1 << 3,  // Derived pointer to PE header: ModuleBase + 0x3C, ModuleBase + e_lfanew, etc.
+            Zero = 1 << 4               // Integer 0, null, or zeroed value
+        }
+
+        private sealed class PeSymbolicState
+        {
+            public readonly PeSymbolicTag[] Locals;
+            public readonly PeSymbolicTag[] Stack;
+
+            public PeSymbolicState(int localCount, PeSymbolicTag[] stack)
+            {
+                Locals = new PeSymbolicTag[localCount];
+                Stack = stack ?? Array.Empty<PeSymbolicTag>();
+            }
+
+            public PeSymbolicState(PeSymbolicTag[] locals, PeSymbolicTag[] stack)
+            {
+                Locals = locals;
+                Stack = stack ?? Array.Empty<PeSymbolicTag>();
+            }
+
+            public PeSymbolicState Clone()
+            {
+                var newLocals = new PeSymbolicTag[Locals.Length];
+                Array.Copy(Locals, newLocals, Locals.Length);
+                var newStack = new PeSymbolicTag[Stack.Length];
+                Array.Copy(Stack, newStack, Stack.Length);
+                return new PeSymbolicState(newLocals, newStack);
+            }
+
+            public bool MergeFrom(PeSymbolicState incoming)
+            {
+                if (incoming == null) return false;
+                bool changed = false;
+
+                int minLocals = Math.Min(Locals.Length, incoming.Locals.Length);
+                for (int i = 0; i < minLocals; i++)
+                {
+                    var merged = Locals[i] | incoming.Locals[i];
+                    if (merged != Locals[i])
+                    {
+                        Locals[i] = merged;
+                        changed = true;
+                    }
+                }
+
+                if (Stack.Length == incoming.Stack.Length)
+                {
+                    for (int i = 0; i < Stack.Length; i++)
+                    {
+                        var merged = Stack[i] | incoming.Stack[i];
+                        if (merged != Stack[i])
+                        {
+                            Stack[i] = merged;
+                            changed = true;
+                        }
+                    }
+                }
+
+                return changed;
+            }
+        }
+
         internal static bool HasLinkedPeHeaderZeroing(MethodDef method)
         {
             if (method == null || !method.HasBody || method.Body.Instructions == null)
                 return false;
 
             var instructions = method.Body.Instructions;
-            var moduleBaseVars = new HashSet<int>();
-            var moduleBaseInstIndices = new HashSet<int>();
+            if (instructions.Count == 0)
+                return false;
 
-            // 1. Establish the credible provenance of the module base address (e.g. Marshal.GetHINSTANCE)
-            for (int i = 0; i < instructions.Count; i++)
+            // Strict provenance requirement: If Marshal.GetHINSTANCE is never called in this method,
+            // module base provenance cannot be established.
+            bool hasGetHinstance = false;
+            foreach (var inst in instructions)
             {
-                var inst = instructions[i];
-                if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
+                if ((inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt) &&
+                    inst.Operand is IMethod called && IsMarshalGetHINSTANCE(called))
                 {
-                    if (inst.Operand is IMethod called && IsMarshalGetHINSTANCE(called))
-                    {
-                        moduleBaseInstIndices.Add(i);
-                        // Trace through conv / explicit cast to stloc
-                        int next = i + 1;
-                        while (next < instructions.Count && (instructions[next].OpCode == OpCodes.Conv_I ||
-                                                             instructions[next].OpCode == OpCodes.Conv_U ||
-                                                             instructions[next].OpCode == OpCodes.Conv_U4 ||
-                                                             instructions[next].OpCode == OpCodes.Conv_U8 ||
-                                                             (instructions[next].OpCode == OpCodes.Call && instructions[next].Operand?.ToString().Contains("op_Explicit") == true)))
-                        {
-                            moduleBaseInstIndices.Add(next);
-                            next++;
-                        }
-
-                        if (next < instructions.Count && TryGetVariableIndex(instructions[next], out int vIdx))
-                        {
-                            moduleBaseVars.Add(vIdx);
-                        }
-                    }
+                    hasGetHinstance = true;
+                    break;
                 }
             }
 
-            // If no credible module base provenance is found in the method, it cannot be classified as Anti-Dump
-            if (moduleBaseVars.Count == 0 && moduleBaseInstIndices.Count == 0)
+            if (!hasGetHinstance)
                 return false;
 
-            var peRelatedVars = new HashSet<int>();
-            var peRelatedInstIndices = new HashSet<int>();
-
-            // 2. Identify 0x3C (e_lfanew) offset calculation STRICTLY tied to the proven module base
-            for (int i = 0; i < instructions.Count; i++)
+            try
             {
-                var inst = instructions[i];
-                bool is3C = (inst.OpCode == OpCodes.Ldc_I4 && inst.Operand is int iv && iv == 0x3c) ||
-                            (inst.OpCode == OpCodes.Ldc_I4_S && inst.Operand is sbyte sb && sb == 0x3c) ||
-                            (inst.OpCode == OpCodes.Ldc_I4_S && inst.Operand is byte b && b == 0x3c);
+                int varCount = method.Body.Variables?.Count ?? 0;
+                var instToIndex = new Dictionary<Instruction, int>(instructions.Count);
+                for (int i = 0; i < instructions.Count; i++)
+                    instToIndex[instructions[i]] = i;
 
-                if (!is3C)
-                    continue;
+                var entryStates = new PeSymbolicState[instructions.Count];
+                entryStates[0] = new PeSymbolicState(varCount, Array.Empty<PeSymbolicTag>());
 
-                // Check forward for pointer add within a tight window (e.g. up to 4 instructions)
-                for (int j = i + 1; j <= Math.Min(i + 4, instructions.Count - 1); j++)
+                var worklist = new Queue<int>();
+                var inWorklist = new bool[instructions.Count];
+                worklist.Enqueue(0);
+                inWorklist[0] = true;
+
+                bool zeroingDetected = false;
+
+                while (worklist.Count > 0)
                 {
-                    if (instructions[j].OpCode == OpCodes.Add)
-                    {
-                        // VERIFY PROVENANCE: The other operand of Add MUST be the module base!
-                        bool baseLinked = false;
+                    int i = worklist.Dequeue();
+                    inWorklist[i] = false;
 
-                        // Check instructions immediately preceding the Add (or preceding the 0x3c load)
-                        for (int k = Math.Max(0, i - 4); k < j; k++)
-                        {
-                            if (moduleBaseInstIndices.Contains(k))
-                            {
-                                baseLinked = true;
-                                break;
-                            }
-                            if (TryGetVariableIndex(instructions[k], out int baseVar) && moduleBaseVars.Contains(baseVar))
-                            {
-                                baseLinked = true;
-                                break;
-                            }
-                        }
-
-                        if (!baseLinked)
-                        {
-                            // An independent pointer had 0x3C added to it; this is NOT a PE header pointer!
-                            continue;
-                        }
-
-                        peRelatedInstIndices.Add(j);
-                        if (j + 1 < instructions.Count && TryGetVariableIndex(instructions[j + 1], out int vIdx))
-                        {
-                            peRelatedVars.Add(vIdx);
-                        }
-                        break;
-                    }
-                }
-            }
-
-            // If no 0x3c addition linked to the module base was found, it cannot be Anti-Dump
-            if (peRelatedVars.Count == 0 && peRelatedInstIndices.Count == 0)
-                return false;
-
-            // 3. Propagate to variables assigned from peRelatedVars with pointer arithmetic/dereferences (e.g. e_lfanew -> NT header)
-            bool varsChanged = true;
-            while (varsChanged)
-            {
-                varsChanged = false;
-                for (int i = 0; i < instructions.Count - 1; i++)
-                {
                     var inst = instructions[i];
-                    if (TryGetVariableIndex(inst, out int srcVar) && (peRelatedVars.Contains(srcVar) || moduleBaseVars.Contains(srcVar)))
+                    var state = entryStates[i];
+                    if (state == null) continue;
+
+                    var curStack = new List<PeSymbolicTag>(state.Stack);
+                    var curLocals = new PeSymbolicTag[state.Locals.Length];
+                    Array.Copy(state.Locals, curLocals, curLocals.Length);
+
+                    ExecuteSymbolicInstruction(inst, curStack, curLocals, ref zeroingDetected);
+
+                    var successors = GetSuccessorIndices(inst, i, instructions.Count, instToIndex);
+                    if (successors.Count == 0) continue;
+
+                    var outState = new PeSymbolicState(curLocals, curStack.ToArray());
+                    foreach (var sIdx in successors)
                     {
-                        for (int j = i + 1; j <= Math.Min(i + 6, instructions.Count - 1); j++)
+                        if (entryStates[sIdx] == null)
                         {
-                            if (instructions[j].OpCode == OpCodes.Add || instructions[j].OpCode == OpCodes.Sub ||
-                                instructions[j].OpCode == OpCodes.Ldind_I || instructions[j].OpCode == OpCodes.Ldind_U4 ||
-                                instructions[j].OpCode == OpCodes.Ldind_I4)
+                            entryStates[sIdx] = outState.Clone();
+                            if (!inWorklist[sIdx])
                             {
-                                if (j + 1 < instructions.Count && TryGetVariableIndex(instructions[j + 1], out int dstVar))
+                                worklist.Enqueue(sIdx);
+                                inWorklist[sIdx] = true;
+                            }
+                        }
+                        else
+                        {
+                            if (entryStates[sIdx].MergeFrom(outState))
+                            {
+                                if (!inWorklist[sIdx])
                                 {
-                                    if (peRelatedVars.Add(dstVar))
-                                        varsChanged = true;
+                                    worklist.Enqueue(sIdx);
+                                    inWorklist[sIdx] = true;
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            // 4. Verify that zeroing targets a PE-related address or variable
-            for (int i = 0; i < instructions.Count; i++)
+                return zeroingDetected;
+            }
+            catch (Exception ex)
             {
-                var inst = instructions[i];
-                var code = inst.OpCode.Code;
-
-                if (code == Code.Stind_I1 || code == Code.Stind_I2 || code == Code.Stind_I4 ||
-                    code == Code.Stind_I8 || code == Code.Stind_I)
-                {
-                    if (i > 0 && IsZeroLoadInstruction(instructions[i - 1]))
-                    {
-                        for (int j = Math.Max(0, i - 6); j < i - 1; j++)
-                        {
-                            if (peRelatedInstIndices.Contains(j))
-                                return true;
-
-                            if (TryGetVariableIndex(instructions[j], out int vIdx) && peRelatedVars.Contains(vIdx))
-                                return true;
-                        }
-                    }
-                }
-
-                if (code == Code.Initblk)
-                {
-                    if (i >= 2 && IsZeroLoadInstruction(instructions[i - 2]))
-                    {
-                        for (int j = Math.Max(0, i - 6); j < i - 2; j++)
-                        {
-                            if (peRelatedInstIndices.Contains(j))
-                                return true;
-
-                            if (TryGetVariableIndex(instructions[j], out int vIdx) && peRelatedVars.Contains(vIdx))
-                                return true;
-                        }
-                    }
-                }
-
-                if (code == Code.Call || code == Code.Callvirt)
-                {
-                    if (inst.Operand is IMethod called)
-                    {
-                        string fn = called.Name;
-                        if (fn.IndexOf("ZeroMemory", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            fn.IndexOf("memset", StringComparison.OrdinalIgnoreCase) >= 0)
-                        {
-                            for (int j = Math.Max(0, i - 5); j < i; j++)
-                            {
-                                if (peRelatedInstIndices.Contains(j))
-                                    return true;
-
-                                if (TryGetVariableIndex(instructions[j], out int vIdx) && peRelatedVars.Contains(vIdx))
-                                    return true;
-                            }
-                        }
-                    }
-                }
+                Logger.LogWarning($"[CleanerKiller] Symbolic evaluation error in {method.Name}: {ex.Message}. Falling back to safe hook retention.");
+                return false;
             }
-
-            return false;
         }
 
-        private static bool IsZeroLoadInstruction(Instruction inst)
+        private static void ExecuteSymbolicInstruction(
+            Instruction inst,
+            List<PeSymbolicTag> stack,
+            PeSymbolicTag[] locals,
+            ref bool zeroingDetected)
         {
-            if (inst == null) return false;
-            return inst.OpCode == OpCodes.Ldc_I4_0 ||
-                   (inst.OpCode == OpCodes.Ldc_I4 && Equals(inst.Operand, 0)) ||
-                   inst.OpCode == OpCodes.Ldnull;
+            var op = inst.OpCode;
+            var code = op.Code;
+
+            // 1. Marshal.GetHINSTANCE: proven origin of ModuleBase
+            if ((code == Code.Call || code == Code.Callvirt) &&
+                inst.Operand is IMethod called && IsMarshalGetHINSTANCE(called))
+            {
+                inst.CalculateStackUsage(out int pushes, out int pops);
+                for (int p = 0; p < pops; p++) PopStack(stack);
+                PushStack(stack, PeSymbolicTag.ModuleBase);
+                return;
+            }
+
+            // 2. Type conversions / casts that preserve pointer tag
+            if (code == Code.Conv_I || code == Code.Conv_U || code == Code.Conv_U4 || code == Code.Conv_U8 ||
+                ((code == Code.Call || code == Code.Callvirt) && inst.Operand?.ToString().Contains("op_Explicit") == true))
+            {
+                var val = PopStack(stack);
+                PushStack(stack, val);
+                return;
+            }
+
+            // 3. Constants: 0x3C / 60 (PeHeaderOffset) or 0 (Zero)
+            if (code == Code.Ldc_I4 || code == Code.Ldc_I4_S)
+            {
+                int val = 0;
+                if (inst.Operand is int iv) val = iv;
+                else if (inst.Operand is sbyte sb) val = sb;
+                else if (inst.Operand is byte b) val = b;
+
+                if (val == 0x3C || val == 60)
+                    PushStack(stack, PeSymbolicTag.PeHeaderOffset);
+                else if (val == 0)
+                    PushStack(stack, PeSymbolicTag.Zero);
+                else
+                    PushStack(stack, PeSymbolicTag.None);
+                return;
+            }
+
+            if (code == Code.Ldc_I4_0 || code == Code.Ldnull ||
+                (code == Code.Ldc_I8 && Equals(inst.Operand, 0L)))
+            {
+                PushStack(stack, PeSymbolicTag.Zero);
+                return;
+            }
+
+            // 4. Local variable load
+            if (code == Code.Ldloc || code == Code.Ldloc_S ||
+                code == Code.Ldloc_0 || code == Code.Ldloc_1 || code == Code.Ldloc_2 || code == Code.Ldloc_3)
+            {
+                if (TryGetVariableIndex(inst, out int idx) && idx >= 0 && idx < locals.Length)
+                    PushStack(stack, locals[idx]);
+                else
+                    PushStack(stack, PeSymbolicTag.None);
+                return;
+            }
+
+            // 5. Local variable store
+            if (code == Code.Stloc || code == Code.Stloc_S ||
+                code == Code.Stloc_0 || code == Code.Stloc_1 || code == Code.Stloc_2 || code == Code.Stloc_3)
+            {
+                var val = PopStack(stack);
+                if (TryGetVariableIndex(inst, out int idx) && idx >= 0 && idx < locals.Length)
+                    locals[idx] = val;
+                return;
+            }
+
+            // 6. Local variable address (Ldloca)
+            if (code == Code.Ldloca || code == Code.Ldloca_S)
+            {
+                PushStack(stack, PeSymbolicTag.None);
+                return;
+            }
+
+            // 7. Pointer arithmetic: Add
+            if (code == Code.Add)
+            {
+                var b = PopStack(stack);
+                var a = PopStack(stack);
+
+                PeSymbolicTag res = PeSymbolicTag.None;
+
+                // Proven ModuleBase + 0x3C -> PeDerivedAddress
+                if ((a.HasFlag(PeSymbolicTag.ModuleBase) && b.HasFlag(PeSymbolicTag.PeHeaderOffset)) ||
+                    (b.HasFlag(PeSymbolicTag.ModuleBase) && a.HasFlag(PeSymbolicTag.PeHeaderOffset)))
+                {
+                    res = PeSymbolicTag.PeDerivedAddress;
+                }
+                // Proven ModuleBase + PeHeaderField (e.g. *(ModuleBase + 0x3C)) -> PeDerivedAddress
+                else if ((a.HasFlag(PeSymbolicTag.ModuleBase) && b.HasFlag(PeSymbolicTag.PeHeaderField)) ||
+                         (b.HasFlag(PeSymbolicTag.ModuleBase) && a.HasFlag(PeSymbolicTag.PeHeaderField)))
+                {
+                    res = PeSymbolicTag.PeDerivedAddress;
+                }
+                // Offset calculation from already derived PE address -> PeDerivedAddress
+                else if (a.HasFlag(PeSymbolicTag.PeDerivedAddress) || b.HasFlag(PeSymbolicTag.PeDerivedAddress))
+                {
+                    res = PeSymbolicTag.PeDerivedAddress;
+                }
+
+                PushStack(stack, res);
+                return;
+            }
+
+            // 8. Pointer arithmetic: Sub
+            if (code == Code.Sub)
+            {
+                var b = PopStack(stack);
+                var a = PopStack(stack);
+                PeSymbolicTag res = PeSymbolicTag.None;
+                if (a.HasFlag(PeSymbolicTag.PeDerivedAddress))
+                    res = PeSymbolicTag.PeDerivedAddress;
+                PushStack(stack, res);
+                return;
+            }
+
+            // 9. Bitwise And (pointer alignment)
+            if (code == Code.And)
+            {
+                var b = PopStack(stack);
+                var a = PopStack(stack);
+                PeSymbolicTag res = PeSymbolicTag.None;
+                if (a.HasFlag(PeSymbolicTag.PeDerivedAddress) || b.HasFlag(PeSymbolicTag.PeDerivedAddress))
+                    res = PeSymbolicTag.PeDerivedAddress;
+                PushStack(stack, res);
+                return;
+            }
+
+            // 10. Pointer dereference (ldind)
+            if (code == Code.Ldind_I || code == Code.Ldind_I1 || code == Code.Ldind_I2 || code == Code.Ldind_I4 ||
+                code == Code.Ldind_I8 || code == Code.Ldind_U1 || code == Code.Ldind_U2 || code == Code.Ldind_U4)
+            {
+                var addr = PopStack(stack);
+                if (addr.HasFlag(PeSymbolicTag.PeDerivedAddress))
+                    PushStack(stack, PeSymbolicTag.PeHeaderField);
+                else
+                    PushStack(stack, PeSymbolicTag.None);
+                return;
+            }
+
+            // 11. Pointer write (stind): Check for zeroing of PE address or ModuleBase
+            if (code == Code.Stind_I || code == Code.Stind_I1 || code == Code.Stind_I2 || code == Code.Stind_I4 || code == Code.Stind_I8)
+            {
+                var val = PopStack(stack);
+                var addr = PopStack(stack);
+                if ((addr.HasFlag(PeSymbolicTag.PeDerivedAddress) || addr.HasFlag(PeSymbolicTag.ModuleBase)) &&
+                    val.HasFlag(PeSymbolicTag.Zero))
+                {
+                    zeroingDetected = true;
+                }
+                return;
+            }
+
+            // 12. Block write (initblk)
+            if (code == Code.Initblk)
+            {
+                var size = PopStack(stack);
+                var val = PopStack(stack);
+                var addr = PopStack(stack);
+                if ((addr.HasFlag(PeSymbolicTag.PeDerivedAddress) || addr.HasFlag(PeSymbolicTag.ModuleBase)) &&
+                    val.HasFlag(PeSymbolicTag.Zero))
+                {
+                    zeroingDetected = true;
+                }
+                return;
+            }
+
+            // 13. Method calls (RtlZeroMemory, memset, etc.)
+            if ((code == Code.Call || code == Code.Callvirt) && inst.Operand is IMethod calledFn)
+            {
+                string fn = calledFn.Name;
+                if (fn.IndexOf("ZeroMemory", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var count = PopStack(stack);
+                    var dest = PopStack(stack);
+                    if (dest.HasFlag(PeSymbolicTag.PeDerivedAddress) || dest.HasFlag(PeSymbolicTag.ModuleBase))
+                        zeroingDetected = true;
+                    return;
+                }
+                if (fn.IndexOf("memset", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var count = PopStack(stack);
+                    var c = PopStack(stack);
+                    var dest = PopStack(stack);
+                    if ((dest.HasFlag(PeSymbolicTag.PeDerivedAddress) || dest.HasFlag(PeSymbolicTag.ModuleBase)) &&
+                        c.HasFlag(PeSymbolicTag.Zero))
+                    {
+                        zeroingDetected = true;
+                    }
+                    PushStack(stack, dest);
+                    return;
+                }
+            }
+
+            // 14. Dup & Pop
+            if (code == Code.Dup)
+            {
+                var val = PopStack(stack);
+                PushStack(stack, val);
+                PushStack(stack, val);
+                return;
+            }
+            if (code == Code.Pop)
+            {
+                PopStack(stack);
+                return;
+            }
+
+            // 15. Fallback for all other instructions
+            inst.CalculateStackUsage(out int pushesCount, out int popsCount);
+            for (int p = 0; p < popsCount; p++) PopStack(stack);
+            for (int p = 0; p < pushesCount; p++) PushStack(stack, PeSymbolicTag.None);
+        }
+
+        private static PeSymbolicTag PopStack(List<PeSymbolicTag> stack)
+        {
+            if (stack != null && stack.Count > 0)
+            {
+                var tag = stack[stack.Count - 1];
+                stack.RemoveAt(stack.Count - 1);
+                return tag;
+            }
+            return PeSymbolicTag.None;
+        }
+
+        private static void PushStack(List<PeSymbolicTag> stack, PeSymbolicTag tag)
+        {
+            stack?.Add(tag);
+        }
+
+        private static List<int> GetSuccessorIndices(Instruction inst, int i, int count, Dictionary<Instruction, int> instToIndex)
+        {
+            var list = new List<int>(2);
+            var flow = inst.OpCode.FlowControl;
+
+            if (flow == FlowControl.Branch)
+            {
+                if (inst.Operand is Instruction target && instToIndex.TryGetValue(target, out int tIdx))
+                    list.Add(tIdx);
+            }
+            else if (flow == FlowControl.Cond_Branch)
+            {
+                if (inst.Operand is Instruction target && instToIndex.TryGetValue(target, out int tIdx))
+                    list.Add(tIdx);
+                else if (inst.Operand is Instruction[] targets)
+                {
+                    foreach (var t in targets)
+                    {
+                        if (instToIndex.TryGetValue(t, out int idx))
+                            list.Add(idx);
+                    }
+                }
+                if (i + 1 < count)
+                    list.Add(i + 1);
+            }
+            else if (flow == FlowControl.Return || flow == FlowControl.Throw)
+            {
+                // No successors
+            }
+            else
+            {
+                if (i + 1 < count)
+                    list.Add(i + 1);
+            }
+
+            return list;
         }
 
         private static bool TryGetVariableIndex(Instruction inst, out int index)
