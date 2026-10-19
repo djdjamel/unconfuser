@@ -540,12 +540,13 @@ namespace ConfuserExKillerRunner.Killers
         private enum PeSymbolicKind
         {
             None = 0,
-            ModuleBase = 1,        // Proven origin from Marshal.GetHINSTANCE(...)
+            ModuleBase = 1,        // Proven origin from Marshal.GetHINSTANCE(...) (offset 0 from base)
             PeHeaderOffset = 2,    // Constant 0x3C / 60 (e_lfanew)
-            PeHeaderField = 3,     // Field loaded from PE header (e.g. *(ModuleBase + 0x3C))
-            PeDerivedAddress = 4,  // Derived pointer to PE header space
-            Zero = 5,              // Integer 0, null, or zeroed value
-            NumericOffset = 6      // Demonstrated numeric integer displacement
+            PeHeaderField = 3,     // Field specifically loaded from ModuleBase + 0x3C (IMAGE_DOS_HEADER.e_lfanew)
+            PeDerivedAddress = 4,  // Derived pointer to PE header space with cumulative offset from ModuleBase
+            NtDerivedAddress = 5,  // Derived pointer to PE NT headers with cumulative offset from IMAGE_NT_HEADERS
+            Zero = 6,              // Integer 0, null, or zeroed value
+            NumericOffset = 7      // Demonstrated numeric integer displacement
         }
 
         private readonly struct PeSymbolicSlot : IEquatable<PeSymbolicSlot>
@@ -560,10 +561,9 @@ namespace ConfuserExKillerRunner.Killers
             }
 
             public static readonly PeSymbolicSlot None = new(PeSymbolicKind.None);
-            public static readonly PeSymbolicSlot ModuleBase = new(PeSymbolicKind.ModuleBase);
+            public static readonly PeSymbolicSlot ModuleBase = new(PeSymbolicKind.ModuleBase, 0);
             public static readonly PeSymbolicSlot PeHeaderOffset = new(PeSymbolicKind.PeHeaderOffset, 0x3C);
             public static readonly PeSymbolicSlot PeHeaderField = new(PeSymbolicKind.PeHeaderField);
-            public static readonly PeSymbolicSlot PeDerivedAddress = new(PeSymbolicKind.PeDerivedAddress);
             public static readonly PeSymbolicSlot Zero = new(PeSymbolicKind.Zero, 0);
             public static readonly PeSymbolicSlot NumericOffset = new(PeSymbolicKind.NumericOffset);
 
@@ -580,7 +580,13 @@ namespace ConfuserExKillerRunner.Killers
             public static bool operator !=(PeSymbolicSlot left, PeSymbolicSlot right) => !left.Equals(right);
         }
 
-        private const int MaxPeHeaderDisplacement = 0x1000; // 4096 bytes (bounds the entire PE header space)
+        // In the Windows PE format (ECMA-335 / Microsoft PE/COFF specification), the initial headers
+        // (IMAGE_DOS_HEADER, MS-DOS stub, IMAGE_NT_HEADERS, and Section Table) are mapped by the OS loader
+        // in the image's first page (typically bounded by SectionAlignment / SizeOfHeaders, nominally 0x1000 = 4096 bytes).
+        // This displacement bound is used by the analyzer as a safe upper envelope for legitimate PE header structures.
+        // It does not serve as a universal guarantee for non-standard PE files, but ensures that displacements
+        // escaping beyond the first page cannot be misclassified as header manipulations.
+        private const int MaxPeHeaderDisplacement = 0x1000;
 
         private static bool IsNumeric(PeSymbolicSlot v)
         {
@@ -590,6 +596,13 @@ namespace ConfuserExKillerRunner.Killers
         private static bool IsAlignmentMask(int mask)
         {
             return mask == -2 || mask == -4 || mask == -8 || mask == -16 || mask == -32 || mask == -64;
+        }
+
+        private static bool IsPeTarget(PeSymbolicSlot addr)
+        {
+            return addr.Kind == PeSymbolicKind.ModuleBase ||
+                   addr.Kind == PeSymbolicKind.PeDerivedAddress ||
+                   addr.Kind == PeSymbolicKind.NtDerivedAddress;
         }
 
         private static PeSymbolicSlot CreateNumericSlot(int val)
@@ -1043,8 +1056,7 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var val = PopStack(stack);
                 var addr = PopStack(stack);
-                if ((addr.Kind == PeSymbolicKind.PeDerivedAddress || addr.Kind == PeSymbolicKind.ModuleBase) &&
-                    val.Kind == PeSymbolicKind.Zero)
+                if (IsPeTarget(addr) && val.Kind == PeSymbolicKind.Zero)
                 {
                     zeroingDetected = true;
                 }
@@ -1057,8 +1069,7 @@ namespace ConfuserExKillerRunner.Killers
                 var size = PopStack(stack);
                 var val = PopStack(stack);
                 var addr = PopStack(stack);
-                if ((addr.Kind == PeSymbolicKind.PeDerivedAddress || addr.Kind == PeSymbolicKind.ModuleBase) &&
-                    val.Kind == PeSymbolicKind.Zero)
+                if (IsPeTarget(addr) && val.Kind == PeSymbolicKind.Zero)
                 {
                     zeroingDetected = true;
                 }
@@ -1073,7 +1084,7 @@ namespace ConfuserExKillerRunner.Killers
                 {
                     var count = PopStack(stack);
                     var dest = PopStack(stack);
-                    if (dest.Kind == PeSymbolicKind.PeDerivedAddress || dest.Kind == PeSymbolicKind.ModuleBase)
+                    if (IsPeTarget(dest))
                         zeroingDetected = true;
                     return;
                 }
@@ -1082,8 +1093,7 @@ namespace ConfuserExKillerRunner.Killers
                     var count = PopStack(stack);
                     var c = PopStack(stack);
                     var dest = PopStack(stack);
-                    if ((dest.Kind == PeSymbolicKind.PeDerivedAddress || dest.Kind == PeSymbolicKind.ModuleBase) &&
-                        c.Kind == PeSymbolicKind.Zero)
+                    if (IsPeTarget(dest) && c.Kind == PeSymbolicKind.Zero)
                     {
                         zeroingDetected = true;
                     }
@@ -1114,7 +1124,7 @@ namespace ConfuserExKillerRunner.Killers
 
         private static PeSymbolicSlot CombineAdd(PeSymbolicSlot a, PeSymbolicSlot b)
         {
-            // Obvious arithmetic identity: X + 0 == X
+            // Obvious arithmetic identity: X + 0 == X, 0 + X == X
             if (b.Kind == PeSymbolicKind.Zero)
             {
                 return a;
@@ -1124,32 +1134,92 @@ namespace ConfuserExKillerRunner.Killers
                 return b;
             }
 
-            // Proven ModuleBase + 0x3C -> PeDerivedAddress
+            // 1. Proven ModuleBase + 0x3C -> PeDerivedAddress with cumulative displacement 0x3C
             if ((a.Kind == PeSymbolicKind.ModuleBase && b.Kind == PeSymbolicKind.PeHeaderOffset) ||
                 (b.Kind == PeSymbolicKind.ModuleBase && a.Kind == PeSymbolicKind.PeHeaderOffset))
             {
-                return PeSymbolicSlot.PeDerivedAddress;
+                return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, 0x3C);
             }
-            // Proven ModuleBase + PeHeaderField (e.g. *(ModuleBase + 0x3C)) -> PeDerivedAddress
+
+            // 2. Proven ModuleBase + PeHeaderField (specifically e_lfanew read from ModuleBase + 0x3C)
+            // Points to IMAGE_NT_HEADERS with relative cumulative displacement 0 from NT headers.
             if ((a.Kind == PeSymbolicKind.ModuleBase && b.Kind == PeSymbolicKind.PeHeaderField) ||
                 (b.Kind == PeSymbolicKind.ModuleBase && a.Kind == PeSymbolicKind.PeHeaderField))
             {
-                return PeSymbolicSlot.PeDerivedAddress;
+                return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, 0);
             }
 
-            // Offset calculation from already derived PE address:
-            // CRITICAL: The displacement MUST be a demonstrated small numeric offset within the PE header space (|offset| <= 0x1000).
-            // An arbitrary displacement (e.g. > 0x1000) or an unproven operand (None) CANNOT be demonstrated to point to PE headers!
-            if (a.Kind == PeSymbolicKind.PeDerivedAddress && b.ConcreteValue.HasValue && Math.Abs(b.ConcreteValue.Value) <= MaxPeHeaderDisplacement)
+            // 3. ModuleBase + Numeric displacement
+            if (a.Kind == PeSymbolicKind.ModuleBase && IsNumeric(b))
             {
-                return PeSymbolicSlot.PeDerivedAddress;
+                if (b.ConcreteValue.HasValue)
+                {
+                    int offset = b.ConcreteValue.Value;
+                    if (offset >= 0 && offset <= MaxPeHeaderDisplacement)
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, offset);
+                }
+                return PeSymbolicSlot.None;
             }
-            if (b.Kind == PeSymbolicKind.PeDerivedAddress && a.ConcreteValue.HasValue && Math.Abs(a.ConcreteValue.Value) <= MaxPeHeaderDisplacement)
+            if (b.Kind == PeSymbolicKind.ModuleBase && IsNumeric(a))
             {
-                return PeSymbolicSlot.PeDerivedAddress;
+                if (a.ConcreteValue.HasValue)
+                {
+                    int offset = a.ConcreteValue.Value;
+                    if (offset >= 0 && offset <= MaxPeHeaderDisplacement)
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, offset);
+                }
+                return PeSymbolicSlot.None;
             }
 
-            // Numeric + Numeric -> Numeric
+            // 4. Cumulative offset calculation from already derived PE DOS/stub address:
+            // CRITICAL: The cumulative displacement from ModuleBase MUST be tracked and bounded
+            // within the PE header space (0 <= offset <= MaxPeHeaderDisplacement).
+            // If the position becomes unknown or exceeds bounds, provenance is lost!
+            if (a.Kind == PeSymbolicKind.PeDerivedAddress && IsNumeric(b))
+            {
+                if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
+                {
+                    long cum = (long)a.ConcreteValue.Value + b.ConcreteValue.Value;
+                    if (cum >= 0 && cum <= MaxPeHeaderDisplacement)
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, (int)cum);
+                }
+                return PeSymbolicSlot.None;
+            }
+            if (b.Kind == PeSymbolicKind.PeDerivedAddress && IsNumeric(a))
+            {
+                if (b.ConcreteValue.HasValue && a.ConcreteValue.HasValue)
+                {
+                    long cum = (long)b.ConcreteValue.Value + a.ConcreteValue.Value;
+                    if (cum >= 0 && cum <= MaxPeHeaderDisplacement)
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, (int)cum);
+                }
+                return PeSymbolicSlot.None;
+            }
+
+            // 5. Cumulative offset calculation from NT headers:
+            // CRITICAL: Displacement from IMAGE_NT_HEADERS must remain within header bounds (|offset| <= MaxPeHeaderDisplacement).
+            if (a.Kind == PeSymbolicKind.NtDerivedAddress && IsNumeric(b))
+            {
+                if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
+                {
+                    long cum = (long)a.ConcreteValue.Value + b.ConcreteValue.Value;
+                    if (Math.Abs(cum) <= MaxPeHeaderDisplacement)
+                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, (int)cum);
+                }
+                return PeSymbolicSlot.None;
+            }
+            if (b.Kind == PeSymbolicKind.NtDerivedAddress && IsNumeric(a))
+            {
+                if (b.ConcreteValue.HasValue && a.ConcreteValue.HasValue)
+                {
+                    long cum = (long)b.ConcreteValue.Value + a.ConcreteValue.Value;
+                    if (Math.Abs(cum) <= MaxPeHeaderDisplacement)
+                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, (int)cum);
+                }
+                return PeSymbolicSlot.None;
+            }
+
+            // 6. Numeric + Numeric -> Numeric
             if (IsNumeric(a) && IsNumeric(b))
             {
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
@@ -1170,15 +1240,33 @@ namespace ConfuserExKillerRunner.Killers
                 return a;
             }
 
-            // PeDerivedAddress - NumericOffset -> PeDerivedAddress
-            // CRITICAL: The subtrahend MUST be a demonstrated small numeric offset within PE header space (|offset| <= 0x1000).
-            // Large subtrahends (e.g. > 0x1000) or unproven operands (None) invalidate PE header provenance!
-            if (a.Kind == PeSymbolicKind.PeDerivedAddress && b.ConcreteValue.HasValue && Math.Abs(b.ConcreteValue.Value) <= MaxPeHeaderDisplacement)
+            // 1. PeDerivedAddress - NumericOffset
+            // Tracks cumulative displacement from ModuleBase. Must remain in [0, MaxPeHeaderDisplacement].
+            if (a.Kind == PeSymbolicKind.PeDerivedAddress && IsNumeric(b))
             {
-                return PeSymbolicSlot.PeDerivedAddress;
+                if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
+                {
+                    long cum = (long)a.ConcreteValue.Value - b.ConcreteValue.Value;
+                    if (cum >= 0 && cum <= MaxPeHeaderDisplacement)
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, (int)cum);
+                }
+                return PeSymbolicSlot.None;
             }
 
-            // Numeric - Numeric -> Numeric
+            // 2. NtDerivedAddress - NumericOffset
+            // Tracks cumulative displacement from NT headers. Must remain bounded.
+            if (a.Kind == PeSymbolicKind.NtDerivedAddress && IsNumeric(b))
+            {
+                if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
+                {
+                    long cum = (long)a.ConcreteValue.Value - b.ConcreteValue.Value;
+                    if (Math.Abs(cum) <= MaxPeHeaderDisplacement)
+                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, (int)cum);
+                }
+                return PeSymbolicSlot.None;
+            }
+
+            // 3. Numeric - Numeric -> Numeric
             if (IsNumeric(a) && IsNumeric(b))
             {
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
@@ -1199,16 +1287,59 @@ namespace ConfuserExKillerRunner.Killers
                 return PeSymbolicSlot.Zero;
             }
 
-            // Pointer alignment: PeDerivedAddress & AlignmentMask -> PeDerivedAddress
+            // ModuleBase & AlignmentMask -> ModuleBase
+            if (a.Kind == PeSymbolicKind.ModuleBase && b.ConcreteValue.HasValue && IsAlignmentMask(b.ConcreteValue.Value))
+            {
+                return PeSymbolicSlot.ModuleBase;
+            }
+            if (b.Kind == PeSymbolicKind.ModuleBase && a.ConcreteValue.HasValue && IsAlignmentMask(a.ConcreteValue.Value))
+            {
+                return PeSymbolicSlot.ModuleBase;
+            }
+
+            // Pointer alignment: PeDerivedAddress & AlignmentMask
             // CRITICAL: Only legitimate pointer alignment masks (-2, -4, -8, -16, -32, -64) preserve provenance!
-            // Arbitrary numeric masks destroy pointer provenance.
             if (a.Kind == PeSymbolicKind.PeDerivedAddress && b.ConcreteValue.HasValue && IsAlignmentMask(b.ConcreteValue.Value))
             {
-                return PeSymbolicSlot.PeDerivedAddress;
+                if (a.ConcreteValue.HasValue)
+                {
+                    int masked = a.ConcreteValue.Value & b.ConcreteValue.Value;
+                    if (masked >= 0 && masked <= MaxPeHeaderDisplacement)
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, masked);
+                }
+                return PeSymbolicSlot.None;
             }
             if (b.Kind == PeSymbolicKind.PeDerivedAddress && a.ConcreteValue.HasValue && IsAlignmentMask(a.ConcreteValue.Value))
             {
-                return PeSymbolicSlot.PeDerivedAddress;
+                if (b.ConcreteValue.HasValue)
+                {
+                    int masked = b.ConcreteValue.Value & a.ConcreteValue.Value;
+                    if (masked >= 0 && masked <= MaxPeHeaderDisplacement)
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, masked);
+                }
+                return PeSymbolicSlot.None;
+            }
+
+            // Pointer alignment: NtDerivedAddress & AlignmentMask
+            if (a.Kind == PeSymbolicKind.NtDerivedAddress && b.ConcreteValue.HasValue && IsAlignmentMask(b.ConcreteValue.Value))
+            {
+                if (a.ConcreteValue.HasValue)
+                {
+                    int masked = a.ConcreteValue.Value & b.ConcreteValue.Value;
+                    if (Math.Abs(masked) <= MaxPeHeaderDisplacement)
+                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, masked);
+                }
+                return PeSymbolicSlot.None;
+            }
+            if (b.Kind == PeSymbolicKind.NtDerivedAddress && a.ConcreteValue.HasValue && IsAlignmentMask(a.ConcreteValue.Value))
+            {
+                if (b.ConcreteValue.HasValue)
+                {
+                    int masked = b.ConcreteValue.Value & a.ConcreteValue.Value;
+                    if (Math.Abs(masked) <= MaxPeHeaderDisplacement)
+                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, masked);
+                }
+                return PeSymbolicSlot.None;
             }
 
             // Numeric & Numeric
@@ -1226,8 +1357,17 @@ namespace ConfuserExKillerRunner.Killers
 
         private static PeSymbolicSlot EvaluateLdind(PeSymbolicSlot addr)
         {
-            if (addr.Kind == PeSymbolicKind.PeDerivedAddress)
+            // In the PE specification, offset 0x3C (IMAGE_DOS_HEADER.e_lfanew) specifically holds
+            // the relative file offset to the IMAGE_NT_HEADERS.
+            // Only a dereference directly at (ModuleBase + 0x3C) yields the proven e_lfanew field.
+            // A read at any other address (or an address without proven offset 0x3C) does NOT prove
+            // an offset to the PE headers and returns None.
+            if (addr.Kind == PeSymbolicKind.PeDerivedAddress &&
+                addr.ConcreteValue.HasValue &&
+                addr.ConcreteValue.Value == 0x3C)
+            {
                 return PeSymbolicSlot.PeHeaderField;
+            }
             return PeSymbolicSlot.None;
         }
 

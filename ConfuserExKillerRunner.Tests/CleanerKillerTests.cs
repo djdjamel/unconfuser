@@ -2501,6 +2501,323 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
+        public void StripProtectorHooks_HookWithPeCumulativeDisplacementExceedingHeader_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestModCumulativeDisplacement");
+            var globalType = module.GlobalType;
+
+            // Scenario specifically requested by code review:
+            // 1. base = Marshal.GetHINSTANCE(...) -> ModuleBase
+            // 2. pe = base + 0x3C -> PeDerivedAddress with cumulative offset 0x3C
+            // 3. p = pe + 0x1000 -> address at base + 0x103C (exceeds MaxPeHeaderDisplacement 0x1000)
+            // 4. read integer at address p: val = *(int*)p
+            // 5. q = base + val
+            // 6. *(int*)q = 0
+            //
+            // Without cumulative displacement tracking, pe + 0x1000 individually satisfied <= 0x1000,
+            // retained PeDerivedAddress, and reading from it produced PeHeaderField, falsely classifying
+            // this hook as an Anti-Dump zeroing sequence.
+            // With cumulative tracking:
+            // - 0x3C + 0x1000 = 0x103C > 0x1000, which exceeds PE header space and produces None.
+            // - Furthermore, EvaluateLdind requires specifically offset 0x3C (e_lfanew); reading from
+            //   any other address produces None.
+            // Therefore, q is None, the write is not recognized as PE zeroing, and the hook is strictly preserved!
+            var hook = new MethodDefUser("CumulativeDisplacementHook", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localPe = new Local(module.CorLibTypes.IntPtr);
+            var localP = new Local(module.CorLibTypes.IntPtr);
+            var localVal = new Local(module.CorLibTypes.UInt32);
+            var localQ = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            hook.Body.Variables.Add(localBase);
+            hook.Body.Variables.Add(localPe);
+            hook.Body.Variables.Add(localP);
+            hook.Body.Variables.Add(localVal);
+            hook.Body.Variables.Add(localQ);
+            hook.Body.Variables.Add(localOldProtect);
+
+            var marshalType = new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef);
+            var moduleType = new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef);
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, moduleType.ToTypeSig()),
+                marshalType);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // 1. base = Marshal.GetHINSTANCE(null) -> ModuleBase (loc.0)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+
+            // 2. pe = base + 0x3C -> PeDerivedAddress(0x3C) (loc.1)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+
+            // 3. p = pe + 0x1000 -> base + 0x103C (exceeds header bound -> None) (loc.2)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_2));
+
+            // 4. val = *(int*)p -> ldloc.2; ldind.u4; stloc.3
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_2));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldind_U4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_3));
+
+            // 5. q = base + val -> ldloc.0; ldloc.3; add; stloc.s loc.4
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_3));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_S, localQ));
+
+            // VirtualProtect(q, 0x1000, 0x04, out oldProtect)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_S, localQ));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // 6. *(int*)q = 0
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_S, localQ));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(hook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, hook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(hook, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Hook MUST be preserved because p escaped the PE header boundary (0x103C > 0x1000)!
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Contains(hook, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_HookWithNonELfanewDereference_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestModNonELfanewDereference");
+            var globalType = module.GlobalType;
+
+            // Scenario specifically requested by code review:
+            // Even when an address is within PE header space (e.g. base + 0x40 <= 0x1000),
+            // dereferencing it must NOT automatically produce PeHeaderField (e_lfanew).
+            // Only dereferencing specifically offset 0x3C (IMAGE_DOS_HEADER.e_lfanew) provides
+            // valid PE header displacement provenance.
+            // 1. base = Marshal.GetHINSTANCE(...) -> ModuleBase
+            // 2. p = base + 0x40 (valid displacement within header space, but NOT e_lfanew)
+            // 3. val = *(int*)p -> EvaluateLdind(p) strictly returns None
+            // 4. q = base + val -> base + None strictly returns None
+            // 5. *(int*)q = 0 -> write zero to None
+            // Hook must be preserved!
+            var hook = new MethodDefUser("NonELfanewDereferenceHook", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localP = new Local(module.CorLibTypes.IntPtr);
+            var localVal = new Local(module.CorLibTypes.UInt32);
+            var localQ = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            hook.Body.Variables.Add(localBase);
+            hook.Body.Variables.Add(localP);
+            hook.Body.Variables.Add(localVal);
+            hook.Body.Variables.Add(localQ);
+            hook.Body.Variables.Add(localOldProtect);
+
+            var marshalType = new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef);
+            var moduleType = new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef);
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, moduleType.ToTypeSig()),
+                marshalType);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // 1. base = Marshal.GetHINSTANCE(null) -> ModuleBase
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+
+            // 2. p = base + 0x40 -> PeDerivedAddress(0x40) (loc.1)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x40));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+
+            // 3. val = *(uint*)p -> ldloc.1; ldind.u4; stloc.2 (returns None because offset 0x40 != 0x3C)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldind_U4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_2));
+
+            // 4. q = base + val -> ldloc.0; ldloc.2; add; stloc.3 (returns None)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_2));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_3));
+
+            // VirtualProtect(q, 0x1000, 0x04, out oldProtect)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_3));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // 5. *(int*)q = 0
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_3));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(hook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, hook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(hook, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Hook MUST be preserved because dereference was at offset 0x40, not e_lfanew (0x3C)!
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Contains(hook, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_HookWithChainedSmallOffsetsExceedingHeader_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestModChainedSmallOffsets");
+            var globalType = module.GlobalType;
+
+            // Tests cumulative tracking across chained small additions:
+            // pe = base + 0x3C (0x3C)
+            // pe = pe + 0x600 (0x63C <= 0x1000)
+            // pe = pe + 0x600 (0xC3C <= 0x1000)
+            // pe = pe + 0x600 (0x123C > 0x1000 -> None!)
+            // *(int*)pe = 0 -> hook preserved!
+            var hook = new MethodDefUser("ChainedSmallOffsetsHook", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localPe = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            hook.Body.Variables.Add(localBase);
+            hook.Body.Variables.Add(localPe);
+            hook.Body.Variables.Add(localOldProtect);
+
+            var marshalType = new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef);
+            var moduleType = new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef);
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, moduleType.ToTypeSig()),
+                marshalType);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // 1. base = Marshal.GetHINSTANCE(null) -> ModuleBase
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+
+            // 2. pe = base + 0x3C -> PeDerivedAddress(0x3C)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+
+            // 3. pe = pe + 0x600 -> cumulative 0x63C
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x600));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+
+            // 4. pe = pe + 0x600 -> cumulative 0xC3C
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x600));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+
+            // 5. pe = pe + 0x600 -> cumulative 0x123C > 0x1000 -> None!
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x600));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+
+            // VirtualProtect(pe, 0x1000, 0x04, out oldProtect)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // 6. *(int*)pe = 0
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(hook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, hook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(hook, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Hook MUST be preserved because chained small additions accumulated past 0x1000!
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Contains(hook, globalType.Methods);
+        }
+
+        [Fact]
         public void StripProtectorHooks_AmbiguousVirtualProtectHook_IsPreserved()
         {
             var module = new ModuleDefUser("TestMod");
