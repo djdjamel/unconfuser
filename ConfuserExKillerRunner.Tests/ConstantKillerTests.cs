@@ -732,5 +732,82 @@ namespace ConfuserExKillerRunner.Tests
                 }
             }
         }
+
+        [Fact]
+        public void ConstantKiller_Execute_InterDecrypterLdvirtftn_WhenCallerRetained_RetainsTargetDecrypter()
+        {
+            var module = new ModuleDefUser("TestLdvirtftnMod");
+            var asm = new AssemblyDefUser("TestLdvirtftnAsm");
+            asm.Modules.Add(module);
+
+            // Target decrypter B
+            var decrypterB = new MethodDefUser(
+                "DecrypterB",
+                MethodSig.CreateStaticGeneric(1, new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            decrypterB.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+            decrypterB.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 88));
+            decrypterB.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            module.GlobalType.Methods.Add(decrypterB);
+
+            // Caller decrypter A: retained because user call is unrewritten, and loads DecrypterB using ldvirtftn
+            var decrypterA = new MethodDefUser(
+                "DecrypterA",
+                MethodSig.CreateStaticGeneric(1, new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            decrypterA.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+            var bSpec = new MethodSpecUser(decrypterB, new GenericInstMethodSig(new GenericMVar(0)));
+            // ldvirtftn consumes an object reference on stack: ldnull; ldvirtftn DecrypterB; pop
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Ldvirtftn, bSpec));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 42));
+            decrypterA.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            module.GlobalType.Methods.Add(decrypterA);
+
+            var userType = new TypeDefUser("UserType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+
+            // User method calls DecrypterA with non-constant parameter -> unrewritten, DecrypterA is retained
+            var userMethod = new MethodDefUser("UserMethod", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.UInt32))
+            {
+                Body = new CilBody()
+            };
+            var aSpec = new MethodSpecUser(decrypterA, new GenericInstMethodSig(module.CorLibTypes.Int32));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, aSpec));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            userMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            userType.Methods.Add(userMethod);
+
+            using (var ms = new System.IO.MemoryStream())
+            {
+                module.Write(ms);
+                byte[] rawAsm = ms.ToArray();
+
+                var reflAsm = System.Reflection.Assembly.Load(rawAsm);
+                using (var modMD = ModuleDefMD.Load(rawAsm))
+                {
+                    var result = ConstantKillerImpl.Execute(modMD, reflAsm.ManifestModule);
+
+                    Assert.NotNull(result);
+                    Assert.False(result.AllReferencesResolved);
+
+                    // DecrypterA is retained because user call was not rewritten
+                    Assert.NotNull(modMD.GlobalType.FindMethod("DecrypterA"));
+
+                    // DecrypterB MUST ALSO BE RETAINED because live DecrypterA references it via ldvirtftn!
+                    Assert.NotNull(modMD.GlobalType.FindMethod("DecrypterB"));
+                }
+            }
+        }
     }
 }

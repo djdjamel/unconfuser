@@ -543,10 +543,10 @@ namespace ConfuserExKillerRunner.Killers
                 return false;
 
             var instructions = method.Body.Instructions;
-            var peRelatedVars = new HashSet<int>();
-            var peRelatedInstIndices = new HashSet<int>();
+            var moduleBaseVars = new HashSet<int>();
+            var moduleBaseInstIndices = new HashSet<int>();
 
-            // 1. Identify module base sources (Marshal.GetHINSTANCE or pointer operations)
+            // 1. Establish the credible provenance of the module base address (e.g. Marshal.GetHINSTANCE)
             for (int i = 0; i < instructions.Count; i++)
             {
                 var inst = instructions[i];
@@ -554,7 +554,7 @@ namespace ConfuserExKillerRunner.Killers
                 {
                     if (inst.Operand is IMethod called && IsMarshalGetHINSTANCE(called))
                     {
-                        peRelatedInstIndices.Add(i);
+                        moduleBaseInstIndices.Add(i);
                         // Trace through conv / explicit cast to stloc
                         int next = i + 1;
                         while (next < instructions.Count && (instructions[next].OpCode == OpCodes.Conv_I ||
@@ -563,19 +563,26 @@ namespace ConfuserExKillerRunner.Killers
                                                              instructions[next].OpCode == OpCodes.Conv_U8 ||
                                                              (instructions[next].OpCode == OpCodes.Call && instructions[next].Operand?.ToString().Contains("op_Explicit") == true)))
                         {
-                            peRelatedInstIndices.Add(next);
+                            moduleBaseInstIndices.Add(next);
                             next++;
                         }
 
                         if (next < instructions.Count && TryGetVariableIndex(instructions[next], out int vIdx))
                         {
-                            peRelatedVars.Add(vIdx);
+                            moduleBaseVars.Add(vIdx);
                         }
                     }
                 }
             }
 
-            // 2. Identify 0x3C (PE header offset e_lfanew) and pointer arithmetic
+            // If no credible module base provenance is found in the method, it cannot be classified as Anti-Dump
+            if (moduleBaseVars.Count == 0 && moduleBaseInstIndices.Count == 0)
+                return false;
+
+            var peRelatedVars = new HashSet<int>();
+            var peRelatedInstIndices = new HashSet<int>();
+
+            // 2. Identify 0x3C (e_lfanew) offset calculation STRICTLY tied to the proven module base
             for (int i = 0; i < instructions.Count; i++)
             {
                 var inst = instructions[i];
@@ -586,11 +593,35 @@ namespace ConfuserExKillerRunner.Killers
                 if (!is3C)
                     continue;
 
-                // Check forward for pointer add
+                // Check forward for pointer add within a tight window (e.g. up to 4 instructions)
                 for (int j = i + 1; j <= Math.Min(i + 4, instructions.Count - 1); j++)
                 {
                     if (instructions[j].OpCode == OpCodes.Add)
                     {
+                        // VERIFY PROVENANCE: The other operand of Add MUST be the module base!
+                        bool baseLinked = false;
+
+                        // Check instructions immediately preceding the Add (or preceding the 0x3c load)
+                        for (int k = Math.Max(0, i - 4); k < j; k++)
+                        {
+                            if (moduleBaseInstIndices.Contains(k))
+                            {
+                                baseLinked = true;
+                                break;
+                            }
+                            if (TryGetVariableIndex(instructions[k], out int baseVar) && moduleBaseVars.Contains(baseVar))
+                            {
+                                baseLinked = true;
+                                break;
+                            }
+                        }
+
+                        if (!baseLinked)
+                        {
+                            // An independent pointer had 0x3C added to it; this is NOT a PE header pointer!
+                            continue;
+                        }
+
                         peRelatedInstIndices.Add(j);
                         if (j + 1 < instructions.Count && TryGetVariableIndex(instructions[j + 1], out int vIdx))
                         {
@@ -601,7 +632,11 @@ namespace ConfuserExKillerRunner.Killers
                 }
             }
 
-            // 3. Propagate to variables assigned from peRelatedVars with pointer arithmetic/dereferences
+            // If no 0x3c addition linked to the module base was found, it cannot be Anti-Dump
+            if (peRelatedVars.Count == 0 && peRelatedInstIndices.Count == 0)
+                return false;
+
+            // 3. Propagate to variables assigned from peRelatedVars with pointer arithmetic/dereferences (e.g. e_lfanew -> NT header)
             bool varsChanged = true;
             while (varsChanged)
             {
@@ -609,7 +644,7 @@ namespace ConfuserExKillerRunner.Killers
                 for (int i = 0; i < instructions.Count - 1; i++)
                 {
                     var inst = instructions[i];
-                    if (TryGetVariableIndex(inst, out int srcVar) && peRelatedVars.Contains(srcVar))
+                    if (TryGetVariableIndex(inst, out int srcVar) && (peRelatedVars.Contains(srcVar) || moduleBaseVars.Contains(srcVar)))
                     {
                         for (int j = i + 1; j <= Math.Min(i + 6, instructions.Count - 1); j++)
                         {

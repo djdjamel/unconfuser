@@ -1228,6 +1228,17 @@ namespace ConfuserExKillerRunner.Tests
                     new ByRefSig(module.CorLibTypes.UInt32)),
                 new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
 
+            var marshalType = new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef);
+            var moduleType = new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef);
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, moduleType.ToTypeSig()),
+                marshalType);
+
+            // Initialize module base: Marshal.GetHINSTANCE(null) -> stloc.0
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+
             // VirtualProtect call
             antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
             antiDumpMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
@@ -1396,6 +1407,72 @@ namespace ConfuserExKillerRunner.Tests
 
             var result = CleanerKiller.StripProtectorHooks(module);
 
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(hook, cctor.Body.Instructions[0].Operand);
+            Assert.Contains(hook, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_HookWithIndependentPointerOffset3CAndZeroing_IsPreservedAsAmbiguous()
+        {
+            var module = new ModuleDefUser("TestModIndependentPtr");
+            var globalType = module.GlobalType;
+
+            // Scenario: A hook calls VirtualProtect, receives or creates an independent pointer 'p'
+            // (e.g. from an internal buffer or struct, NOT from Marshal.GetHINSTANCE),
+            // calculates 'p + 0x3C', and writes zero to that address.
+            // Because 'p' has no proven provenance from the module base, CleanerKiller
+            // must NOT classify this method as Anti-Dump, and must strictly retain it!
+            var hook = new MethodDefUser("IndependentPtrHook", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localP = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            hook.Body.Variables.Add(localP);
+            hook.Body.Variables.Add(localOldProtect);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // VirtualProtect call on localP
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // Independent pointer calculation: p + 0x3C (NOT from Marshal.GetHINSTANCE!)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0)); // Write zero to (p + 0x3C)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(hook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, hook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(hook, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Hook MUST be preserved because 'p' has no proven provenance from Marshal.GetHINSTANCE!
             Assert.Equal(0, result.StrippedHooksCount);
             Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
             Assert.Equal(hook, cctor.Body.Instructions[0].Operand);

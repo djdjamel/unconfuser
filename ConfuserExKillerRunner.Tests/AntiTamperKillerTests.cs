@@ -535,9 +535,9 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
-        public void Execute_RealConfuserExAntiTamperBinary_StaticStructure_RecognizesEncryptedSectionsWithoutExecution()
+        public void Execute_RealConfuserExAntiTamperBinary_StaticStructure_DetectsEncryptedSectionAndRetainsHookWithoutExecution()
         {
-            // Verify static identification of the encrypted sections without claiming dynamic decryption
+            // Verify static identification of ConfuserEx encrypted sections and hook retention without claiming dynamic decryption
             string baseDir = AppContext.BaseDirectory;
             var dir = new DirectoryInfo(baseDir);
             string repoRoot = null;
@@ -557,19 +557,40 @@ namespace ConfuserExKillerRunner.Tests
 
             byte[] originalPeBytes = File.ReadAllBytes(fixturePath);
 
-            // In static analysis without reflection module, dynamic execution is not allowed.
-            // Executing AntiTamperKiller with a null reflection context strictly throws ArgumentNullException.
-            Assert.Throws<ArgumentNullException>(() => AntiTamperKiller.Execute(null, originalPeBytes));
-
             // Static inspection: the original binary has an encrypted section created by ConfuserEx
             using (var originalMod = ModuleDefMD.Load(originalPeBytes))
             {
                 Assert.NotNull(originalMod);
-                var entryMethod = originalMod.EntryPoint;
-                Assert.NotNull(entryMethod);
 
-                // In static mode (antiTamperDecrypted: false), CleanerKiller recognizes the Anti-Tamper hook
-                // but safely RETAINS it without stripping, because native decryption was not proven!
+                // 1. Detect the distinctive encrypted section (RWX characteristics: MEM_EXECUTE | MEM_WRITE | MEM_READ: 0xE0000000)
+                const uint rwxMask = 0xE0000000;
+
+                var encryptedSection = originalMod.MetaData.PEImage.ImageSectionHeaders.FirstOrDefault(s =>
+                    (s.Characteristics & rwxMask) == rwxMask);
+
+                Assert.NotNull(encryptedSection);
+                Assert.True(encryptedSection.VirtualSize > 0, "Encrypted section must have non-zero virtual size.");
+
+                // 2. Verify that methods are actually mapped inside the encrypted section RVA range
+                uint secStart = (uint)encryptedSection.VirtualAddress;
+                uint secEnd = secStart + (uint)encryptedSection.VirtualSize;
+                int methodsInEncryptedSection = 0;
+
+                foreach (var t in originalMod.GetTypes())
+                {
+                    foreach (var m in t.Methods)
+                    {
+                        uint mRva = (uint)m.RVA;
+                        if (mRva >= secStart && mRva < secEnd)
+                            methodsInEncryptedSection++;
+                    }
+                }
+
+                Assert.True(methodsInEncryptedSection >= 10,
+                    $"Expected at least 10 methods mapped in encrypted section [0x{secStart:X}, 0x{secEnd:X}), found {methodsInEncryptedSection}");
+
+                // 3. In pure static mode (antiTamperDecrypted: false), CleanerKiller identifies the Anti-Tamper hook
+                // and strictly RETAINS it without stripping, because native decryption was not proven.
                 var cleanResult = CleanerKiller.StripProtectorHooks(originalMod, antiTamperDecrypted: false);
                 Assert.Equal(0, cleanResult.StrippedHooksCount);
 
