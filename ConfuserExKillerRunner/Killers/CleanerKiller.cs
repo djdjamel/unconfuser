@@ -962,7 +962,7 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var b = PopStack(stack);
                 var a = PopStack(stack);
-                if (a == b)
+                if (a.Kind == PeSymbolicKind.Zero && b.Kind == PeSymbolicKind.Zero)
                 {
                     PushStack(stack, PeSymbolicSlot.Zero);
                 }
@@ -975,6 +975,8 @@ namespace ConfuserExKillerRunner.Killers
                 }
                 else
                 {
+                    // CRITICAL: Two unknown/abstract values (None) are NOT proven to be equal at runtime.
+                    // Xor of unknown operands strictly evaluates to None (never assumed to be Zero).
                     PushStack(stack, PeSymbolicSlot.None);
                 }
                 return;
@@ -1047,7 +1049,7 @@ namespace ConfuserExKillerRunner.Killers
                 code == Code.Ldind_I8 || code == Code.Ldind_U1 || code == Code.Ldind_U2 || code == Code.Ldind_U4)
             {
                 var addr = PopStack(stack);
-                PushStack(stack, EvaluateLdind(addr));
+                PushStack(stack, EvaluateLdind(addr, code));
                 return;
             }
 
@@ -1355,14 +1357,17 @@ namespace ConfuserExKillerRunner.Killers
             return PeSymbolicSlot.None;
         }
 
-        private static PeSymbolicSlot EvaluateLdind(PeSymbolicSlot addr)
+        private static PeSymbolicSlot EvaluateLdind(PeSymbolicSlot addr, Code code)
         {
             // In the PE specification, offset 0x3C (IMAGE_DOS_HEADER.e_lfanew) specifically holds
-            // the relative file offset to the IMAGE_NT_HEADERS.
-            // Only a dereference directly at (ModuleBase + 0x3C) yields the proven e_lfanew field.
-            // A read at any other address (or an address without proven offset 0x3C) does NOT prove
-            // an offset to the PE headers and returns None.
-            if (addr.Kind == PeSymbolicKind.PeDerivedAddress &&
+            // the 4-byte (32-bit) relative file offset to IMAGE_NT_HEADERS.
+            // Only a full 32-bit (or native int) dereference (ldind.i4, ldind.u4, ldind.i) directly at
+            // (ModuleBase + 0x3C) yields the proven e_lfanew field.
+            // Narrow partial reads (ldind.u1, ldind.i1, ldind.u2, ldind.i2) or reads at any other offset
+            // do NOT constitute a valid e_lfanew pointer derivation and produce None.
+            bool is32BitRead = code == Code.Ldind_I4 || code == Code.Ldind_U4 || code == Code.Ldind_I;
+            if (is32BitRead &&
+                addr.Kind == PeSymbolicKind.PeDerivedAddress &&
                 addr.ConcreteValue.HasValue &&
                 addr.ConcreteValue.Value == 0x3C)
             {

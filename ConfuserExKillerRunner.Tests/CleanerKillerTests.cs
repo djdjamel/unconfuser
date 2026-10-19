@@ -2818,6 +2818,198 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
+        public void StripProtectorHooks_HookWithPeAddressAndXorOfIndependentUnknownValues_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestModXorUnknownValues");
+            var globalType = module.GlobalType;
+
+            // Scenario specifically requested by code review:
+            // 1. base = Marshal.GetHINSTANCE(...) -> ModuleBase
+            // 2. pe = base + 0x3C -> PeDerivedAddress(0x3C)
+            // 3. val = arg0 ^ arg1 (XOR between two independent unknown/abstract arguments: None ^ None)
+            // 4. *(int*)pe = val (stind.i4)
+            //
+            // Two abstract None values are NOT proven equal at runtime.
+            // Under our corrected model, None ^ None evaluates to None (never assumed to be Zero).
+            // Therefore, writing this value to pe does not constitute PE zeroing, and the hook is strictly preserved!
+            var hook = new MethodDefUser("XorUnknownValuesHook",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32, module.CorLibTypes.Int32))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localPe = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            hook.Body.Variables.Add(localBase);
+            hook.Body.Variables.Add(localPe);
+            hook.Body.Variables.Add(localOldProtect);
+
+            var marshalType = new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef);
+            var moduleType = new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef);
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, moduleType.ToTypeSig()),
+                marshalType);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // 1. base = Marshal.GetHINSTANCE(null) -> ModuleBase
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+
+            // 2. pe = base + 0x3C -> PeDerivedAddress(0x3C)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+
+            // VirtualProtect(pe, 0x1000, 0x04, out oldProtect)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // 3. *(int*)pe = arg0 ^ arg1 (ldloc.1; ldarg.0; ldarg.1; xor; stind.i4)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Xor));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(hook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_2));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, hook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(hook, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Hook MUST be preserved because arg0 ^ arg1 was not proven to be zero!
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Contains(hook, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_HookWithNarrowByteReadOfELfanew_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestModNarrowByteRead");
+            var globalType = module.GlobalType;
+
+            // Scenario specifically requested by code review:
+            // 1. base = Marshal.GetHINSTANCE(...) -> ModuleBase
+            // 2. pe = base + 0x3C -> PeDerivedAddress(0x3C)
+            // 3. val = *(byte*)pe using ldind.u1 (1-byte read, NOT the full 32-bit e_lfanew field!)
+            // 4. q = base + val (EvaluateLdind rejects 1-byte read -> val is None -> q is None)
+            // 5. *(int*)q = 0 (stind.i4)
+            //
+            // A 1-byte read does not read the full 32-bit e_lfanew displacement to IMAGE_NT_HEADERS.
+            // Under our corrected analyzer, EvaluateLdind requires a full 32-bit/native read (ldind.i4, ldind.u4, ldind.i).
+            // Partial reads produce None, q evaluates to None, and the hook is strictly preserved!
+            var hook = new MethodDefUser("NarrowByteReadHook", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            var localBase = new Local(module.CorLibTypes.IntPtr);
+            var localPe = new Local(module.CorLibTypes.IntPtr);
+            var localVal = new Local(module.CorLibTypes.Byte);
+            var localQ = new Local(module.CorLibTypes.IntPtr);
+            var localOldProtect = new Local(module.CorLibTypes.UInt32);
+            hook.Body.Variables.Add(localBase);
+            hook.Body.Variables.Add(localPe);
+            hook.Body.Variables.Add(localVal);
+            hook.Body.Variables.Add(localQ);
+            hook.Body.Variables.Add(localOldProtect);
+
+            var marshalType = new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef);
+            var moduleType = new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef);
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, moduleType.ToTypeSig()),
+                marshalType);
+
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            // 1. base = Marshal.GetHINSTANCE(null) -> ModuleBase
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+
+            // 2. pe = base + 0x3C -> PeDerivedAddress(0x3C)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_1));
+
+            // 3. val = *(byte*)pe -> ldloc.1; ldind.u1; stloc.2 (narrow byte read!)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldind_U1));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_2));
+
+            // 4. q = base + val -> ldloc.0; ldloc.2; conv.i; add; stloc.3 (q is None!)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_2));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Conv_I));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_3));
+
+            // VirtualProtect(q, 0x1000, 0x04, out oldProtect)
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_3));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x04));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloca_S, localOldProtect));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // 5. *(int*)q = 0
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_3));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            hook.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(hook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, hook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var auditReport = new ConfuserExKillerRunner.Analysis.AuditReport { CanLoad = true };
+            ConfuserExKillerRunner.Analysis.QualityAuditor.AuditMethod(hook, auditReport);
+            Assert.Equal("CLEAN", auditReport.Status);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Hook MUST be preserved because ldind.u1 is a partial 1-byte read, not full 32-bit e_lfanew!
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Contains(hook, globalType.Methods);
+        }
+
+        [Fact]
         public void StripProtectorHooks_AmbiguousVirtualProtectHook_IsPreserved()
         {
             var module = new ModuleDefUser("TestMod");
