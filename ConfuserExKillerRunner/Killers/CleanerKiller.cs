@@ -544,7 +544,13 @@ namespace ConfuserExKillerRunner.Killers
             PeHeaderOffset = 2,    // Constant 0x3C / 60 (e_lfanew)
             PeHeaderField = 3,     // Field loaded from PE header (e.g. *(ModuleBase + 0x3C))
             PeDerivedAddress = 4,  // Derived pointer to PE header: ModuleBase + 0x3C, ModuleBase + e_lfanew, etc.
-            Zero = 5               // Integer 0, null, or zeroed value
+            Zero = 5,              // Integer 0, null, or zeroed value
+            NumericOffset = 6      // Demonstrated numeric integer displacement (ldc.i4, ldc.i8, masks, alignments)
+        }
+
+        private static bool IsNumeric(PeSymbolicValue v)
+        {
+            return v == PeSymbolicValue.NumericOffset || v == PeSymbolicValue.Zero || v == PeSymbolicValue.PeHeaderOffset;
         }
 
         private sealed class PeSymbolicState
@@ -757,25 +763,38 @@ namespace ConfuserExKillerRunner.Killers
                 return;
             }
 
-            // 3. Constants: 0x3C / 60 (PeHeaderOffset) or 0 (Zero)
-            if (code == Code.Ldc_I4 || code == Code.Ldc_I4_S)
+            // 3. Constants: ldc.i4, ldc.i8, ldnull
+            if (inst.IsLdcI4())
             {
-                int val = 0;
-                if (inst.Operand is int iv) val = iv;
-                else if (inst.Operand is sbyte sb) val = sb;
-                else if (inst.Operand is byte b) val = b;
-
+                int val = inst.GetLdcI4Value();
                 if (val == 0x3C || val == 60)
                     PushStack(stack, PeSymbolicValue.PeHeaderOffset);
                 else if (val == 0)
                     PushStack(stack, PeSymbolicValue.Zero);
                 else
-                    PushStack(stack, PeSymbolicValue.None);
+                    PushStack(stack, PeSymbolicValue.NumericOffset);
                 return;
             }
 
-            if (code == Code.Ldc_I4_0 || code == Code.Ldnull ||
-                (code == Code.Ldc_I8 && Equals(inst.Operand, 0L)))
+            if (code == Code.Ldc_I8)
+            {
+                if (inst.Operand is long lv)
+                {
+                    if (lv == 0x3CL || lv == 60L)
+                        PushStack(stack, PeSymbolicValue.PeHeaderOffset);
+                    else if (lv == 0L)
+                        PushStack(stack, PeSymbolicValue.Zero);
+                    else
+                        PushStack(stack, PeSymbolicValue.NumericOffset);
+                }
+                else
+                {
+                    PushStack(stack, PeSymbolicValue.NumericOffset);
+                }
+                return;
+            }
+
+            if (code == Code.Ldnull)
             {
                 PushStack(stack, PeSymbolicValue.Zero);
                 return;
@@ -810,7 +829,7 @@ namespace ConfuserExKillerRunner.Killers
             }
 
             // 7. Pointer arithmetic: Add
-            if (code == Code.Add)
+            if (code == Code.Add || code == Code.Add_Ovf || code == Code.Add_Ovf_Un)
             {
                 var b = PopStack(stack);
                 var a = PopStack(stack);
@@ -819,7 +838,7 @@ namespace ConfuserExKillerRunner.Killers
             }
 
             // 8. Pointer arithmetic: Sub
-            if (code == Code.Sub)
+            if (code == Code.Sub || code == Code.Sub_Ovf || code == Code.Sub_Ovf_Un)
             {
                 var b = PopStack(stack);
                 var a = PopStack(stack);
@@ -827,7 +846,7 @@ namespace ConfuserExKillerRunner.Killers
                 return;
             }
 
-            // 9. Bitwise And (pointer alignment)
+            // 9. Bitwise And (pointer alignment or mask)
             if (code == Code.And)
             {
                 var b = PopStack(stack);
@@ -836,7 +855,58 @@ namespace ConfuserExKillerRunner.Killers
                 return;
             }
 
-            // 10. Pointer dereference (ldind)
+            // 10. Additional numeric arithmetic / bitwise operations
+            if (code == Code.Mul || code == Code.Mul_Ovf || code == Code.Mul_Ovf_Un)
+            {
+                var b = PopStack(stack);
+                var a = PopStack(stack);
+                if (IsNumeric(a) && IsNumeric(b))
+                {
+                    if (a == PeSymbolicValue.Zero || b == PeSymbolicValue.Zero)
+                        PushStack(stack, PeSymbolicValue.Zero);
+                    else
+                        PushStack(stack, PeSymbolicValue.NumericOffset);
+                }
+                else
+                {
+                    PushStack(stack, PeSymbolicValue.None);
+                }
+                return;
+            }
+
+            if (code == Code.Or || code == Code.Xor)
+            {
+                var b = PopStack(stack);
+                var a = PopStack(stack);
+                if (IsNumeric(a) && IsNumeric(b))
+                    PushStack(stack, PeSymbolicValue.NumericOffset);
+                else
+                    PushStack(stack, PeSymbolicValue.None);
+                return;
+            }
+
+            if (code == Code.Shl || code == Code.Shr || code == Code.Shr_Un)
+            {
+                var b = PopStack(stack);
+                var a = PopStack(stack);
+                if (IsNumeric(a) && IsNumeric(b))
+                    PushStack(stack, PeSymbolicValue.NumericOffset);
+                else
+                    PushStack(stack, PeSymbolicValue.None);
+                return;
+            }
+
+            if (code == Code.Neg || code == Code.Not)
+            {
+                var a = PopStack(stack);
+                if (IsNumeric(a))
+                    PushStack(stack, PeSymbolicValue.NumericOffset);
+                else
+                    PushStack(stack, PeSymbolicValue.None);
+                return;
+            }
+
+            // 11. Pointer dereference (ldind)
             if (code == Code.Ldind_I || code == Code.Ldind_I1 || code == Code.Ldind_I2 || code == Code.Ldind_I4 ||
                 code == Code.Ldind_I8 || code == Code.Ldind_U1 || code == Code.Ldind_U2 || code == Code.Ldind_U4)
             {
@@ -845,7 +915,7 @@ namespace ConfuserExKillerRunner.Killers
                 return;
             }
 
-            // 11. Pointer write (stind): Check for zeroing of PE address or ModuleBase
+            // 12. Pointer write (stind): Check for zeroing of PE address or ModuleBase
             if (code == Code.Stind_I || code == Code.Stind_I1 || code == Code.Stind_I2 || code == Code.Stind_I4 || code == Code.Stind_I8)
             {
                 var val = PopStack(stack);
@@ -858,7 +928,7 @@ namespace ConfuserExKillerRunner.Killers
                 return;
             }
 
-            // 12. Block write (initblk)
+            // 13. Block write (initblk)
             if (code == Code.Initblk)
             {
                 var size = PopStack(stack);
@@ -872,7 +942,7 @@ namespace ConfuserExKillerRunner.Killers
                 return;
             }
 
-            // 13. Method calls (RtlZeroMemory, memset, etc.)
+            // 14. Method calls (RtlZeroMemory, memset, etc.)
             if ((code == Code.Call || code == Code.Callvirt) && inst.Operand is IMethod calledFn)
             {
                 string fn = calledFn.Name;
@@ -899,7 +969,7 @@ namespace ConfuserExKillerRunner.Killers
                 }
             }
 
-            // 14. Dup & Pop
+            // 15. Dup & Pop
             if (code == Code.Dup)
             {
                 var val = PopStack(stack);
@@ -913,7 +983,7 @@ namespace ConfuserExKillerRunner.Killers
                 return;
             }
 
-            // 15. Fallback for all other instructions
+            // 16. Fallback for all other instructions
             inst.CalculateStackUsage(out int pushesCount, out int popsCount);
             for (int p = 0; p < popsCount; p++) PopStack(stack);
             for (int p = 0; p < pushesCount; p++) PushStack(stack, PeSymbolicValue.None);
@@ -933,25 +1003,64 @@ namespace ConfuserExKillerRunner.Killers
             {
                 return PeSymbolicValue.PeDerivedAddress;
             }
-            // Offset calculation from already derived PE address -> PeDerivedAddress
-            if (a == PeSymbolicValue.PeDerivedAddress || b == PeSymbolicValue.PeDerivedAddress)
+            // Offset calculation from already derived PE address:
+            // CRITICAL: The offset MUST be a demonstrated numeric displacement (NumericOffset, Zero, PeHeaderOffset).
+            // If the operand is None (an unknown pointer or arbitrary unproven value), provenance CANNOT be preserved!
+            if (a == PeSymbolicValue.PeDerivedAddress && IsNumeric(b))
             {
                 return PeSymbolicValue.PeDerivedAddress;
+            }
+            if (b == PeSymbolicValue.PeDerivedAddress && IsNumeric(a))
+            {
+                return PeSymbolicValue.PeDerivedAddress;
+            }
+            // Numeric + Numeric -> Numeric
+            if (IsNumeric(a) && IsNumeric(b))
+            {
+                if (a == PeSymbolicValue.Zero && b == PeSymbolicValue.Zero)
+                    return PeSymbolicValue.Zero;
+                return PeSymbolicValue.NumericOffset;
             }
             return PeSymbolicValue.None;
         }
 
         private static PeSymbolicValue CombineSub(PeSymbolicValue a, PeSymbolicValue b)
         {
-            if (a == PeSymbolicValue.PeDerivedAddress)
+            // PeDerivedAddress - NumericOffset -> PeDerivedAddress
+            // CRITICAL: The subtrahend MUST be a demonstrated numeric displacement.
+            // If b is None or an independent pointer, provenance is lost!
+            if (a == PeSymbolicValue.PeDerivedAddress && IsNumeric(b))
+            {
                 return PeSymbolicValue.PeDerivedAddress;
+            }
+            // Numeric - Numeric -> Numeric
+            if (IsNumeric(a) && IsNumeric(b))
+            {
+                return PeSymbolicValue.NumericOffset;
+            }
             return PeSymbolicValue.None;
         }
 
         private static PeSymbolicValue CombineAnd(PeSymbolicValue a, PeSymbolicValue b)
         {
-            if (a == PeSymbolicValue.PeDerivedAddress || b == PeSymbolicValue.PeDerivedAddress)
+            // PeDerivedAddress & NumericOffset (pointer alignment mask, e.g. ~3 / -4) -> PeDerivedAddress
+            // CRITICAL: The mask MUST be a demonstrated numeric value.
+            // If the operand is None or an independent pointer, provenance is lost!
+            if (a == PeSymbolicValue.PeDerivedAddress && IsNumeric(b))
+            {
                 return PeSymbolicValue.PeDerivedAddress;
+            }
+            if (b == PeSymbolicValue.PeDerivedAddress && IsNumeric(a))
+            {
+                return PeSymbolicValue.PeDerivedAddress;
+            }
+            // Numeric & Numeric -> Numeric
+            if (IsNumeric(a) && IsNumeric(b))
+            {
+                if (a == PeSymbolicValue.Zero || b == PeSymbolicValue.Zero)
+                    return PeSymbolicValue.Zero;
+                return PeSymbolicValue.NumericOffset;
+            }
             return PeSymbolicValue.None;
         }
 
