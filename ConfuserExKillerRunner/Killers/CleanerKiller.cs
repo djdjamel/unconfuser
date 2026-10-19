@@ -537,44 +537,93 @@ namespace ConfuserExKillerRunner.Killers
                    string.Equals(name, "OutputDebugStringW", StringComparison.OrdinalIgnoreCase);
         }
 
-        private enum PeSymbolicValue
+        private enum PeSymbolicKind
         {
             None = 0,
             ModuleBase = 1,        // Proven origin from Marshal.GetHINSTANCE(...)
             PeHeaderOffset = 2,    // Constant 0x3C / 60 (e_lfanew)
             PeHeaderField = 3,     // Field loaded from PE header (e.g. *(ModuleBase + 0x3C))
-            PeDerivedAddress = 4,  // Derived pointer to PE header: ModuleBase + 0x3C, ModuleBase + e_lfanew, etc.
+            PeDerivedAddress = 4,  // Derived pointer to PE header space
             Zero = 5,              // Integer 0, null, or zeroed value
-            NumericOffset = 6      // Demonstrated numeric integer displacement (ldc.i4, ldc.i8, masks, alignments)
+            NumericOffset = 6      // Demonstrated numeric integer displacement
         }
 
-        private static bool IsNumeric(PeSymbolicValue v)
+        private readonly struct PeSymbolicSlot : IEquatable<PeSymbolicSlot>
         {
-            return v == PeSymbolicValue.NumericOffset || v == PeSymbolicValue.Zero || v == PeSymbolicValue.PeHeaderOffset;
+            public readonly PeSymbolicKind Kind;
+            public readonly int? ConcreteValue;
+
+            public PeSymbolicSlot(PeSymbolicKind kind, int? concreteValue = null)
+            {
+                Kind = kind;
+                ConcreteValue = concreteValue;
+            }
+
+            public static readonly PeSymbolicSlot None = new(PeSymbolicKind.None);
+            public static readonly PeSymbolicSlot ModuleBase = new(PeSymbolicKind.ModuleBase);
+            public static readonly PeSymbolicSlot PeHeaderOffset = new(PeSymbolicKind.PeHeaderOffset, 0x3C);
+            public static readonly PeSymbolicSlot PeHeaderField = new(PeSymbolicKind.PeHeaderField);
+            public static readonly PeSymbolicSlot PeDerivedAddress = new(PeSymbolicKind.PeDerivedAddress);
+            public static readonly PeSymbolicSlot Zero = new(PeSymbolicKind.Zero, 0);
+            public static readonly PeSymbolicSlot NumericOffset = new(PeSymbolicKind.NumericOffset);
+
+            public bool Equals(PeSymbolicSlot other) => Kind == other.Kind && ConcreteValue == other.ConcreteValue;
+            public override bool Equals(object obj) => obj is PeSymbolicSlot other && Equals(other);
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    return ((int)Kind * 397) ^ (ConcreteValue.HasValue ? ConcreteValue.Value : -1);
+                }
+            }
+            public static bool operator ==(PeSymbolicSlot left, PeSymbolicSlot right) => left.Equals(right);
+            public static bool operator !=(PeSymbolicSlot left, PeSymbolicSlot right) => !left.Equals(right);
+        }
+
+        private const int MaxPeHeaderDisplacement = 0x1000; // 4096 bytes (bounds the entire PE header space)
+
+        private static bool IsNumeric(PeSymbolicSlot v)
+        {
+            return v.Kind == PeSymbolicKind.NumericOffset || v.Kind == PeSymbolicKind.Zero || v.Kind == PeSymbolicKind.PeHeaderOffset;
+        }
+
+        private static bool IsAlignmentMask(int mask)
+        {
+            return mask == -2 || mask == -4 || mask == -8 || mask == -16 || mask == -32 || mask == -64;
+        }
+
+        private static PeSymbolicSlot CreateNumericSlot(int val)
+        {
+            if (val == 0)
+                return PeSymbolicSlot.Zero;
+            if (val == 0x3C || val == 60)
+                return PeSymbolicSlot.PeHeaderOffset;
+            return new PeSymbolicSlot(PeSymbolicKind.NumericOffset, val);
         }
 
         private sealed class PeSymbolicState
         {
-            public readonly PeSymbolicValue[] Locals;
-            public readonly PeSymbolicValue[] Stack;
+            public readonly PeSymbolicSlot[] Locals;
+            public readonly PeSymbolicSlot[] Stack;
 
-            public PeSymbolicState(int localCount, PeSymbolicValue[] stack)
+            public PeSymbolicState(int localCount, PeSymbolicSlot[] stack)
             {
-                Locals = new PeSymbolicValue[localCount];
-                Stack = stack ?? Array.Empty<PeSymbolicValue>();
+                Locals = new PeSymbolicSlot[localCount];
+                for (int i = 0; i < localCount; i++) Locals[i] = PeSymbolicSlot.None;
+                Stack = stack ?? Array.Empty<PeSymbolicSlot>();
             }
 
-            public PeSymbolicState(PeSymbolicValue[] locals, PeSymbolicValue[] stack)
+            public PeSymbolicState(PeSymbolicSlot[] locals, PeSymbolicSlot[] stack)
             {
                 Locals = locals;
-                Stack = stack ?? Array.Empty<PeSymbolicValue>();
+                Stack = stack ?? Array.Empty<PeSymbolicSlot>();
             }
 
             public PeSymbolicState Clone()
             {
-                var newLocals = new PeSymbolicValue[Locals.Length];
+                var newLocals = new PeSymbolicSlot[Locals.Length];
                 Array.Copy(Locals, newLocals, Locals.Length);
-                var newStack = new PeSymbolicValue[Stack.Length];
+                var newStack = new PeSymbolicSlot[Stack.Length];
                 Array.Copy(Stack, newStack, Stack.Length);
                 return new PeSymbolicState(newLocals, newStack);
             }
@@ -624,13 +673,19 @@ namespace ConfuserExKillerRunner.Killers
                 return changed;
             }
 
-            private static PeSymbolicValue MergeValue(PeSymbolicValue a, PeSymbolicValue b)
+            private static PeSymbolicSlot MergeValue(PeSymbolicSlot a, PeSymbolicSlot b)
             {
                 // Sound conservative join:
-                // Provenance is only guaranteed if both branches agree on the symbolic value.
-                // Disagreeing values (e.g. ModuleBase on path 1 vs PeHeaderOffset on path 2)
-                // must NOT be united into a conjunctive tag, which would fabricate false provenance.
-                return (a == b) ? a : PeSymbolicValue.None;
+                // If both agree on kind and value, preserve it.
+                if (a == b) return a;
+
+                // If both are numeric, preserve numeric offset without concrete value
+                if (IsNumeric(a) && IsNumeric(b))
+                {
+                    return PeSymbolicSlot.NumericOffset;
+                }
+
+                return PeSymbolicSlot.None;
             }
         }
 
@@ -667,7 +722,7 @@ namespace ConfuserExKillerRunner.Killers
                     instToIndex[instructions[i]] = i;
 
                 var entryStates = new PeSymbolicState[instructions.Count];
-                entryStates[0] = new PeSymbolicState(varCount, Array.Empty<PeSymbolicValue>());
+                entryStates[0] = new PeSymbolicState(varCount, Array.Empty<PeSymbolicSlot>());
 
                 var worklist = new Queue<int>();
                 var inWorklist = new bool[instructions.Count];
@@ -685,8 +740,8 @@ namespace ConfuserExKillerRunner.Killers
                     var state = entryStates[i];
                     if (state == null) continue;
 
-                    var curStack = new List<PeSymbolicValue>(state.Stack);
-                    var curLocals = new PeSymbolicValue[state.Locals.Length];
+                    var curStack = new List<PeSymbolicSlot>(state.Stack);
+                    var curLocals = new PeSymbolicSlot[state.Locals.Length];
                     Array.Copy(state.Locals, curLocals, curLocals.Length);
 
                     ExecuteSymbolicInstruction(inst, curStack, curLocals, ref zeroingDetected);
@@ -737,8 +792,8 @@ namespace ConfuserExKillerRunner.Killers
 
         private static void ExecuteSymbolicInstruction(
             Instruction inst,
-            List<PeSymbolicValue> stack,
-            PeSymbolicValue[] locals,
+            List<PeSymbolicSlot> stack,
+            PeSymbolicSlot[] locals,
             ref bool zeroingDetected)
         {
             var op = inst.OpCode;
@@ -750,12 +805,13 @@ namespace ConfuserExKillerRunner.Killers
             {
                 inst.CalculateStackUsage(out int pushes, out int pops);
                 for (int p = 0; p < pops; p++) PopStack(stack);
-                PushStack(stack, PeSymbolicValue.ModuleBase);
+                PushStack(stack, PeSymbolicSlot.ModuleBase);
                 return;
             }
 
             // 2. Type conversions / casts that preserve pointer tag
-            if (code == Code.Conv_I || code == Code.Conv_U || code == Code.Conv_U4 || code == Code.Conv_U8 ||
+            if (code == Code.Conv_I || code == Code.Conv_U || code == Code.Conv_I4 || code == Code.Conv_U4 ||
+                code == Code.Conv_I8 || code == Code.Conv_U8 ||
                 ((code == Code.Call || code == Code.Callvirt) && inst.Operand?.ToString().Contains("op_Explicit") == true))
             {
                 var val = PopStack(stack);
@@ -767,12 +823,7 @@ namespace ConfuserExKillerRunner.Killers
             if (inst.IsLdcI4())
             {
                 int val = inst.GetLdcI4Value();
-                if (val == 0x3C || val == 60)
-                    PushStack(stack, PeSymbolicValue.PeHeaderOffset);
-                else if (val == 0)
-                    PushStack(stack, PeSymbolicValue.Zero);
-                else
-                    PushStack(stack, PeSymbolicValue.NumericOffset);
+                PushStack(stack, CreateNumericSlot(val));
                 return;
             }
 
@@ -780,23 +831,21 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (inst.Operand is long lv)
                 {
-                    if (lv == 0x3CL || lv == 60L)
-                        PushStack(stack, PeSymbolicValue.PeHeaderOffset);
-                    else if (lv == 0L)
-                        PushStack(stack, PeSymbolicValue.Zero);
+                    if (lv >= int.MinValue && lv <= int.MaxValue)
+                        PushStack(stack, CreateNumericSlot((int)lv));
                     else
-                        PushStack(stack, PeSymbolicValue.NumericOffset);
+                        PushStack(stack, new PeSymbolicSlot(PeSymbolicKind.NumericOffset, null));
                 }
                 else
                 {
-                    PushStack(stack, PeSymbolicValue.NumericOffset);
+                    PushStack(stack, PeSymbolicSlot.NumericOffset);
                 }
                 return;
             }
 
             if (code == Code.Ldnull)
             {
-                PushStack(stack, PeSymbolicValue.Zero);
+                PushStack(stack, PeSymbolicSlot.Zero);
                 return;
             }
 
@@ -807,7 +856,7 @@ namespace ConfuserExKillerRunner.Killers
                 if (TryGetVariableIndex(inst, out int idx) && idx >= 0 && idx < locals.Length)
                     PushStack(stack, locals[idx]);
                 else
-                    PushStack(stack, PeSymbolicValue.None);
+                    PushStack(stack, PeSymbolicSlot.None);
                 return;
             }
 
@@ -824,7 +873,7 @@ namespace ConfuserExKillerRunner.Killers
             // 6. Local variable address (Ldloca)
             if (code == Code.Ldloca || code == Code.Ldloca_S)
             {
-                PushStack(stack, PeSymbolicValue.None);
+                PushStack(stack, PeSymbolicSlot.None);
                 return;
             }
 
@@ -860,28 +909,61 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var b = PopStack(stack);
                 var a = PopStack(stack);
-                if (IsNumeric(a) && IsNumeric(b))
+                if (a.Kind == PeSymbolicKind.Zero || b.Kind == PeSymbolicKind.Zero)
                 {
-                    if (a == PeSymbolicValue.Zero || b == PeSymbolicValue.Zero)
-                        PushStack(stack, PeSymbolicValue.Zero);
+                    PushStack(stack, PeSymbolicSlot.Zero);
+                }
+                else if (IsNumeric(a) && IsNumeric(b))
+                {
+                    if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
+                        PushStack(stack, CreateNumericSlot(unchecked(a.ConcreteValue.Value * b.ConcreteValue.Value)));
                     else
-                        PushStack(stack, PeSymbolicValue.NumericOffset);
+                        PushStack(stack, PeSymbolicSlot.NumericOffset);
                 }
                 else
                 {
-                    PushStack(stack, PeSymbolicValue.None);
+                    PushStack(stack, PeSymbolicSlot.None);
                 }
                 return;
             }
 
-            if (code == Code.Or || code == Code.Xor)
+            if (code == Code.Or)
             {
                 var b = PopStack(stack);
                 var a = PopStack(stack);
                 if (IsNumeric(a) && IsNumeric(b))
-                    PushStack(stack, PeSymbolicValue.NumericOffset);
+                {
+                    if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
+                        PushStack(stack, CreateNumericSlot(a.ConcreteValue.Value | b.ConcreteValue.Value));
+                    else
+                        PushStack(stack, PeSymbolicSlot.NumericOffset);
+                }
                 else
-                    PushStack(stack, PeSymbolicValue.None);
+                {
+                    PushStack(stack, PeSymbolicSlot.None);
+                }
+                return;
+            }
+
+            if (code == Code.Xor)
+            {
+                var b = PopStack(stack);
+                var a = PopStack(stack);
+                if (a == b)
+                {
+                    PushStack(stack, PeSymbolicSlot.Zero);
+                }
+                else if (IsNumeric(a) && IsNumeric(b))
+                {
+                    if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
+                        PushStack(stack, CreateNumericSlot(a.ConcreteValue.Value ^ b.ConcreteValue.Value));
+                    else
+                        PushStack(stack, PeSymbolicSlot.NumericOffset);
+                }
+                else
+                {
+                    PushStack(stack, PeSymbolicSlot.None);
+                }
                 return;
             }
 
@@ -889,20 +971,61 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var b = PopStack(stack);
                 var a = PopStack(stack);
-                if (IsNumeric(a) && IsNumeric(b))
-                    PushStack(stack, PeSymbolicValue.NumericOffset);
+                if (a.Kind == PeSymbolicKind.Zero)
+                {
+                    PushStack(stack, PeSymbolicSlot.Zero);
+                }
+                else if (IsNumeric(a) && IsNumeric(b))
+                {
+                    if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
+                    {
+                        int shift = b.ConcreteValue.Value & 0x1F;
+                        int res = code == Code.Shl ? (a.ConcreteValue.Value << shift) :
+                                  code == Code.Shr ? (a.ConcreteValue.Value >> shift) :
+                                  (int)((uint)a.ConcreteValue.Value >> shift);
+                        PushStack(stack, CreateNumericSlot(res));
+                    }
+                    else
+                    {
+                        PushStack(stack, PeSymbolicSlot.NumericOffset);
+                    }
+                }
                 else
-                    PushStack(stack, PeSymbolicValue.None);
+                {
+                    PushStack(stack, PeSymbolicSlot.None);
+                }
                 return;
             }
 
-            if (code == Code.Neg || code == Code.Not)
+            if (code == Code.Neg)
+            {
+                var a = PopStack(stack);
+                if (a.Kind == PeSymbolicKind.Zero)
+                    PushStack(stack, PeSymbolicSlot.Zero);
+                else if (IsNumeric(a))
+                {
+                    if (a.ConcreteValue.HasValue)
+                        PushStack(stack, CreateNumericSlot(unchecked(-a.ConcreteValue.Value)));
+                    else
+                        PushStack(stack, PeSymbolicSlot.NumericOffset);
+                }
+                else
+                    PushStack(stack, PeSymbolicSlot.None);
+                return;
+            }
+
+            if (code == Code.Not)
             {
                 var a = PopStack(stack);
                 if (IsNumeric(a))
-                    PushStack(stack, PeSymbolicValue.NumericOffset);
+                {
+                    if (a.ConcreteValue.HasValue)
+                        PushStack(stack, CreateNumericSlot(~a.ConcreteValue.Value));
+                    else
+                        PushStack(stack, PeSymbolicSlot.NumericOffset);
+                }
                 else
-                    PushStack(stack, PeSymbolicValue.None);
+                    PushStack(stack, PeSymbolicSlot.None);
                 return;
             }
 
@@ -920,8 +1043,8 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var val = PopStack(stack);
                 var addr = PopStack(stack);
-                if ((addr == PeSymbolicValue.PeDerivedAddress || addr == PeSymbolicValue.ModuleBase) &&
-                    val == PeSymbolicValue.Zero)
+                if ((addr.Kind == PeSymbolicKind.PeDerivedAddress || addr.Kind == PeSymbolicKind.ModuleBase) &&
+                    val.Kind == PeSymbolicKind.Zero)
                 {
                     zeroingDetected = true;
                 }
@@ -934,8 +1057,8 @@ namespace ConfuserExKillerRunner.Killers
                 var size = PopStack(stack);
                 var val = PopStack(stack);
                 var addr = PopStack(stack);
-                if ((addr == PeSymbolicValue.PeDerivedAddress || addr == PeSymbolicValue.ModuleBase) &&
-                    val == PeSymbolicValue.Zero)
+                if ((addr.Kind == PeSymbolicKind.PeDerivedAddress || addr.Kind == PeSymbolicKind.ModuleBase) &&
+                    val.Kind == PeSymbolicKind.Zero)
                 {
                     zeroingDetected = true;
                 }
@@ -950,7 +1073,7 @@ namespace ConfuserExKillerRunner.Killers
                 {
                     var count = PopStack(stack);
                     var dest = PopStack(stack);
-                    if (dest == PeSymbolicValue.PeDerivedAddress || dest == PeSymbolicValue.ModuleBase)
+                    if (dest.Kind == PeSymbolicKind.PeDerivedAddress || dest.Kind == PeSymbolicKind.ModuleBase)
                         zeroingDetected = true;
                     return;
                 }
@@ -959,8 +1082,8 @@ namespace ConfuserExKillerRunner.Killers
                     var count = PopStack(stack);
                     var c = PopStack(stack);
                     var dest = PopStack(stack);
-                    if ((dest == PeSymbolicValue.PeDerivedAddress || dest == PeSymbolicValue.ModuleBase) &&
-                        c == PeSymbolicValue.Zero)
+                    if ((dest.Kind == PeSymbolicKind.PeDerivedAddress || dest.Kind == PeSymbolicKind.ModuleBase) &&
+                        c.Kind == PeSymbolicKind.Zero)
                     {
                         zeroingDetected = true;
                     }
@@ -986,92 +1109,129 @@ namespace ConfuserExKillerRunner.Killers
             // 16. Fallback for all other instructions
             inst.CalculateStackUsage(out int pushesCount, out int popsCount);
             for (int p = 0; p < popsCount; p++) PopStack(stack);
-            for (int p = 0; p < pushesCount; p++) PushStack(stack, PeSymbolicValue.None);
+            for (int p = 0; p < pushesCount; p++) PushStack(stack, PeSymbolicSlot.None);
         }
 
-        private static PeSymbolicValue CombineAdd(PeSymbolicValue a, PeSymbolicValue b)
+        private static PeSymbolicSlot CombineAdd(PeSymbolicSlot a, PeSymbolicSlot b)
         {
-            // Proven ModuleBase + 0x3C -> PeDerivedAddress
-            if ((a == PeSymbolicValue.ModuleBase && b == PeSymbolicValue.PeHeaderOffset) ||
-                (b == PeSymbolicValue.ModuleBase && a == PeSymbolicValue.PeHeaderOffset))
+            // Obvious arithmetic identity: X + 0 == X
+            if (b.Kind == PeSymbolicKind.Zero)
             {
-                return PeSymbolicValue.PeDerivedAddress;
+                return a;
+            }
+            if (a.Kind == PeSymbolicKind.Zero)
+            {
+                return b;
+            }
+
+            // Proven ModuleBase + 0x3C -> PeDerivedAddress
+            if ((a.Kind == PeSymbolicKind.ModuleBase && b.Kind == PeSymbolicKind.PeHeaderOffset) ||
+                (b.Kind == PeSymbolicKind.ModuleBase && a.Kind == PeSymbolicKind.PeHeaderOffset))
+            {
+                return PeSymbolicSlot.PeDerivedAddress;
             }
             // Proven ModuleBase + PeHeaderField (e.g. *(ModuleBase + 0x3C)) -> PeDerivedAddress
-            if ((a == PeSymbolicValue.ModuleBase && b == PeSymbolicValue.PeHeaderField) ||
-                (b == PeSymbolicValue.ModuleBase && a == PeSymbolicValue.PeHeaderField))
+            if ((a.Kind == PeSymbolicKind.ModuleBase && b.Kind == PeSymbolicKind.PeHeaderField) ||
+                (b.Kind == PeSymbolicKind.ModuleBase && a.Kind == PeSymbolicKind.PeHeaderField))
             {
-                return PeSymbolicValue.PeDerivedAddress;
+                return PeSymbolicSlot.PeDerivedAddress;
             }
+
             // Offset calculation from already derived PE address:
-            // CRITICAL: The offset MUST be a demonstrated numeric displacement (NumericOffset, Zero, PeHeaderOffset).
-            // If the operand is None (an unknown pointer or arbitrary unproven value), provenance CANNOT be preserved!
-            if (a == PeSymbolicValue.PeDerivedAddress && IsNumeric(b))
+            // CRITICAL: The displacement MUST be a demonstrated small numeric offset within the PE header space (|offset| <= 0x1000).
+            // An arbitrary displacement (e.g. > 0x1000) or an unproven operand (None) CANNOT be demonstrated to point to PE headers!
+            if (a.Kind == PeSymbolicKind.PeDerivedAddress && b.ConcreteValue.HasValue && Math.Abs(b.ConcreteValue.Value) <= MaxPeHeaderDisplacement)
             {
-                return PeSymbolicValue.PeDerivedAddress;
+                return PeSymbolicSlot.PeDerivedAddress;
             }
-            if (b == PeSymbolicValue.PeDerivedAddress && IsNumeric(a))
+            if (b.Kind == PeSymbolicKind.PeDerivedAddress && a.ConcreteValue.HasValue && Math.Abs(a.ConcreteValue.Value) <= MaxPeHeaderDisplacement)
             {
-                return PeSymbolicValue.PeDerivedAddress;
+                return PeSymbolicSlot.PeDerivedAddress;
             }
+
             // Numeric + Numeric -> Numeric
             if (IsNumeric(a) && IsNumeric(b))
             {
-                if (a == PeSymbolicValue.Zero && b == PeSymbolicValue.Zero)
-                    return PeSymbolicValue.Zero;
-                return PeSymbolicValue.NumericOffset;
+                if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
+                {
+                    return CreateNumericSlot(unchecked(a.ConcreteValue.Value + b.ConcreteValue.Value));
+                }
+                return PeSymbolicSlot.NumericOffset;
             }
-            return PeSymbolicValue.None;
+
+            return PeSymbolicSlot.None;
         }
 
-        private static PeSymbolicValue CombineSub(PeSymbolicValue a, PeSymbolicValue b)
+        private static PeSymbolicSlot CombineSub(PeSymbolicSlot a, PeSymbolicSlot b)
         {
-            // PeDerivedAddress - NumericOffset -> PeDerivedAddress
-            // CRITICAL: The subtrahend MUST be a demonstrated numeric displacement.
-            // If b is None or an independent pointer, provenance is lost!
-            if (a == PeSymbolicValue.PeDerivedAddress && IsNumeric(b))
+            // Obvious arithmetic identity: X - 0 == X
+            if (b.Kind == PeSymbolicKind.Zero)
             {
-                return PeSymbolicValue.PeDerivedAddress;
+                return a;
             }
+
+            // PeDerivedAddress - NumericOffset -> PeDerivedAddress
+            // CRITICAL: The subtrahend MUST be a demonstrated small numeric offset within PE header space (|offset| <= 0x1000).
+            // Large subtrahends (e.g. > 0x1000) or unproven operands (None) invalidate PE header provenance!
+            if (a.Kind == PeSymbolicKind.PeDerivedAddress && b.ConcreteValue.HasValue && Math.Abs(b.ConcreteValue.Value) <= MaxPeHeaderDisplacement)
+            {
+                return PeSymbolicSlot.PeDerivedAddress;
+            }
+
             // Numeric - Numeric -> Numeric
             if (IsNumeric(a) && IsNumeric(b))
             {
-                return PeSymbolicValue.NumericOffset;
+                if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
+                {
+                    return CreateNumericSlot(unchecked(a.ConcreteValue.Value - b.ConcreteValue.Value));
+                }
+                return PeSymbolicSlot.NumericOffset;
             }
-            return PeSymbolicValue.None;
+
+            return PeSymbolicSlot.None;
         }
 
-        private static PeSymbolicValue CombineAnd(PeSymbolicValue a, PeSymbolicValue b)
+        private static PeSymbolicSlot CombineAnd(PeSymbolicSlot a, PeSymbolicSlot b)
         {
-            // PeDerivedAddress & NumericOffset (pointer alignment mask, e.g. ~3 / -4) -> PeDerivedAddress
-            // CRITICAL: The mask MUST be a demonstrated numeric value.
-            // If the operand is None or an independent pointer, provenance is lost!
-            if (a == PeSymbolicValue.PeDerivedAddress && IsNumeric(b))
+            // Obvious arithmetic identity: anything & 0 == 0
+            if (a.Kind == PeSymbolicKind.Zero || b.Kind == PeSymbolicKind.Zero)
             {
-                return PeSymbolicValue.PeDerivedAddress;
+                return PeSymbolicSlot.Zero;
             }
-            if (b == PeSymbolicValue.PeDerivedAddress && IsNumeric(a))
+
+            // Pointer alignment: PeDerivedAddress & AlignmentMask -> PeDerivedAddress
+            // CRITICAL: Only legitimate pointer alignment masks (-2, -4, -8, -16, -32, -64) preserve provenance!
+            // Arbitrary numeric masks destroy pointer provenance.
+            if (a.Kind == PeSymbolicKind.PeDerivedAddress && b.ConcreteValue.HasValue && IsAlignmentMask(b.ConcreteValue.Value))
             {
-                return PeSymbolicValue.PeDerivedAddress;
+                return PeSymbolicSlot.PeDerivedAddress;
             }
-            // Numeric & Numeric -> Numeric
+            if (b.Kind == PeSymbolicKind.PeDerivedAddress && a.ConcreteValue.HasValue && IsAlignmentMask(a.ConcreteValue.Value))
+            {
+                return PeSymbolicSlot.PeDerivedAddress;
+            }
+
+            // Numeric & Numeric
             if (IsNumeric(a) && IsNumeric(b))
             {
-                if (a == PeSymbolicValue.Zero || b == PeSymbolicValue.Zero)
-                    return PeSymbolicValue.Zero;
-                return PeSymbolicValue.NumericOffset;
+                if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
+                {
+                    return CreateNumericSlot(a.ConcreteValue.Value & b.ConcreteValue.Value);
+                }
+                return PeSymbolicSlot.NumericOffset;
             }
-            return PeSymbolicValue.None;
+
+            return PeSymbolicSlot.None;
         }
 
-        private static PeSymbolicValue EvaluateLdind(PeSymbolicValue addr)
+        private static PeSymbolicSlot EvaluateLdind(PeSymbolicSlot addr)
         {
-            if (addr == PeSymbolicValue.PeDerivedAddress)
-                return PeSymbolicValue.PeHeaderField;
-            return PeSymbolicValue.None;
+            if (addr.Kind == PeSymbolicKind.PeDerivedAddress)
+                return PeSymbolicSlot.PeHeaderField;
+            return PeSymbolicSlot.None;
         }
 
-        private static PeSymbolicValue PopStack(List<PeSymbolicValue> stack)
+        private static PeSymbolicSlot PopStack(List<PeSymbolicSlot> stack)
         {
             if (stack != null && stack.Count > 0)
             {
@@ -1079,10 +1239,10 @@ namespace ConfuserExKillerRunner.Killers
                 stack.RemoveAt(stack.Count - 1);
                 return tag;
             }
-            return PeSymbolicValue.None;
+            return PeSymbolicSlot.None;
         }
 
-        private static void PushStack(List<PeSymbolicValue> stack, PeSymbolicValue tag)
+        private static void PushStack(List<PeSymbolicSlot> stack, PeSymbolicSlot tag)
         {
             stack?.Add(tag);
         }
