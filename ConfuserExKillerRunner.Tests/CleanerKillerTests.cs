@@ -1099,5 +1099,361 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
             Assert.Contains(helperMethod, globalType.Methods);
         }
+
+        [Fact]
+        public void StripProtectorHooks_ConfuserExNormalAntiTamper_PointerArithmeticWithoutVirtualAddress_RetainedWhenNotDecrypted()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Define ConfuserEx normal Anti-Tamper hook based purely on pointer arithmetic:
+            // 1. Calls VirtualProtect
+            // 2. Reads PE header at offset 0x3c (e_lfanew)
+            // 3. Loops through section bytes: conv.u, xor/sub cipher, stind.i4, backward branch loop
+            // 4. Contains NO field named "VirtualAddress"
+            var atMethod = new MethodDefUser("ConfuserNormalAntiTamper", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            var loopStart = Instruction.Create(OpCodes.Conv_U);
+
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x1000));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x40));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // PE header access at offset 0x3c
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x3C));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldind_U4));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // Cipher loop writing to memory via stind.i4
+            atMethod.Body.Instructions.Add(loopStart);
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 0x5A5A5A5A));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Xor));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Stind_I4));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1));
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Brtrue_S, loopStart)); // backward branch loop
+            atMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(atMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, atMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            // Case A: When antiTamperDecrypted = false, hook MUST NOT be removed by fallback as Anti-Dump!
+            var resultNotDecrypted = CleanerKiller.StripProtectorHooks(module, antiTamperDecrypted: false);
+
+            Assert.Equal(0, resultNotDecrypted.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(atMethod, cctor.Body.Instructions[0].Operand);
+            Assert.Contains(atMethod, globalType.Methods);
+
+            // Case B: When antiTamperDecrypted = true, hook is confirmed decrypted and safely stripped
+            var resultDecrypted = CleanerKiller.StripProtectorHooks(module, antiTamperDecrypted: true);
+
+            Assert.Equal(1, resultDecrypted.StrippedHooksCount);
+            Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
+            Assert.DoesNotContain(atMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_AmbiguousVirtualProtectHook_IsPreserved()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Ambiguous method calling VirtualProtect: no section headers, no cipher decryption loop,
+            // no Anti-Dump zeroing, mixed with application logic.
+            var ambiguousMethod = new MethodDefUser("AmbiguousHook", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var vpRef = new MemberRefUser(module, "VirtualProtect",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean,
+                    module.CorLibTypes.IntPtr, module.CorLibTypes.UInt32, module.CorLibTypes.UInt32,
+                    new ByRefSig(module.CorLibTypes.UInt32)),
+                new TypeRefUser(module, string.Empty, "Kernel32", module.CorLibTypes.AssemblyRef));
+
+            ambiguousMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            ambiguousMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 256));
+            ambiguousMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 4));
+            ambiguousMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            ambiguousMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, vpRef));
+            ambiguousMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            ambiguousMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(ambiguousMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, ambiguousMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module, antiTamperDecrypted: false);
+
+            // Ambiguous classification MUST retain the hook!
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Contains(ambiguousMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_RollbackWithBranchesAndEH_PreservesOriginalInstructionInstancesAndBoundaries()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Define a protector hook (Anti-Debug)
+            var dbgMethod = new MethodDefUser("AntiDebugInit", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var isAttachedRef = new MemberRefUser(module, "get_IsAttached",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean),
+                new TypeRefUser(module, "System.Diagnostics", "Debugger", module.CorLibTypes.AssemblyRef));
+            dbgMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, isAttachedRef));
+            dbgMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            dbgMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(dbgMethod);
+
+            // Build <Module>..cctor with branches and ExceptionHandler boundaries:
+            // try {
+            //     call AntiDebugInit; // stripped tentatively
+            //     pop;                // underflows stack if call is nopped!
+            //     br.s targetInst;
+            //     nop;
+            // targetInst:
+            //     leave.s tryEnd;
+            // }
+            // catch (Exception) {
+            //     pop;
+            //     leave.s handlerEnd;
+            // }
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+
+            var callInst = Instruction.Create(OpCodes.Call, dbgMethod);
+            var badPop = Instruction.Create(OpCodes.Pop);
+            var targetInst = Instruction.Create(OpCodes.Nop);
+            var brInst = Instruction.Create(OpCodes.Br_S, targetInst);
+            var unreachedNop = Instruction.Create(OpCodes.Nop);
+
+            var tryEnd = Instruction.Create(OpCodes.Leave_S, targetInst);
+            var handlerStart = Instruction.Create(OpCodes.Pop);
+            var finalRet = Instruction.Create(OpCodes.Ret);
+            var handlerEnd = Instruction.Create(OpCodes.Leave_S, finalRet);
+
+            tryEnd.Operand = finalRet;
+            handlerEnd.Operand = finalRet;
+
+            cctor.Body.Instructions.Add(callInst);       // index 0 (TryStart)
+            cctor.Body.Instructions.Add(badPop);         // index 1
+            cctor.Body.Instructions.Add(brInst);         // index 2
+            cctor.Body.Instructions.Add(unreachedNop);   // index 3
+            cctor.Body.Instructions.Add(targetInst);     // index 4
+            cctor.Body.Instructions.Add(tryEnd);         // index 5
+            cctor.Body.Instructions.Add(handlerStart);   // index 6 (HandlerStart)
+            cctor.Body.Instructions.Add(handlerEnd);     // index 7
+            cctor.Body.Instructions.Add(finalRet);       // index 8
+
+            var eh = new ExceptionHandler(ExceptionHandlerType.Catch)
+            {
+                TryStart = callInst,
+                TryEnd = handlerStart,
+                HandlerStart = handlerStart,
+                HandlerEnd = finalRet,
+                CatchType = module.CorLibTypes.Object.TypeDefOrRef
+            };
+            cctor.Body.ExceptionHandlers.Add(eh);
+            globalType.Methods.Add(cctor);
+
+            // Execute StripProtectorHooks.
+            // Stripping callInst causes badPop to underflow evaluation stack.
+            // QualityAuditor detects structural failure and triggers atomic in-place rollback.
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(dbgMethod, cctor.Body.Instructions[0].Operand);
+            Assert.Contains(dbgMethod, globalType.Methods);
+
+            // Verify branch operand refers to the exact instruction object in Body.Instructions
+            Assert.Same(targetInst, brInst.Operand);
+            Assert.Contains((Instruction)brInst.Operand, cctor.Body.Instructions);
+
+            // Verify all ExceptionHandler boundaries refer to exact instruction objects in Body.Instructions
+            Assert.Same(callInst, eh.TryStart);
+            Assert.Contains(eh.TryStart, cctor.Body.Instructions);
+
+            Assert.Same(handlerStart, eh.TryEnd);
+            Assert.Contains(eh.TryEnd, cctor.Body.Instructions);
+
+            Assert.Same(handlerStart, eh.HandlerStart);
+            Assert.Contains(eh.HandlerStart, cctor.Body.Instructions);
+
+            Assert.Same(finalRet, eh.HandlerEnd);
+            Assert.Contains(eh.HandlerEnd, cctor.Body.Instructions);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_IntPtrStubFollowedByPop_Unambiguous_BothNeutralizedAndStripped()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Canonical 3-instruction IntPtr stub: ldnull -> call Marshal.GetHINSTANCE -> ret
+            var stubMethod = new MethodDefUser("IntPtrStub", MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(stubMethod);
+
+            // <Module>..cctor calls IntPtrStub and consumes returned IntPtr with pop
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, stubMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Both call and pop must be neutralized to Nop and hook stripped cleanly
+            Assert.Equal(1, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[1].OpCode);
+            Assert.Equal(OpCodes.Ret, cctor.Body.Instructions[2].OpCode);
+            Assert.DoesNotContain(stubMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_IntPtrStubFollowedByPop_AmbiguousBranchTarget_HookRetained()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            var stubMethod = new MethodDefUser("IntPtrStub", MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(stubMethod);
+
+            // <Module>..cctor: br.s popInst; call stubMethod; popInst: pop; ret;
+            // The pop instruction is a branch target! Therefore, producer and consumer cannot be safely or unambiguously removed together.
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            var callInst = Instruction.Create(OpCodes.Call, stubMethod);
+            var popInst = Instruction.Create(OpCodes.Pop);
+            var brInst = Instruction.Create(OpCodes.Br_S, popInst);
+
+            cctor.Body.Instructions.Add(brInst);
+            cctor.Body.Instructions.Add(callInst);
+            cctor.Body.Instructions.Add(popInst);
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Hook must be preserved because pop is a branch target
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[1].OpCode);
+            Assert.Equal(stubMethod, cctor.Body.Instructions[1].Operand);
+            Assert.Equal(OpCodes.Pop, cctor.Body.Instructions[2].OpCode);
+            Assert.Contains(stubMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_IntPtrStubWithoutPop_HookRetained()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            var stubMethod = new MethodDefUser("IntPtrStub", MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(stubMethod);
+
+            var stateField = new FieldDefUser("StatePtr", new FieldSig(module.CorLibTypes.IntPtr),
+                FieldAttributes.Public | FieldAttributes.Static);
+            globalType.Fields.Add(stateField);
+
+            // <Module>..cctor calls stub and stores in field (consumer is stsfld, not pop!)
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, stubMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Stsfld, stateField));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Hook must be preserved because return value consumer is not an unambiguous pop
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Contains(stubMethod, globalType.Methods);
+        }
     }
 }

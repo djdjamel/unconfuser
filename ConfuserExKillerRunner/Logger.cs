@@ -29,6 +29,6 @@ namespace Tool
             }
         }
 
-        public static void LogException(Exception ex) => Console.WriteLine("[EXCEPTION] " + ex.Message);
+        public static void LogException(Exception ex) => Console.WriteLine("[EXCEPTION] " + (ex.InnerException?.Message ?? ex.Message));
     }
 }

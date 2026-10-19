@@ -11,8 +11,21 @@ using FieldAttributes = dnlib.DotNet.FieldAttributes;
 using TypeAttributes = dnlib.DotNet.TypeAttributes;
 
 namespace ConfuserExTools.ConstantKiller {
+	public sealed class ConstantKillerResult {
+		public int TotalReferencesCount { get; set; }
+		public int ResolvedReferencesCount { get; set; }
+		public int DecryptedConstantsCount { get; set; }
+		public bool AllReferencesResolved { get; set; }
+
+		public bool FullyDecrypted => AllReferencesResolved;
+		public int TotalReferences => TotalReferencesCount;
+		public int RewrittenReferences => ResolvedReferencesCount;
+
+		public static implicit operator int(ConstantKillerResult result) => result?.DecryptedConstantsCount ?? 0;
+	}
+
 	public static class ConstantKillerImpl {
-		public static int Execute(ModuleDef module, Module reflModule) {
+		public static ConstantKillerResult Execute(ModuleDef module, Module reflModule) {
 			if (module is null)
 				throw new ArgumentNullException(nameof(module));
 
@@ -31,11 +44,11 @@ namespace ConfuserExTools.ConstantKiller {
 			}
 
 			if (decrypters.Count == 0)
-				return 0;
+				return new ConstantKillerResult();
 
 			if (reflModule is null) {
 				Logger.LogWarning("Dynamic execution is disabled (--allow-execution omitted). Skipping reflection-based constant decryption.");
-				return 0;
+				return new ConstantKillerResult();
 			}
 
 			var decrypterRefCounts = new Dictionary<MethodDef, int>();
@@ -244,7 +257,18 @@ namespace ConfuserExTools.ConstantKiller {
 					}
 				}
 
-				return count;
+				int totalReferences = decrypterRefCounts.Values.Sum();
+				int rewrittenReferences = decrypterRewrittenCounts.Values.Sum();
+				bool allResolved = totalReferences > 0 &&
+				                   decrypters.All(d => decrypterRefCounts[d] == 0 || decrypterRewrittenCounts[d] >= decrypterRefCounts[d]) &&
+				                   rewrittenReferences >= totalReferences;
+
+				return new ConstantKillerResult {
+					TotalReferencesCount = totalReferences,
+					ResolvedReferencesCount = rewrittenReferences,
+					DecryptedConstantsCount = count,
+					AllReferencesResolved = allResolved
+				};
 			}
 			finally {
 				module.Context.AssemblyResolver = oldAssemblyResolver;

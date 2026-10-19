@@ -93,10 +93,22 @@ namespace ConfuserExKillerRunner.Killers
                         continue;
                     }
 
-                    // Save atomic snapshot of instructions before applying changes
-                    var originalSnapshot = instructions.Select(ins => new Instruction(ins.OpCode, ins.Operand)).ToList();
+                    // If the hook method returns a non-void value (such as IntPtr), find and verify its consumer (e.g. pop)
+                    bool returnsValue = methodDef.ReturnType != null && methodDef.ReturnType.ElementType != ElementType.Void;
+                    if (returnsValue)
+                    {
+                        if (!TryIdentifyReturnConsumer(cctor, i, branchTargets, ehBoundaries, out var consumerPop))
+                        {
+                            Logger.LogWarning($"[CleanerKiller] Retaining {hookType} hook {methodDef.Name} in <Module>.cctor: non-void return value consumer cannot be safely or unambiguously identified.");
+                            continue;
+                        }
+                        toNeutralize.Add(consumerPop);
+                    }
 
-                    // Apply transformation: nop call and all unambiguous argument producer instructions
+                    // Save in-place snapshot of original opcodes and operands
+                    var originalStates = toNeutralize.Select(n => (Instruction: n, OpCode: n.OpCode, Operand: n.Operand)).ToList();
+
+                    // Apply transformation in place: nop call, producers, and consumer
                     foreach (var n in toNeutralize)
                     {
                         n.OpCode = OpCodes.Nop;
@@ -108,10 +120,12 @@ namespace ConfuserExKillerRunner.Killers
                     QualityAuditor.AuditMethod(cctor, auditReport);
                     if (!auditReport.StructuralAuditPassed)
                     {
-                        // Rollback to original instructions
-                        cctor.Body.Instructions.Clear();
-                        foreach (var orig in originalSnapshot)
-                            cctor.Body.Instructions.Add(orig);
+                        // In-place rollback: restore original opcodes and operands directly on existing instruction objects
+                        foreach (var s in originalStates)
+                        {
+                            s.Instruction.OpCode = s.OpCode;
+                            s.Instruction.Operand = s.Operand;
+                        }
 
                         Logger.LogWarning($"[CleanerKiller] Rollback in <Module>.cctor: stripping hook {methodDef.Name} failed structural IL audit ({string.Join("; ", auditReport.Errors)}). Original IL restored.");
                         continue;
@@ -120,7 +134,7 @@ namespace ConfuserExKillerRunner.Killers
                     methodsToRemove.Add(methodDef);
                     result.StrippedHooksCount++;
                     result.StrippedDetails.Add($"{hookType} hook removed from <Module>.cctor: {methodDef.Name}");
-                    Logger.LogInfo($"[CleanerKiller] Safely stripped {hookType} initializer call to {methodDef.Name} and {toNeutralize.Count - 1} argument producer(s) in <Module>.cctor");
+                    Logger.LogInfo($"[CleanerKiller] Safely stripped {hookType} initializer call to {methodDef.Name} and {toNeutralize.Count - 1} related instruction(s) in <Module>.cctor");
                 }
             }
 
@@ -176,21 +190,33 @@ namespace ConfuserExKillerRunner.Killers
         {
             if (method.DeclaringType != null && !method.DeclaringType.IsGlobalModuleType)
                 return null;
+            if (!method.HasBody || method.Body.Instructions == null || method.Body.Instructions.Count == 0)
+                return null;
 
             bool hasVirtualProtect = false;
             bool hasDebuggerCheck = false;
-            bool hasSectionLoop = false;
+            bool hasSectionField = false;
             bool hasResourceResolve = false;
             bool hasInitializeArray = false;
+            bool hasPointerConversion = false;
+            bool hasPointerIndirection = false;
+            bool hasPointerWrite = false;
+            bool hasCipherArithmetic = false;
+            bool hasBackwardBranch = false;
+            bool hasPeHeaderOffset = false;
+            bool hasHeaderZeroing = false;
 
-            foreach (var inst in method.Body.Instructions)
+            var instructions = method.Body.Instructions;
+            for (int idx = 0; idx < instructions.Count; idx++)
             {
+                var inst = instructions[idx];
                 if (inst.Operand is IMethod called)
                 {
                     string fullName = called.FullName;
                     if (fullName.IndexOf("IsAttached", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         fullName.IndexOf("CheckRemoteDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        fullName.IndexOf("IsDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0)
+                        fullName.IndexOf("IsDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        fullName.IndexOf("OutputDebugString", StringComparison.OrdinalIgnoreCase) >= 0)
                         hasDebuggerCheck = true;
                     if (fullName.IndexOf("VirtualProtect", StringComparison.OrdinalIgnoreCase) >= 0)
                         hasVirtualProtect = true;
@@ -201,14 +227,80 @@ namespace ConfuserExKillerRunner.Killers
                         hasInitializeArray = true;
                 }
 
-                if (inst.OpCode == OpCodes.Ldfld || inst.OpCode == OpCodes.Stfld)
+                if (inst.OpCode == OpCodes.Ldfld || inst.OpCode == OpCodes.Stfld || inst.OpCode == OpCodes.Ldflda)
                 {
-                    if (inst.Operand is IField field && field.Name.String.IndexOf("VirtualAddress", StringComparison.OrdinalIgnoreCase) >= 0)
-                        hasSectionLoop = true;
+                    if (inst.Operand is IField field)
+                    {
+                        string fName = field.Name?.String ?? string.Empty;
+                        if (fName.IndexOf("VirtualAddress", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            fName.IndexOf("PointerToRawData", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            fName.IndexOf("SizeOfRawData", StringComparison.OrdinalIgnoreCase) >= 0)
+                            hasSectionField = true;
+                    }
+                }
+
+                if ((inst.OpCode == OpCodes.Ldc_I4 && inst.Operand is int iVal && iVal == 0x3c) ||
+                    (inst.OpCode == OpCodes.Ldc_I4_S && inst.Operand is sbyte sbVal && sbVal == 0x3c) ||
+                    (inst.OpCode == OpCodes.Ldc_I4_S && inst.Operand is byte bVal && bVal == 0x3c))
+                {
+                    hasPeHeaderOffset = true;
+                }
+
+                var code = inst.OpCode.Code;
+                if (code == Code.Conv_U || code == Code.Conv_I || code == Code.Conv_U4 || code == Code.Conv_U8 || code == Code.Conv_I4 || code == Code.Conv_I8)
+                    hasPointerConversion = true;
+
+                if (code == Code.Ldind_I1 || code == Code.Ldind_U1 || code == Code.Ldind_I2 || code == Code.Ldind_U2 ||
+                    code == Code.Ldind_I4 || code == Code.Ldind_U4 || code == Code.Ldind_I8 || code == Code.Ldind_I ||
+                    code == Code.Ldind_R4 || code == Code.Ldind_R8 || code == Code.Localloc)
+                    hasPointerIndirection = true;
+
+                if (code == Code.Stind_I1 || code == Code.Stind_I2 || code == Code.Stind_I4 || code == Code.Stind_I8 ||
+                    code == Code.Stind_I || code == Code.Stind_R4 || code == Code.Stind_R8 || code == Code.Cpblk)
+                {
+                    hasPointerWrite = true;
+                    if (idx > 0 && (instructions[idx - 1].OpCode == OpCodes.Ldc_I4_0 ||
+                                    (instructions[idx - 1].OpCode == OpCodes.Ldc_I4 && Equals(instructions[idx - 1].Operand, 0)) ||
+                                    instructions[idx - 1].OpCode == OpCodes.Ldnull))
+                    {
+                        hasHeaderZeroing = true;
+                    }
+                }
+
+                if (code == Code.Xor || code == Code.Sub || code == Code.Sub_Ovf || code == Code.Sub_Ovf_Un ||
+                    code == Code.Add || code == Code.Add_Ovf || code == Code.Add_Ovf_Un ||
+                    code == Code.Mul || code == Code.Mul_Ovf || code == Code.Mul_Ovf_Un ||
+                    code == Code.Not || code == Code.Shl || code == Code.Shr || code == Code.Shr_Un)
+                {
+                    hasCipherArithmetic = true;
+                }
+
+                if (inst.Operand is Instruction targetInst)
+                {
+                    int targetIdx = instructions.IndexOf(targetInst);
+                    if (targetIdx >= 0 && targetIdx <= idx)
+                        hasBackwardBranch = true;
+                }
+                else if (inst.Operand is IList<Instruction> switchTargets)
+                {
+                    foreach (var st in switchTargets)
+                    {
+                        int targetIdx = instructions.IndexOf(st);
+                        if (targetIdx >= 0 && targetIdx <= idx)
+                            hasBackwardBranch = true;
+                    }
                 }
             }
 
-            if (hasVirtualProtect && hasSectionLoop)
+            // 1. Anti-Tamper: calls VirtualProtect and exhibits section fields or pointer decryption characteristics
+            bool isAntiTamper = hasVirtualProtect && (
+                hasSectionField ||
+                (hasPointerWrite && hasCipherArithmetic) ||
+                ((hasPointerConversion || hasPointerIndirection) && hasBackwardBranch && (hasCipherArithmetic || hasPointerWrite)) ||
+                (hasPeHeaderOffset && (hasCipherArithmetic || hasPointerWrite))
+            );
+
+            if (isAntiTamper)
             {
                 if (antiTamperDecrypted)
                     return "Anti-Tamper";
@@ -216,16 +308,48 @@ namespace ConfuserExKillerRunner.Killers
                 Logger.LogWarning($"[CleanerKiller] Retaining Anti-Tamper hook in <Module>.cctor: Anti-Tamper sections have not been confirmed as decrypted (execution disabled or decryption unconfirmed).");
                 return null;
             }
+
+            // 2. Canonical Stub calls
             if (IsExactStubProtectorCall(method))
             {
                 return "Protector-Stub";
             }
-            if (hasDebuggerCheck)
-                return "Anti-Debug";
-            if (hasVirtualProtect)
+
+            // 3. Anti-Dump: calls VirtualProtect to wipe/zero headers without decryption cipher arithmetic or debugger checks
+            bool isAntiDump = hasVirtualProtect &&
+                              !hasCipherArithmetic &&
+                              !hasDebuggerCheck &&
+                              (hasHeaderZeroing || hasPeHeaderOffset);
+
+            if (isAntiDump)
+            {
                 return "Anti-Dump";
+            }
+
+            // 4. Ambiguous VirtualProtect hook: If a method calls VirtualProtect but cannot be unambiguously classified as pure Anti-Dump,
+            // never strip it via fallback! Retain it to safeguard against undetected Anti-Tamper or runtime requirements.
+            if (hasVirtualProtect)
+            {
+                Logger.LogWarning($"[CleanerKiller] Retaining hook {method.Name} in <Module>.cctor: ambiguous classification (calls VirtualProtect but does not match pure Anti-Dump).");
+                return null;
+            }
+
+            // 5. Anti-Debug: debugger checks without VirtualProtect or pointer decryption
+            if (hasDebuggerCheck)
+            {
+                if (hasPointerWrite || hasCipherArithmetic)
+                {
+                    Logger.LogWarning($"[CleanerKiller] Retaining hook {method.Name} in <Module>.cctor: ambiguous Anti-Debug hook containing memory writes or cipher operations.");
+                    return null;
+                }
+                return "Anti-Debug";
+            }
+
+            // 6. Resource Resolver
             if (hasResourceResolve && resourcesDecrypted)
                 return "Resource-Resolver";
+
+            // 7. Constant Buffer Initializer
             if (hasInitializeArray && constantsDecrypted && method.Parameters.Count == 0 && IsConfuserConstantBufferInitializer(method))
                 return "Constant-Buffer";
 
@@ -488,6 +612,50 @@ namespace ConfuserExKillerRunner.Killers
                 }
             }
 
+            return true;
+        }
+
+        private static bool TryIdentifyReturnConsumer(
+            MethodDef cctor,
+            int callIndex,
+            HashSet<Instruction> branchTargets,
+            HashSet<Instruction> ehBoundaries,
+            out Instruction consumerInst)
+        {
+            consumerInst = null;
+            var instructions = cctor.Body.Instructions;
+            var callInst = instructions[callIndex];
+
+            int nextIdx = callIndex + 1;
+            while (nextIdx < instructions.Count && instructions[nextIdx].OpCode == OpCodes.Nop)
+                nextIdx++;
+
+            if (nextIdx >= instructions.Count)
+                return false;
+
+            var candidate = instructions[nextIdx];
+            if (candidate.OpCode != OpCodes.Pop)
+                return false;
+
+            if (branchTargets.Contains(candidate) || ehBoundaries.Contains(candidate))
+                return false;
+
+            if (cctor.Body.HasExceptionHandlers)
+            {
+                foreach (var eh in cctor.Body.ExceptionHandlers)
+                {
+                    bool callInTry = IsInstructionInClause(instructions, eh.TryStart, eh.TryEnd, callInst);
+                    bool callInHandler = IsInstructionInClause(instructions, eh.HandlerStart, eh.HandlerEnd, callInst);
+
+                    bool popInTry = IsInstructionInClause(instructions, eh.TryStart, eh.TryEnd, candidate);
+                    bool popInHandler = IsInstructionInClause(instructions, eh.HandlerStart, eh.HandlerEnd, candidate);
+
+                    if (callInTry != popInTry || callInHandler != popInHandler)
+                        return false;
+                }
+            }
+
+            consumerInst = candidate;
             return true;
         }
 

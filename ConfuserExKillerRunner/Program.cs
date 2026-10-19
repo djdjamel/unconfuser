@@ -348,9 +348,11 @@ namespace ConfuserExKillerRunner
                 int proxyCount = ProxyKillerImpl.Execute(module, false, true);
                 Console.WriteLine($"[+] ProxyKiller: {proxyCount} proxy methods/delegates inlined");
 
-                int constCount = ConstantKillerImpl.Execute(module, reflModule);
-                constantsDecrypted = constCount > 0;
-                Console.WriteLine($"[+] ConstantKiller: {constCount} constants decrypted (with stack evaluation)");
+                var constResult = ConstantKillerImpl.Execute(module, reflModule);
+                constantsDecrypted = constResult.AllReferencesResolved;
+                Console.WriteLine($"[+] ConstantKiller: {constResult.DecryptedConstantsCount} constants decrypted (with stack evaluation)");
+                if (constResult.TotalReferencesCount > 0 && !constResult.AllReferencesResolved)
+                    Console.WriteLine($"[!] ConstantKiller: Partial decryption ({constResult.ResolvedReferencesCount}/{constResult.TotalReferencesCount} references rewritten). Decrypter and buffer preserved.");
 
                 // Step 3: Protector hook stripping
                 Console.WriteLine("[*] Step 3: Cleaning Protector Hooks...");
