@@ -99,12 +99,22 @@ namespace ConfuserExTools.ProxyKiller
 							}
 						}
 
-						// Commit counts only after method transformation successfully completes
-						foreach (var kvp in methodRewrittenCounts)
+						if (methodRestored > 0)
 						{
-							proxyRewrittenCounts[kvp.Key] += kvp.Value;
+							if (!ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(method, out var errors))
+							{
+								method.Body = originalBody;
+								Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] Proxy inlining introduced structural defects in {method}: {string.Join("; ", errors)}. Rolled back.");
+								continue;
+							}
+
+							// Commit counts only after method transformation successfully completes and passes audit
+							foreach (var kvp in methodRewrittenCounts)
+							{
+								proxyRewrittenCounts[kvp.Key] += kvp.Value;
+							}
+							totalRestored += methodRestored;
 						}
-						totalRestored += methodRestored;
 					}
 					catch (Exception ex)
 					{

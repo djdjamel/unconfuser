@@ -266,11 +266,19 @@ namespace ConfuserExTools.ConstantKiller {
 							methodCount++;
 						}
 
-						// Commit counts only after method transformation successfully completes
-						foreach (var kvp in methodRewrittenCounts) {
-							decrypterRewrittenCounts[kvp.Key] += kvp.Value;
+						if (methodCount > 0) {
+							if (!ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(method, out var errors)) {
+								method.Body = originalBody;
+								Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] Constant decryption introduced structural defects in {method}: {string.Join("; ", errors)}. Rolled back.");
+								continue;
+							}
+
+							// Commit counts only after method transformation successfully completes and passes audit
+							foreach (var kvp in methodRewrittenCounts) {
+								decrypterRewrittenCounts[kvp.Key] += kvp.Value;
+							}
+							count += methodCount;
 						}
-						count += methodCount;
 					}
 					catch (Exception ex) {
 						// True atomic rollback method body on error

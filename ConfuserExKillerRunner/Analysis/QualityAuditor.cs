@@ -108,6 +108,24 @@ namespace ConfuserExKillerRunner.Analysis
         ///   These rules require disk resolution of all referenced assemblies and are typically verified by an external
         ///   CLI verification tool such as ILVerify or PEVerify.
         /// </summary>
+        public static bool IsMethodStructurallyValid(MethodDef method, out List<string> errors)
+        {
+            errors = new List<string>();
+            if (method == null || !method.HasBody || method.Body == null)
+                return true;
+
+            var report = new AuditReport { CanLoad = true };
+            AuditMethod(method, report);
+
+            if (!report.StructuralAuditPassed || report.Errors.Count > 0)
+            {
+                errors = report.Errors;
+                return false;
+            }
+
+            return true;
+        }
+
         public static void AuditMethod(MethodDef method, AuditReport report)
         {
             var instructions = method.Body.Instructions;

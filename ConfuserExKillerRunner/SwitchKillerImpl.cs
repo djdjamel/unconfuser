@@ -100,6 +100,12 @@ namespace ConfuserExKillerRunner
                     blocks.RepartitionBlocks();
                     blocks.GetCode(out var instrs, out var handlers);
                     DotNetUtils.RestoreBody(method, instrs, handlers);
+
+                    if (!ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(method, out var errors))
+                    {
+                        method.Body = origBody;
+                        Tool.Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] RunCflow produced invalid body in {method}: {string.Join("; ", errors)}. Rolled back.");
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -167,6 +173,7 @@ namespace ConfuserExKillerRunner
                         }
                     }
 
+                    bool modified = false;
                     for (int j = 0; j < instrs.Count; j++)
                     {
                         // ldc.i4 + pop
@@ -223,6 +230,7 @@ namespace ConfuserExKillerRunner
                                     instrs[prevIdx].OpCode = OpCodes.Nop;
                                     instrs[prevIdx].Operand = null;
                                 }
+                                modified = true;
                             }
                         }
                         // dup + pop
@@ -277,8 +285,18 @@ namespace ConfuserExKillerRunner
                                     instrs[prevIdx].OpCode = OpCodes.Nop;
                                     instrs[prevIdx].Operand = null;
                                 }
+                                modified = true;
                             }
                         }
+                    }
+
+                    if (!modified)
+                        continue;
+
+                    if (!ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(method, out var errors))
+                    {
+                        method.Body = origBody;
+                        Tool.Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] RemoveNopPatterns produced invalid body in {method}: {string.Join("; ", errors)}. Rolled back.");
                     }
                 }
                 catch (Exception ex)
@@ -319,6 +337,7 @@ namespace ConfuserExKillerRunner
 
                     if (switchInstrs.Count == 0) continue;
 
+                    bool modified = false;
                     for (int j = 0; j < instrs.Count; j++)
                     {
                         if (j + 1 < instrs.Count && instrs[j].IsLdcI4() && instrs[j + 1].IsBr())
@@ -344,6 +363,7 @@ namespace ConfuserExKillerRunner
                                         instrs[j].OpCode = OpCodes.Ldc_I4;
                                         instrs[j].Operand = (int)(uint)(val ^ ldcValues[k]);
                                         instrs[j + 1].Operand = targets[(int)idx];
+                                        modified = true;
                                         j++;
                                         break;
                                     }
@@ -352,8 +372,17 @@ namespace ConfuserExKillerRunner
                         }
                     }
 
+                    if (!modified)
+                        continue;
+
                     method.Body.SimplifyBranches();
                     method.Body.OptimizeBranches();
+
+                    if (!ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(method, out var errors))
+                    {
+                        method.Body = origBody;
+                        Tool.Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] ResolveSimpleSwitch produced invalid body in {method}: {string.Join("; ", errors)}. Rolled back.");
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -390,8 +419,18 @@ namespace ConfuserExKillerRunner
                             done.Add(brTarget, instrs[k]);
                         }
                     }
+
+                    if (done.Count == 0)
+                        continue;
+
                     method.Body.SimplifyBranches();
                     method.Body.OptimizeBranches();
+
+                    if (!ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(method, out var errors))
+                    {
+                        method.Body = origBody;
+                        Tool.Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] FixConditionalBranches produced invalid body in {method}: {string.Join("; ", errors)}. Rolled back.");
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -466,6 +505,9 @@ namespace ConfuserExKillerRunner
                         methodTotal += state.Apply(4);
                     }
 
+                    if (methodTotal == 0)
+                        continue;
+
                     var blocks = new Blocks(method);
                     deobfuscator.Initialize(blocks);
                     deobfuscator.Deobfuscate();
@@ -474,6 +516,13 @@ namespace ConfuserExKillerRunner
                     DotNetUtils.RestoreBody(method, list, handlers);
                     method.Body.SimplifyBranches();
                     method.Body.OptimizeBranches();
+
+                    if (!ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(method, out var errors))
+                    {
+                        method.Body = origBody;
+                        Tool.Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] ResolveComplexSwitch produced invalid body in {method}: {string.Join("; ", errors)}. Rolled back.");
+                        continue;
+                    }
 
                     total += methodTotal;
                 }

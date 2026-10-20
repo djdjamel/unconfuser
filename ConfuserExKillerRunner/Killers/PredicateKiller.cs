@@ -83,13 +83,20 @@ namespace ConfuserExKillerRunner.Killers
                         {
                             method.Body.SimplifyBranches();
                             method.Body.OptimizeBranches();
-                            result.MethodsOptimized++;
-                        }
 
-                        // Commit counters only after method transformation successfully completes
-                        result.ConstantsFolded += methodConstantsFolded;
-                        result.IdentitiesSimplified += methodIdentitiesSimplified;
-                        result.BranchesResolved += methodBranchesResolved;
+                            if (!ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(method, out var errors))
+                            {
+                                method.Body = originalBody;
+                                Logger.LogWarning($"[PredicateKiller] Structural invariant violation in {method.FullName}: {string.Join("; ", errors)}. Rolled back.");
+                                continue;
+                            }
+
+                            result.MethodsOptimized++;
+                            // Commit counters only after method transformation successfully completes and passes audit
+                            result.ConstantsFolded += methodConstantsFolded;
+                            result.IdentitiesSimplified += methodIdentitiesSimplified;
+                            result.BranchesResolved += methodBranchesResolved;
+                        }
                     }
                     catch (Exception ex)
                     {
