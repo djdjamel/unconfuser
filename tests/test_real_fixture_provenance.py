@@ -242,3 +242,36 @@ def test_real_fixture_end_to_end_idempotency():
 
     assert fixture_path == fixture_path_2
     assert mtime_before == mtime_after, "Expected fixture to be reused without modification"
+
+
+def test_provenance_fails_when_source_code_modified(mock_fixture_env, monkeypatch):
+    """Provenance check fails if tracked C# source code files were modified."""
+    env = mock_fixture_env
+    mock_cli_sha = compute_file_sha256(env["cli_file"])
+    monkeypatch.setattr("benchmarks.prepare_real_fixture.EXPECTED_CLI_SHA256", mock_cli_sha)
+
+    # Create a mock .csproj and .cs file in the source directory
+    proj_file = env["work_dir"] / "BenignSample.csproj"
+    proj_file.write_text("<Project></Project>", encoding="utf-8")
+    cs_file = env["work_dir"] / "Program.cs"
+    cs_file.write_text("class Program {}", encoding="utf-8")
+
+    manifest_data = create_fixture_manifest(
+        target_output_file=env["fixture_file"],
+        source_module=env["source_file"],
+        cli_path=env["cli_file"],
+        profile_path=env["profile_file"],
+    )
+    save_fixture_manifest(env["manifest_file"], manifest_data)
+
+    assert "source_code" in manifest_data
+
+    # Modify the C# source file
+    cs_file.write_text("class Program { int x = 42; }", encoding="utf-8")
+
+    is_valid, reason = verify_fixture_provenance(
+        env["fixture_file"], env["manifest_file"], env["source_file"], env["cli_file"], env["profile_file"]
+    )
+    assert not is_valid
+    assert "source code modified" in reason.lower()
+

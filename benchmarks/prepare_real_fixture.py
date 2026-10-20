@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
 BENCHMARKS_DIR = WORKSPACE_ROOT / "benchmarks"
@@ -42,25 +42,64 @@ def get_confuser_cli_path() -> Path:
     return WORKSPACE_ROOT / "tools" / "ConfuserEx" / "Confuser.CLI.exe"
 
 
-def ensure_benign_sample() -> Path:
-    """Finds or builds the target module to be protected."""
-    net48_exe = BENCHMARKS_DIR / "BenignSample" / "bin" / "Release" / "net48" / "BenignSample.exe"
-    net8_dll = BENCHMARKS_DIR / "BenignSample" / "bin" / "Release" / "net8.0" / "BenignSample.dll"
+def compute_source_code_hash(source_module: Path) -> Optional[Tuple[str, List[str]]]:
+    """Computes a deterministic composite hash of all C# source files for the module project."""
+    curr = source_module.parent
+    proj_dir = None
+    for _ in range(4):
+        if list(curr.glob("*.csproj")):
+            proj_dir = curr
+            break
+        curr = curr.parent
 
-    if net48_exe.exists():
-        return net48_exe
-    if net8_dll.exists():
-        return net8_dll
+    if not proj_dir:
+        return None
 
-    print("[*] BenignSample binary not found. Building BenignSample...")
-    proj_path = BENCHMARKS_DIR / "BenignSample" / "BenignSample.csproj"
-    res = subprocess.run(
-        ["dotnet", "build", str(proj_path), "-c", "Release"],
-        capture_output=True,
-        text=True
-    )
-    if res.returncode != 0:
-        raise RuntimeError(f"Failed to build BenignSample: {res.stderr}\n{res.stdout}")
+    sources = []
+    for ext in ("*.cs", "*.csproj", "*.txt"):
+        for f in proj_dir.glob(ext):
+            if f.is_file():
+                sources.append(f)
+
+    if not sources:
+        return None
+
+    sources.sort(key=lambda p: p.name)
+    hasher = hashlib.sha256()
+    for s in sources:
+        hasher.update(s.name.encode("utf-8"))
+        hasher.update(s.read_bytes())
+
+    return hasher.hexdigest(), [s.name for s in sources]
+
+
+def ensure_benign_sample(force_rebuild: bool = False) -> Path:
+    """Finds or builds the target module to be protected, ensuring it is fresh with respect to C# sources."""
+    benign_dir = BENCHMARKS_DIR / "BenignSample"
+    net48_exe = benign_dir / "bin" / "Release" / "net48" / "BenignSample.exe"
+    net8_dll = benign_dir / "bin" / "Release" / "net8.0" / "BenignSample.dll"
+
+    target_bin = net48_exe if net48_exe.exists() else (net8_dll if net8_dll.exists() else net48_exe)
+
+    needs_build = force_rebuild or not target_bin.exists()
+    if not needs_build and target_bin.exists():
+        bin_mtime = target_bin.stat().st_mtime
+        for s in benign_dir.glob("*.cs"):
+            if s.stat().st_mtime > bin_mtime:
+                print(f"[*] Source file {s.name} is newer than binary {target_bin.name}. Rebuilding...")
+                needs_build = True
+                break
+
+    if needs_build:
+        print("[*] Building BenignSample from sources...")
+        proj_path = benign_dir / "BenignSample.csproj"
+        res = subprocess.run(
+            ["dotnet", "build", str(proj_path), "-c", "Release"],
+            capture_output=True,
+            text=True
+        )
+        if res.returncode != 0:
+            raise RuntimeError(f"Failed to build BenignSample: {res.stderr}\n{res.stdout}")
 
     if net48_exe.exists():
         return net48_exe
@@ -86,7 +125,7 @@ def create_fixture_manifest(
     profile_sha = compute_file_sha256(profile_path)
     fixture_sha = compute_file_sha256(target_output_file)
 
-    return {
+    manifest = {
         "manifest_version": "1.0.0",
         "generator": "benchmarks/prepare_real_fixture.py",
         "confuserex_toolchain": {
@@ -112,6 +151,16 @@ def create_fixture_manifest(
             "size_bytes": target_output_file.stat().st_size,
         },
     }
+
+    src_code_info = compute_source_code_hash(source_module)
+    if src_code_info:
+        sources_sha, source_files = src_code_info
+        manifest["source_code"] = {
+            "source_files": source_files,
+            "sources_sha256": sources_sha.lower(),
+        }
+
+    return manifest
 
 
 def save_fixture_manifest(manifest_path: Path, manifest_data: Dict[str, Any]) -> None:
@@ -160,7 +209,7 @@ def verify_fixture_provenance(
     if manifest_cli_sha != actual_cli_sha:
         return False, f"Manifest toolchain hash {manifest_cli_sha} does not match current CLI hash {actual_cli_sha}"
 
-    # 3. Validate source module hash
+    # 3. Validate source module binary hash
     if not source_module.exists():
         return False, f"Source module not found at {source_module}"
 
@@ -168,6 +217,15 @@ def verify_fixture_provenance(
     manifest_source_sha = str(manifest["source_module"].get("sha256", "")).lower()
     if actual_source_sha != manifest_source_sha:
         return False, f"Source module hash changed (current: {actual_source_sha}, manifest: {manifest_source_sha})"
+
+    # 3.5 Validate source code hash if tracked in manifest
+    if "source_code" in manifest:
+        src_code_info = compute_source_code_hash(source_module)
+        if src_code_info:
+            current_sources_sha, _ = src_code_info
+            manifest_sources_sha = str(manifest["source_code"].get("sources_sha256", "")).lower()
+            if current_sources_sha != manifest_sources_sha:
+                return False, f"Source code modified (current: {current_sources_sha}, manifest: {manifest_sources_sha})"
 
     # 4. Validate protection profile hash
     if not profile_path.exists():
