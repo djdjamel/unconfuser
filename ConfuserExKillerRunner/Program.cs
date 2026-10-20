@@ -350,7 +350,7 @@ namespace ConfuserExKillerRunner
                     if (AntiTamperKiller.DetectJitMode(module))
                     {
                         Console.ForegroundColor = ConsoleColor.Yellow;
-                        Console.WriteLine("[!] WARNING: ConfuserEx JIT mode artifacts detected in module.");
+                        Console.WriteLine("[!] WARNING: ConfuserEx Anti-Tamper mode JIT détecté (déchiffrement JIT non pris en charge : détecté, non déchiffré).");
                         Console.ResetColor();
                     }
 

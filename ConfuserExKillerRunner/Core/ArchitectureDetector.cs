@@ -9,7 +9,8 @@ namespace ConfuserExKillerRunner.Core
         AnyCPU,
         X86Required,
         X86Preferred,
-        X64
+        X64,
+        Arm64
     }
 
     public sealed class ArchitectureInfo
@@ -30,6 +31,8 @@ namespace ConfuserExKillerRunner.Core
                 return is64BitProcess;
             if (Architecture == TargetArchitecture.X86Required)
                 return !is64BitProcess;
+            if (Architecture == TargetArchitecture.Arm64)
+                return System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.Arm64;
             // AnyCPU or X86Preferred can run in either bitness
             return true;
         }
@@ -81,7 +84,7 @@ namespace ConfuserExKillerRunner.Core
 
             reader.BaseStream.Seek(0x3C, SeekOrigin.Begin);
             uint e_lfanew = reader.ReadUInt32();
-            if (e_lfanew + 256 > reader.BaseStream.Length)
+            if (e_lfanew < 0x40 || (ulong)e_lfanew + 256 > (ulong)reader.BaseStream.Length)
                 return info;
 
             reader.BaseStream.Seek(e_lfanew, SeekOrigin.Begin);
@@ -96,15 +99,27 @@ namespace ConfuserExKillerRunner.Core
             ushort characteristics = reader.ReadUInt16();
 
             long optHeaderPos = reader.BaseStream.Position;
+            if (optHeaderSize < 96 || (ulong)optHeaderPos + (ulong)optHeaderSize > (ulong)reader.BaseStream.Length)
+                return info;
+
             ushort magic = reader.ReadUInt16();
             info.IsPe32Plus = (magic == 0x020B);
+
+            // Read NumberOfRvaAndSizes to verify directory count
+            int numRvaOffset = info.IsPe32Plus ? 108 : 92;
+            uint numRvaAndSizes = 0;
+            if (optHeaderSize >= numRvaOffset + 4 && (ulong)optHeaderPos + (ulong)numRvaOffset + 4 <= (ulong)reader.BaseStream.Length)
+            {
+                reader.BaseStream.Seek(optHeaderPos + numRvaOffset, SeekOrigin.Begin);
+                numRvaAndSizes = reader.ReadUInt32();
+            }
 
             // COM+ Runtime descriptor is at offset 208 for PE32, 224 for PE32+
             int cor20DirOffset = info.IsPe32Plus ? 224 : 208;
             uint cor20Rva = 0;
             uint cor20Size = 0;
 
-            if (optHeaderSize >= cor20DirOffset + 8)
+            if (numRvaAndSizes > 14 && optHeaderSize >= cor20DirOffset + 8 && (ulong)optHeaderPos + (ulong)cor20DirOffset + 8 <= (ulong)reader.BaseStream.Length)
             {
                 reader.BaseStream.Seek(optHeaderPos + cor20DirOffset, SeekOrigin.Begin);
                 cor20Rva = reader.ReadUInt32();
@@ -117,7 +132,7 @@ namespace ConfuserExKillerRunner.Core
             long sectionHeadersPos = optHeaderPos + optHeaderSize;
             uint cor20RawOffset = 0;
 
-            if (info.HasClrHeader && sectionHeadersPos + numSections * 40 <= reader.BaseStream.Length)
+            if (info.HasClrHeader && (ulong)sectionHeadersPos + (ulong)numSections * 40 <= (ulong)reader.BaseStream.Length)
             {
                 for (int i = 0; i < numSections; i++)
                 {
@@ -127,15 +142,19 @@ namespace ConfuserExKillerRunner.Core
                     uint sizeOfRawData = reader.ReadUInt32();
                     uint pointerToRawData = reader.ReadUInt32();
 
-                    if (cor20Rva >= virtualAddress && cor20Rva < virtualAddress + sizeOfRawData)
+                    if (cor20Rva >= virtualAddress && (ulong)cor20Rva < (ulong)virtualAddress + (ulong)sizeOfRawData)
                     {
-                        cor20RawOffset = pointerToRawData + (cor20Rva - virtualAddress);
-                        break;
+                        ulong rel = (ulong)cor20Rva - (ulong)virtualAddress;
+                        if ((ulong)pointerToRawData + rel + 72 <= (ulong)reader.BaseStream.Length)
+                        {
+                            cor20RawOffset = (uint)((ulong)pointerToRawData + rel);
+                            break;
+                        }
                     }
                 }
             }
 
-            if (cor20RawOffset != 0 && cor20RawOffset + 72 <= reader.BaseStream.Length)
+            if (cor20RawOffset != 0 && (ulong)cor20RawOffset + 72 <= (ulong)reader.BaseStream.Length)
             {
                 // Read IMAGE_COR20_HEADER Flags at offset 16
                 reader.BaseStream.Seek(cor20RawOffset + 16, SeekOrigin.Begin);
@@ -146,6 +165,10 @@ namespace ConfuserExKillerRunner.Core
             if (info.Machine == 0x8664) // AMD64
             {
                 info.Architecture = TargetArchitecture.X64;
+            }
+            else if (info.Machine == 0xAA64) // ARM64
+            {
+                info.Architecture = TargetArchitecture.Arm64;
             }
             else if (info.Machine == 0x014C) // i386
             {

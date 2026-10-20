@@ -125,5 +125,46 @@ namespace ConfuserExKillerRunner.Tests
                 using (var mod = ModuleDefMD.Load(peBytes)) { }
             });
         }
+
+        [Fact]
+        public void Cor20Repair_BsjbErasedInMemoryDump_RestoresFromOriginalDiskBytes()
+        {
+            byte[] originalBytes = CreateValidPeBytes();
+            byte[] dumpBytes = (byte[])originalBytes.Clone();
+
+            var pe = PEUtils.ParsePE(dumpBytes);
+            int offset = (int)pe.Cor20FileOffset;
+            uint expectedRva = BitConverter.ToUInt32(dumpBytes, offset + 8);
+            Assert.True(expectedRva > 0);
+
+            // Wipe MetaData RVA to 0 in both dumpBytes and originalBytes
+            Buffer.BlockCopy(BitConverter.GetBytes((uint)0), 0, dumpBytes, offset + 8, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes((uint)0), 0, originalBytes, offset + 8, 4);
+
+            // Wipe BSJB signature in dumpBytes to simulate anti-dump memory scrubbing
+            const uint bsjbSig = 0x424A5342;
+            for (int i = 0; i + 4 <= dumpBytes.Length; i++)
+            {
+                if (BitConverter.ToUInt32(dumpBytes, i) == bsjbSig)
+                {
+                    Buffer.BlockCopy(BitConverter.GetBytes((uint)0), 0, dumpBytes, i, 4);
+                }
+            }
+
+            // Note: originalBytes still retains the BSJB metadata header on disk!
+            var result = Cor20Repair.Repair(dumpBytes, originalBytes);
+
+            Assert.True(result.Success);
+            Assert.True(result.MetaDataRvaRepaired);
+            Assert.True(result.BsjbRepaired);
+            Assert.Equal(expectedRva, result.RepairedMetaDataRva);
+            Assert.Equal(expectedRva, BitConverter.ToUInt32(dumpBytes, offset + 8));
+
+            using (var mod = ModuleDefMD.Load(dumpBytes))
+            {
+                Assert.NotNull(mod);
+                Assert.Equal("TestMod", mod.Name);
+            }
+        }
     }
 }

@@ -26,22 +26,35 @@ namespace ConfuserExTools.AntiTamperKiller {
 
 		public IMAGE_SECTION_HEADER* SectionHeaders => _pSectionHeaders;
 
-		public PEInfo(void* pPEImage) {
+		public PEInfo(void* pPEImage, uint imageLength = 0) {
 			_pPEImage = pPEImage;
+			if (pPEImage == null)
+				return;
+
 			byte* p = (byte*)pPEImage;
-			p += *(uint*)(p + 0x3C);
-			// NtHeader
-			p += 4 + 2;
-			// 跳过 Signature + Machine
-			_sectionsCount = *(ushort*)p;
-			p += 2 + 4 + 4 + 4;
-			// 跳过 NumberOfSections + TimeDateStamp + PointerToSymbolTable + NumberOfSymbols
-			ushort optionalHeaderSize = *(ushort*)p;
-			p += 2 + 2;
-			// 跳过 SizeOfOptionalHeader + Characteristics
-			p += optionalHeaderSize;
-			// 跳过 OptionalHeader
-			_pSectionHeaders = (IMAGE_SECTION_HEADER*)p;
+			if (imageLength > 0 && imageLength < 0x40)
+				return;
+
+			// Verify MZ signature (0x5A4D)
+			if (*(ushort*)p != 0x5A4D)
+				return;
+
+			uint e_lfanew = *(uint*)(p + 0x3C);
+			if (e_lfanew < 0x40 || (imageLength > 0 && (ulong)e_lfanew + 256 > imageLength))
+				return;
+
+			byte* ntHeader = p + e_lfanew;
+			// Verify PE signature 'PE\0\0' (0x00004550)
+			if (*(uint*)ntHeader != 0x00004550)
+				return;
+
+			byte* cur = ntHeader + 4 + 2; // Skip Signature + Machine
+			_sectionsCount = *(ushort*)cur;
+			cur += 2 + 12; // Skip NumberOfSections + TimeDateStamp + PointerToSymbolTable + NumberOfSymbols
+			ushort optionalHeaderSize = *(ushort*)cur;
+			cur += 2 + 2; // Skip SizeOfOptionalHeader + Characteristics
+			cur += optionalHeaderSize; // Skip OptionalHeader
+			_pSectionHeaders = (IMAGE_SECTION_HEADER*)cur;
 		}
 	}
 }

@@ -79,44 +79,81 @@ namespace ConfuserExKillerRunner.Killers
 
             byte* baseAddr = (byte*)hModule;
 
-            // Safe parsing of in-memory PE headers
+            // Safe parsing of in-memory PE headers, falling back to on-disk PE model if headers were erased by Anti-Dump
             try
             {
-                uint e_lfanew = *(uint*)(baseAddr + 0x3C);
-                byte* ntHeader = baseAddr + e_lfanew;
+                var peModel = PEUtils.ParsePE(peImage);
 
-                // Validate PE signature
-                if (*(uint*)ntHeader != 0x00004550)
+                bool memPeHeaderValid = false;
+                ushort numSections = 0;
+                byte* sectionHeaderBase = null;
+
+                try
+                {
+                    uint e_lfanew = *(uint*)(baseAddr + 0x3C);
+                    if (e_lfanew >= 0x40 && e_lfanew < 0x1000)
+                    {
+                        byte* ntHeader = baseAddr + e_lfanew;
+                        if (*(uint*)ntHeader == 0x00004550) // 'PE\0\0'
+                        {
+                            numSections = *(ushort*)(ntHeader + 4 + 2);
+                            ushort optHeaderSize = *(ushort*)(ntHeader + 4 + 16);
+                            sectionHeaderBase = ntHeader + 4 + 20 + optHeaderSize;
+                            memPeHeaderValid = (numSections > 0 && sectionHeaderBase != null);
+                        }
+                    }
+                }
+                catch
+                {
+                    memPeHeaderValid = false;
+                }
+
+                // If in-memory PE headers were completely erased by Anti-Dump but on-disk PE model is valid,
+                // we can still safely diff decrypted sections using on-disk section geometry.
+                if (!memPeHeaderValid && (!peModel.IsValid || peModel.Sections.Count == 0))
                 {
                     result.Status = AntiTamperStatus.Failed;
-                    result.Message = "Invalid in-memory PE header signature";
+                    result.Message = "Invalid in-memory PE header signature and no valid on-disk PE model available";
                     result.DecryptedPeImage = (byte[])peImage.Clone();
                     return result;
                 }
 
-                ushort numSections = *(ushort*)(ntHeader + 4 + 2);
-                ushort optHeaderSize = *(ushort*)(ntHeader + 4 + 16);
-                byte* sectionHeaderBase = ntHeader + 4 + 20 + optHeaderSize;
+                int totalSectionsToInspect = memPeHeaderValid ? numSections : peModel.Sections.Count;
 
-                var peModel = PEUtils.ParsePE(peImage);
-
-                for (int i = 0; i < numSections; i++)
+                for (int i = 0; i < totalSectionsToInspect; i++)
                 {
-                    byte* secPtr = sectionHeaderBase + (i * 40);
+                    string secName = string.Empty;
+                    uint virtualSize = 0;
+                    uint virtualAddress = 0;
+                    uint sizeOfRawData = 0;
+                    uint pointerToRawData = 0;
 
-                    // Extract 8-byte section name from memory
-                    byte[] nameBytes = new byte[8];
-                    Marshal.Copy((IntPtr)secPtr, nameBytes, 0, 8);
-                    string secName = Encoding.ASCII.GetString(nameBytes).TrimEnd('\0');
+                    if (memPeHeaderValid && sectionHeaderBase != null)
+                    {
+                        byte* secPtr = sectionHeaderBase + (i * 40);
+                        byte[] nameBytes = new byte[8];
+                        Marshal.Copy((IntPtr)secPtr, nameBytes, 0, 8);
+                        secName = Encoding.ASCII.GetString(nameBytes).TrimEnd('\0');
 
-                    // If in-memory section name was zeroed out by Anti-Dump, recover name from on-disk PE headers
+                        virtualSize = *(uint*)(secPtr + 8);
+                        virtualAddress = *(uint*)(secPtr + 12);
+                        sizeOfRawData = *(uint*)(secPtr + 16);
+                        pointerToRawData = *(uint*)(secPtr + 20);
+                    }
+
+                    // Fallback to on-disk PE geometry if in-memory section metadata was scrubbed by Anti-Dump
                     string diskSecName = (peModel.IsValid && i < peModel.Sections.Count) ? peModel.Sections[i].Name : string.Empty;
-                    string effectiveName = !string.IsNullOrEmpty(secName) ? secName : diskSecName;
+                    if (peModel.IsValid && i < peModel.Sections.Count)
+                    {
+                        var diskSec = peModel.Sections[i];
+                        if (string.IsNullOrEmpty(secName)) secName = diskSec.Name;
+                        if (virtualAddress == 0) virtualAddress = diskSec.VirtualAddress;
+                        if (virtualSize == 0) virtualSize = diskSec.VirtualSize;
+                        if (sizeOfRawData == 0) sizeOfRawData = diskSec.SizeOfRawData;
+                        if (pointerToRawData == 0) pointerToRawData = diskSec.PointerToRawData;
+                    }
 
-                    uint virtualSize = *(uint*)(secPtr + 8);
-                    uint virtualAddress = *(uint*)(secPtr + 12);
-                    uint sizeOfRawData = *(uint*)(secPtr + 16);
-                    uint pointerToRawData = *(uint*)(secPtr + 20);
+                    string effectiveName = !string.IsNullOrEmpty(secName) ? secName : diskSecName;
 
                     // ConfuserEx anti-tamper operates on custom sections; standard sections (.text, .rsrc, .reloc)
                     // contain memory-mapped IATs and virtual layouts that must not overwrite raw file tables.
@@ -130,10 +167,10 @@ namespace ConfuserExKillerRunner.Killers
 
                     // Also ensure section does not encompass the COR20 directory (CLR header)
                     if (peModel.IsValid && peModel.Cor20Rva != 0 &&
-                        virtualAddress <= peModel.Cor20Rva && peModel.Cor20Rva < virtualAddress + sizeOfRawData)
+                        (ulong)virtualAddress <= (ulong)peModel.Cor20Rva && (ulong)peModel.Cor20Rva < (ulong)virtualAddress + (ulong)sizeOfRawData)
                         continue;
 
-                    if (pointerToRawData == 0 || sizeOfRawData == 0 || pointerToRawData + sizeOfRawData > result.DecryptedPeImage.Length)
+                    if (pointerToRawData == 0 || sizeOfRawData == 0 || (ulong)pointerToRawData + (ulong)sizeOfRawData > (ulong)result.DecryptedPeImage.Length)
                         continue;
 
                     byte* inMemorySection = baseAddr + virtualAddress;

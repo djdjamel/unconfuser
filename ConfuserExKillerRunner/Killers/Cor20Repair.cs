@@ -11,6 +11,7 @@ namespace ConfuserExKillerRunner.Killers
         public bool MetaDataRvaRepaired { get; set; }
         public uint OriginalMetaDataRva { get; set; }
         public uint RepairedMetaDataRva { get; set; }
+        public bool BsjbRepaired { get; set; }
         public string Message { get; set; }
     }
 
@@ -68,12 +69,12 @@ namespace ConfuserExKillerRunner.Killers
                     }
                 }
 
-                // Fallback 2: Scan for BSJB signature across the binary
+                // Fallback 2: Scan for BSJB signature across the in-memory/dump binary
                 if (metaRva == 0)
                 {
                     const uint bsjbSig = 0x424A5342;
                     uint foundOffset = 0;
-                    for (uint i = 0; i + 16 < peBytes.Length; i++)
+                    for (uint i = 0; (ulong)i + 16 < (ulong)peBytes.Length; i++)
                     {
                         if (BitConverter.ToUInt32(peBytes, (int)i) == bsjbSig)
                         {
@@ -94,6 +95,42 @@ namespace ConfuserExKillerRunner.Killers
                             Buffer.BlockCopy(rvaBytes, 0, peBytes, offset + 8, 4);
                             result.MetaDataRvaRepaired = true;
                             result.RepairedMetaDataRva = calculatedRva;
+                            metaRva = calculatedRva;
+                        }
+                    }
+                }
+
+                // Fallback 3: If BSJB signature was erased in memory dump, scan original on-disk image
+                if (metaRva == 0 && originalBytes != null)
+                {
+                    var origPe = PEUtils.ParsePE(originalBytes);
+                    if (origPe.IsValid)
+                    {
+                        const uint bsjbSig = 0x424A5342;
+                        uint foundOffset = 0;
+                        for (uint i = 0; (ulong)i + 16 < (ulong)originalBytes.Length; i++)
+                        {
+                            if (BitConverter.ToUInt32(originalBytes, (int)i) == bsjbSig)
+                            {
+                                if (PEUtils.IsValidMetadataHeader(originalBytes, i))
+                                {
+                                    foundOffset = i;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (foundOffset != 0)
+                        {
+                            uint calculatedRva = PEUtils.FileOffsetToRva(origPe, foundOffset);
+                            if (calculatedRva != 0)
+                            {
+                                byte[] rvaBytes = BitConverter.GetBytes(calculatedRva);
+                                Buffer.BlockCopy(rvaBytes, 0, peBytes, offset + 8, 4);
+                                result.MetaDataRvaRepaired = true;
+                                result.RepairedMetaDataRva = calculatedRva;
+                                metaRva = calculatedRva;
+                            }
                         }
                     }
                 }
@@ -102,12 +139,39 @@ namespace ConfuserExKillerRunner.Killers
             if (metaRva == 0)
             {
                 result.Success = false;
-                result.Message = "COR20 MetaData RVA is 0 and could not be recovered.";
+                result.Message = "COR20 MetaData RVA is 0 and could not be recovered (BSJB signature absent or erased).";
                 return result;
             }
 
+            // If BSJB signature was erased at the metadata offset in peBytes, restore it from originalBytes
+            if (metaRva != 0)
+            {
+                uint metaFileOffset = PEUtils.RvaToFileOffset(pe, metaRva);
+                if (metaFileOffset != 0 && (ulong)metaFileOffset + 4 <= (ulong)peBytes.Length)
+                {
+                    uint currentSig = BitConverter.ToUInt32(peBytes, (int)metaFileOffset);
+                    if (currentSig != 0x424A5342 && originalBytes != null)
+                    {
+                        var origPe = PEUtils.ParsePE(originalBytes);
+                        if (origPe.IsValid)
+                        {
+                            uint origFileOffset = PEUtils.RvaToFileOffset(origPe, metaRva);
+                            if (origFileOffset != 0 && (ulong)origFileOffset + 4 <= (ulong)originalBytes.Length)
+                            {
+                                if (BitConverter.ToUInt32(originalBytes, (int)origFileOffset) == 0x424A5342)
+                                {
+                                    byte[] bsjbBytes = BitConverter.GetBytes(0x424A5342U);
+                                    Buffer.BlockCopy(bsjbBytes, 0, peBytes, (int)metaFileOffset, 4);
+                                    result.BsjbRepaired = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             result.Success = true;
-            result.Message = $"Repaired: Cb={result.CbRepaired}, MetaDataRva={result.MetaDataRvaRepaired}";
+            result.Message = $"Repaired: Cb={result.CbRepaired}, MetaDataRva={result.MetaDataRvaRepaired}, Bsjb={result.BsjbRepaired}";
             return result;
         }
     }
