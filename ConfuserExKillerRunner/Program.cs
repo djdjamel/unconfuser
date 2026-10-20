@@ -685,6 +685,7 @@ namespace ConfuserExKillerRunner
                 var body = method.Body;
                 try
                 {
+                    body.SimplifyMacros(method.Parameters);
                     body.SimplifyBranches();
                     body.OptimizeBranches();
                     body.OptimizeMacros();

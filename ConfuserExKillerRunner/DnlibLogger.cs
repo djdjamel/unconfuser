@@ -12,6 +12,8 @@ namespace ConfuserExTools.ConfuserExKiller {
 		public static DnlibLogger Instance => _instance;
 
 		public bool IgnoresEvent(LoggerEvent loggerEvent) {
+			if (!Logger.IsVerbose && (loggerEvent == LoggerEvent.Verbose || loggerEvent == LoggerEvent.VeryVerbose))
+				return true;
 			return false;
 		}
 
