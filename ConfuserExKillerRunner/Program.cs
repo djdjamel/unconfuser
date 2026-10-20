@@ -84,7 +84,7 @@ namespace ConfuserExKillerRunner
                 {
                     outputPath = args[++i];
                 }
-                else if ((arg == "--json-report" || arg == "--report") && i + 1 < args.Length)
+                else if ((arg == "--json-report" || arg == "--report-json" || arg == "--report" || arg == "-r" || arg == "--json") && i + 1 < args.Length)
                 {
                     jsonReportPath = Path.GetFullPath(args[++i]);
                 }
@@ -166,6 +166,7 @@ namespace ConfuserExKillerRunner
                 }
 
                 // Stage 0: Unpack ConfuserEx Compressor if present
+                var swStage0 = Stopwatch.StartNew();
                 try
                 {
                     using (var probeMod = ModuleDefMD.Load(peImage))
@@ -186,8 +187,10 @@ namespace ConfuserExKillerRunner
                 {
                     Console.WriteLine($"[!] CompressorUnpacker probing failed: {ex.Message}");
                 }
+                stepTimings["Stage0_Compressor"] = swStage0.ElapsedMilliseconds;
 
                 // Step 1: Safety Gate & Anti-Tamper
+                var swStage1 = Stopwatch.StartNew();
                 bool antiTamperDecrypted = false;
                 bool staticAntiTamperDetected = false;
                 if (!allowExecution)
@@ -366,6 +369,7 @@ namespace ConfuserExKillerRunner
                             Console.WriteLine("[+] Anti-Dump: Restored BSJB metadata header signature");
                     }
                 }
+                stepTimings["Stage1_AntiTamper_HeaderRepair"] = swStage1.ElapsedMilliseconds;
 
                 string fileExt = Path.GetExtension(assemblyPath);
                 string baseName = Path.GetFileNameWithoutExtension(assemblyPath);
@@ -375,6 +379,7 @@ namespace ConfuserExKillerRunner
                 bool constantsDecrypted = false;
 
                 // Step 2: Dynamic passes via isolated worker (FieldRVA, Constants)
+                var swStage2 = Stopwatch.StartNew();
                 Console.WriteLine("[*] Step 2: Running FieldRvaKiller, ProxyKiller, and ConstantKiller...");
                 if (allowExecution)
                 {
@@ -504,15 +509,19 @@ namespace ConfuserExKillerRunner
                             if (constResult.TotalReferencesCount > 0 && !constResult.AllReferencesResolved)
                                 Console.WriteLine($"[!] ConstantKiller: Partial decryption ({constResult.ResolvedReferencesCount}/{constResult.TotalReferencesCount} references rewritten). Decrypter and buffer preserved.");
                         }
+                        stepTimings["Stage2_Constants_Resources_Proxies"] = swStage2.ElapsedMilliseconds;
 
                         // Step 3: Protector hook stripping
+                        var swStage3 = Stopwatch.StartNew();
                         Console.WriteLine("[*] Step 3: Cleaning Protector Hooks...");
                         var cleanResult = CleanerKiller.StripProtectorHooks(module, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
                         totalCleanerHooks += cleanResult.StrippedHooksCount + cleanResult.RemovedMethodsCount;
                         if (cleanResult.StrippedHooksCount > 0)
                             Console.WriteLine($"[+] CleanerKiller: Stripped {cleanResult.StrippedHooksCount} protector initializers from <Module>.cctor");
+                        stepTimings["Stage3_CleanerHooks"] = swStage3.ElapsedMilliseconds;
 
                         // Step 3.5: DeadCodeStripper & PredicateKiller pre-switch
+                        var swStage4 = Stopwatch.StartNew();
                         Console.WriteLine("[*] Step 3.5: Running DeadCodeStripper & PredicateKiller...");
                         var dcsPre = DeadCodeStripper.Execute(module);
                         totalJunkStripped += dcsPre.JunkPairsStripped + dcsPre.TrampolinesFlattened;
@@ -533,6 +542,7 @@ namespace ConfuserExKillerRunner
                         totalJunkStripped += dcsPost.JunkPairsStripped + dcsPost.TrampolinesFlattened;
                         if (dcsPost.MethodsOptimized > 0)
                             Console.WriteLine($"[+] DeadCodeStripper (Post): {dcsPost.Message}");
+                        stepTimings["Stage4_ControlFlow_DeadCode"] = swStage4.ElapsedMilliseconds;
                     }
                     else
                     {
@@ -548,6 +558,7 @@ namespace ConfuserExKillerRunner
             string currentIntermediate = cexkPath;
 
             // Step 5: de4dot-cex
+            var swStage5 = Stopwatch.StartNew();
             string cleanedPath = Path.Combine(executionTempDir, baseName + "-cleaned" + fileExt);
             string de4dotExecutable = skipDe4dot ? null : ProcessRunner.ResolveDe4dotPath(explicitDe4dotPath);
 
@@ -592,8 +603,10 @@ namespace ConfuserExKillerRunner
                 Console.WriteLine("[!] Skipping external de4dot pass.");
                 Console.ResetColor();
             }
+            stepTimings["Stage5_ExternalDeobfuscator"] = swStage5.ElapsedMilliseconds;
 
             // Step 6: Final SwitchKiller pass on intermediate output
+            var swStage6 = Stopwatch.StartNew();
             Console.WriteLine("[*] Step 6: Running final cleanup pass...");
             string finalDefaultPath = Path.Combine(targetDir, baseName + "_final" + fileExt);
             string finalOutputPath = !string.IsNullOrEmpty(outputPath) ? Path.GetFullPath(outputPath) : finalDefaultPath;
@@ -636,6 +649,7 @@ namespace ConfuserExKillerRunner
                 writerOpts2.MetaDataOptions.Flags |= MetaDataFlags.KeepOldMaxStack;
                 module2.Write(candidatePath, writerOpts2);
             }
+            stepTimings["Stage6_FinalCleanup"] = swStage6.ElapsedMilliseconds;
 
             // Quality Audit: Validate candidate before promotion
             Console.WriteLine();
@@ -645,6 +659,7 @@ namespace ConfuserExKillerRunner
             var swAudit = Stopwatch.StartNew();
             var auditReport = QualityAuditor.Audit(candidatePath, runExternalVerifier: true, workingDir: targetDir);
             var regressions = QualityAuditor.DetectRegressions(baselineAudit, auditReport);
+            stepTimings["Stage7_QualityAudit"] = swAudit.ElapsedMilliseconds;
             if (regressions.Count > 0)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
@@ -725,6 +740,7 @@ namespace ConfuserExKillerRunner
                             },
                             PassTimingsMs = stepTimings,
                             TotalElapsedMs = swTotal.ElapsedMilliseconds,
+                            PeakWorkingSetBytes = Process.GetCurrentProcess().PeakWorkingSet64,
                             ExceptionsAndRollbacks = exceptionsAndRollbacks,
                             FinalStatus = "FAILED",
                             OverallVerdict = "FAILED (Candidate Assembly Rejected by QualityAuditor)",
@@ -820,6 +836,17 @@ namespace ConfuserExKillerRunner
                     Console.WriteLine($"[!] Could not generate protection coverage matrix: {ex.Message}");
             }
 
+            Console.WriteLine();
+            Console.WriteLine("---------------------------------------------------------------");
+            Console.WriteLine("                 PIPELINE STAGE TIMINGS                        ");
+            Console.WriteLine("---------------------------------------------------------------");
+            foreach (var kvp in stepTimings)
+            {
+                Console.WriteLine(string.Format("[*] {0,-38} : {1,6} ms", kvp.Key, kvp.Value));
+            }
+            Console.WriteLine(string.Format("[*] {0,-38} : {1,6} ms", "Total Pipeline Elapsed", swTotal.ElapsedMilliseconds));
+            Console.WriteLine("---------------------------------------------------------------");
+
             int exitCode = 0;
             string finalStatus = "SUCCESS";
             if (matrix != null && (matrix.HasRequiresDynamicSkipped || matrix.HasUnsupported || (strictExitCodes && matrix.HasPartiallyProcessed)))
@@ -885,6 +912,7 @@ namespace ConfuserExKillerRunner
                         },
                         PassTimingsMs = stepTimings,
                         TotalElapsedMs = swTotal.ElapsedMilliseconds,
+                        PeakWorkingSetBytes = Process.GetCurrentProcess().PeakWorkingSet64,
                         ExceptionsAndRollbacks = exceptionsAndRollbacks,
                         FinalStatus = finalStatus,
                         OverallVerdict = matrix?.OverallVerdict ?? finalStatus,
@@ -946,7 +974,7 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("  -d, --de4dot <path>     Specify explicit path to de4dot-cex executable");
             Console.WriteLine("  --no-de4dot             Skip de4dot external process pass");
             Console.WriteLine("  --no-netdetect          Skip NetDetect pre/post obfuscation audit");
-            Console.WriteLine("  --json-report <path>    Generate structured versioned JSON audit report");
+            Console.WriteLine("  --json-report, --report-json <path>  Generate structured versioned JSON audit report");
             Console.WriteLine("  --strict-exit-codes     Return exit code 2 on any partial deobfuscation");
             Console.WriteLine("  --verbose               Enable verbose console output");
             Console.WriteLine("  -h, --help              Show this help message");

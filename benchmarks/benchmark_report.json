@@ -15,7 +15,7 @@
       "is_synthetic": true,
       "input_sha256": "382a453a2738665d9a042a8cdd204a70d49593b2f45ab9bde7ff214024027101",
       "output_produced": true,
-      "output_sha256": "7b5785574b53085684291ce4cc21b5b94787d5beadbaddd9eb3f5235f1671568",
+      "output_sha256": "64046dc93d0b80ea113653bc0f85b8f2f38d7c7a3e4daf6355e97d28e4f8ed73",
       "deobfuscator_returncode": 0,
       "metrics": {
         "constants_decrypted": 3,
@@ -236,7 +236,7 @@
       "is_synthetic": true,
       "input_sha256": "aba42f14e2550a810e333b43edc8f848b3a3f37b271f7bdf4d50f11eda492d4e",
       "output_produced": true,
-      "output_sha256": "9826471a3d13bb4017053e6679f74323d2ea8a934d1e173141f050c89017f396",
+      "output_sha256": "dc341f9c1ba9ab593d3f2e8ae2cafe1b198cddccf628ba361954f7deebca64ee",
       "deobfuscator_returncode": 0,
       "metrics": {
         "constants_decrypted": 0,
@@ -279,7 +279,7 @@
       "is_synthetic": true,
       "input_sha256": "d8f0de14684f5e6d02739f174230b7bae41f85015f9dcec4c0009c59f1fae5b6",
       "output_produced": true,
-      "output_sha256": "3a0fac97eee1486e187a7da2543a80d5fdac5812fec587f7193ee07a6ff281d4",
+      "output_sha256": "c3e2e0b4eb2e0f33df8b7c328a5c57492743c528981d664b9638cc23016d9aca",
       "deobfuscator_returncode": 0,
       "metrics": {
         "constants_decrypted": 0,
@@ -368,9 +368,9 @@
       "fixture_name": "BenignSample.exe",
       "scenario": "real_confuserex",
       "is_synthetic": false,
-      "input_sha256": "642f5bfa9662228f03d4ee4398831d7e2a303680c24c9ce8a22339facfe97f56",
+      "input_sha256": "80d2281148fa19dfacfc762f0354774287a92b114974a5d5226efc5bd47fd92f",
       "output_produced": true,
-      "output_sha256": "161222b69503dcdcbb2feb66ad9bcbbcf05fa4b1fbfb8a05cb7771a4e6138da3",
+      "output_sha256": "fa6d7a0f50d685ec1938637f77bd420fc2c1780a71e32c6961d8d9512d415a58",
       "deobfuscator_returncode": 0,
       "metrics": {
         "constants_decrypted": 25,
@@ -380,7 +380,7 @@
         "deadcode_junk_pairs": 0,
         "resources_extracted": 1,
         "compressor_unpacked": false,
-        "cleaner_hooks_stripped": 1,
+        "cleaner_hooks_stripped": 2,
         "audit_status": "CLEAN",
         "invalid_instructions": 0,
         "unresolved_call_sites": 0,

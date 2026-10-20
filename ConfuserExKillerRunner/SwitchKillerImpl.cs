@@ -90,7 +90,22 @@ namespace ConfuserExKillerRunner
         {
             foreach (var method in methods)
             {
-                if (!method.HasBody) continue;
+                if (!method.HasBody || method.Body.Instructions == null || method.Body.Instructions.Count < 2) continue;
+
+                // Performance optimization: skip methods without branches or switches (no control-flow graph complexity)
+                bool hasBranch = false;
+                var instrsCheck = method.Body.Instructions;
+                for (int i = 0; i < instrsCheck.Count; i++)
+                {
+                    var opType = instrsCheck[i].OpCode.OperandType;
+                    if (opType == OperandType.InlineBrTarget || opType == OperandType.ShortInlineBrTarget || opType == OperandType.InlineSwitch)
+                    {
+                        hasBranch = true;
+                        break;
+                    }
+                }
+                if (!hasBranch) continue;
+
                 var origBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
                 try
                 {

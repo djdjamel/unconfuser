@@ -152,5 +152,46 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal("Anti-Tamper", prots[0]["name"].AsString());
             Assert.Equal("VerifiedOnRealFixture", prots[0]["status"].AsString());
         }
+
+        [Fact]
+        public void PipelineExecution_GeneratesStageTimingsAndMemoryMetricsInJsonReport()
+        {
+            string root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", ".."));
+            string samplePath = Path.Combine(root, "benchmarks", "BenignSample", "bin", "Release", "net8.0", "BenignSample.dll");
+            if (!File.Exists(samplePath))
+            {
+                samplePath = Path.Combine(root, "benchmarks", "BenignSample", "bin", "Release", "net48", "BenignSample.exe");
+            }
+
+            string outPath = Path.Combine(_testDir, "timing_out.dll");
+            string reportPath = Path.Combine(_testDir, "timing_report.json");
+
+            int exitCode = Program.Main(new[]
+            {
+                samplePath,
+                "-o", outPath,
+                "--no-de4dot",
+                "--no-netdetect",
+                "--report-json", reportPath
+            });
+
+            Assert.Equal(0, exitCode);
+            Assert.True(File.Exists(reportPath));
+
+            string jsonContent = File.ReadAllText(reportPath);
+            var parsed = JsonValue.Parse(jsonContent);
+
+            var timings = parsed["timings"];
+            Assert.NotNull(timings);
+            Assert.True(timings["totalElapsedMs"].AsLong() >= 0);
+            Assert.True(timings["peakWorkingSetBytes"].AsLong() > 0);
+            Assert.False(timings["Stage0_Compressor"].IsNull);
+            Assert.False(timings["Stage1_AntiTamper_HeaderRepair"].IsNull);
+            Assert.False(timings["Stage2_Constants_Resources_Proxies"].IsNull);
+            Assert.False(timings["Stage3_CleanerHooks"].IsNull);
+            Assert.False(timings["Stage4_ControlFlow_DeadCode"].IsNull);
+            Assert.False(timings["Stage6_FinalCleanup"].IsNull);
+            Assert.False(timings["Stage7_QualityAudit"].IsNull);
+        }
     }
 }

@@ -60,6 +60,7 @@ namespace ConfuserExKillerRunner.Analysis
 
         public Dictionary<string, long> PassTimingsMs { get; set; } = new Dictionary<string, long>(StringComparer.Ordinal);
         public long TotalElapsedMs { get; set; }
+        public long PeakWorkingSetBytes { get; set; }
 
         public List<string> ExceptionsAndRollbacks { get; set; } = new List<string>();
         public List<string> KnownLimitations { get; set; } = new List<string>();
@@ -182,6 +183,7 @@ namespace ConfuserExKillerRunner.Analysis
                     timingsObj[kvp.Key] = JsonValue.From(kvp.Value);
             }
             timingsObj["totalElapsedMs"] = JsonValue.From(TotalElapsedMs);
+            timingsObj["peakWorkingSetBytes"] = JsonValue.From(PeakWorkingSetBytes);
             root["timings"] = timingsObj;
 
             // Exceptions & Rollbacks
