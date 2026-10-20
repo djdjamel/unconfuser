@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 """
 Dedicated fixture preparation script for authentic ConfuserEx 1.0.0 binaries.
-Provisions the ConfuserEx toolchain and generates:
+Ensures ConfuserEx toolchain is provisioned and generates:
     benchmarks/fixtures/real_confuserex/BenignSample.exe
-using the deterministic profile at benchmarks/ConfuserExProfile/confuserex_v1.0.0.crproj.
+along with a cryptographic provenance manifest:
+    benchmarks/fixtures/real_confuserex/fixture_manifest.json
+verifying input module, protection profile, ConfuserEx binary, and output fixture hashes.
 """
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Dict, Any, Optional, Tuple
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
 BENCHMARKS_DIR = WORKSPACE_ROOT / "benchmarks"
 FIXTURES_DIR = BENCHMARKS_DIR / "fixtures"
 REAL_CONFUSEREX_DIR = FIXTURES_DIR / "real_confuserex"
 PROFILE_CRPROJ = BENCHMARKS_DIR / "ConfuserExProfile" / "confuserex_v1.0.0.crproj"
+MANIFEST_NAME = "fixture_manifest.json"
 
 # Add benchmarks directory to sys.path to import provision_confuserex
 sys.path.insert(0, str(BENCHMARKS_DIR))
@@ -64,43 +69,191 @@ def ensure_benign_sample() -> Path:
     raise FileNotFoundError("Could not find BenignSample binary after build.")
 
 
-def prepare_real_confuserex_fixture(force: bool = False) -> Path:
-    """
-    Provisions Confuser.CLI.exe if needed, generates benchmarks/fixtures/real_confuserex/BenignSample.exe,
-    and validates the resulting protected PE.
-    """
-    REAL_CONFUSEREX_DIR.mkdir(parents=True, exist_ok=True)
-    target_output_file = REAL_CONFUSEREX_DIR / "BenignSample.exe"
+def get_manifest_path(target_dir: Optional[Path] = None) -> Path:
+    base_dir = target_dir or REAL_CONFUSEREX_DIR
+    return base_dir / MANIFEST_NAME
 
+
+def create_fixture_manifest(
+    target_output_file: Path,
+    source_module: Path,
+    cli_path: Path,
+    profile_path: Path,
+) -> Dict[str, Any]:
+    """Builds a structured provenance manifest dictionary."""
+    cli_sha = compute_file_sha256(cli_path)
+    source_sha = compute_file_sha256(source_module)
+    profile_sha = compute_file_sha256(profile_path)
+    fixture_sha = compute_file_sha256(target_output_file)
+
+    return {
+        "manifest_version": "1.0.0",
+        "generator": "benchmarks/prepare_real_fixture.py",
+        "confuserex_toolchain": {
+            "release": "v1.0.0",
+            "commit": "3c9c29d9daf2f1259edf69054c5693d5d225a980",
+            "cli_filename": cli_path.name,
+            "expected_cli_sha256": EXPECTED_CLI_SHA256.lower(),
+            "actual_cli_sha256": cli_sha.lower(),
+        },
+        "source_module": {
+            "name": source_module.name,
+            "sha256": source_sha.lower(),
+            "size_bytes": source_module.stat().st_size,
+        },
+        "protection_profile": {
+            "filename": profile_path.name,
+            "sha256": profile_sha.lower(),
+            "size_bytes": profile_path.stat().st_size,
+        },
+        "fixture": {
+            "filename": target_output_file.name,
+            "sha256": fixture_sha.lower(),
+            "size_bytes": target_output_file.stat().st_size,
+        },
+    }
+
+
+def save_fixture_manifest(manifest_path: Path, manifest_data: Dict[str, Any]) -> None:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = manifest_path.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(manifest_data, f, indent=2)
+    temp_path.replace(manifest_path)
+
+
+def verify_fixture_provenance(
+    target_output_file: Path,
+    manifest_path: Path,
+    source_module: Path,
+    cli_path: Path,
+    profile_path: Path,
+) -> Tuple[bool, str]:
+    """
+    Verifies that target_output_file matches the cryptographic provenance in manifest_path.
+    Returns (True, "Provenance verified") or (False, <failure_reason>).
+    """
+    if not target_output_file.exists():
+        return False, f"Fixture file not found at {target_output_file}"
+
+    if not manifest_path.exists():
+        return False, f"Provenance manifest not found at {manifest_path}"
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except Exception as ex:
+        return False, f"Failed to parse provenance manifest: {ex}"
+
+    # 1. Validate manifest structure
+    if "confuserex_toolchain" not in manifest or "source_module" not in manifest or "fixture" not in manifest or "protection_profile" not in manifest:
+        return False, "Provenance manifest is missing required sections"
+
+    # 2. Validate toolchain hash
+    if not cli_path.exists():
+        return False, f"Confuser.CLI.exe not found at {cli_path}"
+
+    actual_cli_sha = compute_file_sha256(cli_path).lower()
+    manifest_cli_sha = str(manifest["confuserex_toolchain"].get("actual_cli_sha256", "")).lower()
+    if actual_cli_sha != EXPECTED_CLI_SHA256.lower():
+        return False, f"Confuser.CLI.exe hash {actual_cli_sha} does not match expected {EXPECTED_CLI_SHA256.lower()}"
+    if manifest_cli_sha != actual_cli_sha:
+        return False, f"Manifest toolchain hash {manifest_cli_sha} does not match current CLI hash {actual_cli_sha}"
+
+    # 3. Validate source module hash
+    if not source_module.exists():
+        return False, f"Source module not found at {source_module}"
+
+    actual_source_sha = compute_file_sha256(source_module).lower()
+    manifest_source_sha = str(manifest["source_module"].get("sha256", "")).lower()
+    if actual_source_sha != manifest_source_sha:
+        return False, f"Source module hash changed (current: {actual_source_sha}, manifest: {manifest_source_sha})"
+
+    # 4. Validate protection profile hash
+    if not profile_path.exists():
+        return False, f"Protection profile not found at {profile_path}"
+
+    actual_profile_sha = compute_file_sha256(profile_path).lower()
+    manifest_profile_sha = str(manifest["protection_profile"].get("sha256", "")).lower()
+    if actual_profile_sha != manifest_profile_sha:
+        return False, f"Protection profile hash changed (current: {actual_profile_sha}, manifest: {manifest_profile_sha})"
+
+    # 5. Validate output fixture hash and basic PE sanity
+    if target_output_file.stat().st_size <= 4096:
+        return False, f"Fixture size is too small ({target_output_file.stat().st_size} bytes)"
+
+    with open(target_output_file, "rb") as f:
+        header = f.read(2)
+    if header != b"MZ":
+        return False, "Fixture missing MZ executable header"
+
+    actual_fixture_sha = compute_file_sha256(target_output_file).lower()
+    manifest_fixture_sha = str(manifest["fixture"].get("sha256", "")).lower()
+    if actual_fixture_sha != manifest_fixture_sha:
+        return False, f"Fixture hash mismatch (current: {actual_fixture_sha}, manifest: {manifest_fixture_sha})"
+
+    manifest_fixture_size = manifest["fixture"].get("size_bytes")
+    if target_output_file.stat().st_size != manifest_fixture_size:
+        return False, f"Fixture size mismatch (current: {target_output_file.stat().st_size}, manifest: {manifest_fixture_size})"
+
+    return True, "Provenance verified"
+
+
+def prepare_real_confuserex_fixture(
+    force: bool = False,
+    target_dir: Optional[Path] = None,
+    source_module: Optional[Path] = None,
+    cli_path: Optional[Path] = None,
+    profile_path: Optional[Path] = None,
+) -> Path:
+    """
+    Provisions Confuser.CLI.exe if needed, generates the authentic fixture,
+    and produces a cryptographic provenance manifest. If an existing fixture
+    has verified provenance matching current source and profile, it is safely reused.
+    """
+    base_dir = target_dir or REAL_CONFUSEREX_DIR
+    base_dir.mkdir(parents=True, exist_ok=True)
+    target_output_file = base_dir / "BenignSample.exe"
+    manifest_path = get_manifest_path(base_dir)
+
+    # Resolve dependencies
+    resolved_cli = cli_path or get_confuser_cli_path()
+    resolved_source = source_module or ensure_benign_sample()
+    resolved_profile = profile_path or PROFILE_CRPROJ
+
+    # Check existing fixture provenance
     if target_output_file.exists() and not force:
-        if target_output_file.stat().st_size > 4096:
-            with open(target_output_file, "rb") as f:
-                header = f.read(2)
-            if header == b"MZ":
-                print(f"[+] Authentic ConfuserEx fixture already present at: {target_output_file}")
+        if resolved_cli.exists() and resolved_source.exists() and resolved_profile.exists():
+            is_valid, reason = verify_fixture_provenance(
+                target_output_file, manifest_path, resolved_source, resolved_cli, resolved_profile
+            )
+            if is_valid:
+                print(f"[+] Authentic ConfuserEx fixture with verified provenance present at: {target_output_file}")
                 return target_output_file
+            print(f"[*] Fixture provenance check failed ({reason}). Re-generating fixture...")
+        else:
+            print("[*] Required toolchain or source files missing for provenance check. Re-generating...")
 
     print("[*] Preparing authentic ConfuserEx fixture...")
 
     # 1. Ensure Confuser.CLI.exe is provisioned
-    cli_path = get_confuser_cli_path()
-    if not cli_path.exists():
+    if not resolved_cli.exists():
         print("[*] Provisioning Confuser.CLI.exe...")
-        cli_path = provision_confuserex()
+        resolved_cli = provision_confuserex()
 
-    actual_sha = compute_file_sha256(cli_path)
+    actual_sha = compute_file_sha256(resolved_cli)
     if actual_sha.lower() != EXPECTED_CLI_SHA256.lower():
         raise ValueError(
             f"Confuser.CLI.exe checksum mismatch! Expected: {EXPECTED_CLI_SHA256}, Got: {actual_sha}"
         )
 
     # 2. Ensure BenignSample binary is built
-    target_module = ensure_benign_sample()
-    print(f"[*] Target source module: {target_module}")
+    print(f"[*] Target source module: {resolved_source}")
+    print(f"[*] Protection profile:   {resolved_profile}")
 
     # 3. Clean target directory for clean run
-    if REAL_CONFUSEREX_DIR.exists():
-        for item in list(REAL_CONFUSEREX_DIR.iterdir()):
+    if base_dir.exists():
+        for item in list(base_dir.iterdir()):
             if item.is_file():
                 try:
                     item.unlink()
@@ -108,19 +261,19 @@ def prepare_real_confuserex_fixture(force: bool = False) -> Path:
                     pass
 
     # 4. Generate .crproj instance
-    crproj_template = PROFILE_CRPROJ.read_text(encoding="utf-8")
+    crproj_template = resolved_profile.read_text(encoding="utf-8")
     crproj_content = crproj_template.format(
-        output_dir=str(REAL_CONFUSEREX_DIR),
-        base_dir=str(target_module.parent),
-        module_path=str(target_module),
+        output_dir=str(base_dir),
+        base_dir=str(resolved_source.parent),
+        module_path=str(resolved_source),
     )
-    instance_crproj_path = REAL_CONFUSEREX_DIR / "confuser_run.crproj"
+    instance_crproj_path = base_dir / "confuser_run.crproj"
     instance_crproj_path.write_text(crproj_content, encoding="utf-8")
 
     # 5. Run Confuser.CLI.exe
     print(f"[*] Running Confuser.CLI.exe with {instance_crproj_path}...")
     proc = subprocess.run(
-        [str(cli_path), "-n", str(instance_crproj_path)],
+        [str(resolved_cli), "-n", str(instance_crproj_path)],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -131,8 +284,8 @@ def prepare_real_confuserex_fixture(force: bool = False) -> Path:
         err = proc.stderr.strip() or proc.stdout.strip()
         raise RuntimeError(f"Confuser.CLI.exe failed (code {proc.returncode}): {err}")
 
-    # The output file has the same name as target_module
-    produced_file = REAL_CONFUSEREX_DIR / target_module.name
+    # The output file has the same name as resolved_source
+    produced_file = base_dir / resolved_source.name
     if not produced_file.exists():
         raise FileNotFoundError(f"Confuser.CLI.exe did not produce expected output at {produced_file}")
 
@@ -148,17 +301,31 @@ def prepare_real_confuserex_fixture(force: bool = False) -> Path:
         if f.read(2) != b"MZ":
             raise ValueError("Produced fixture does not start with MZ header")
 
+    # 6. Generate and save cryptographic provenance manifest
+    manifest_data = create_fixture_manifest(
+        target_output_file, resolved_source, resolved_cli, resolved_profile
+    )
+    save_fixture_manifest(manifest_path, manifest_data)
+
+    # 7. Post-generation verification
+    is_valid, reason = verify_fixture_provenance(
+        target_output_file, manifest_path, resolved_source, resolved_cli, resolved_profile
+    )
+    if not is_valid:
+        raise RuntimeError(f"Post-generation provenance verification failed: {reason}")
+
     sha = compute_file_sha256(target_output_file)
-    print(f"[+] Successfully generated authentic ConfuserEx fixture:")
-    print(f"    Path:    {target_output_file}")
-    print(f"    Size:    {target_output_file.stat().st_size:,} bytes")
-    print(f"    SHA-256: {sha}")
+    print(f"[+] Successfully generated authentic ConfuserEx fixture with verified provenance:")
+    print(f"    Path:     {target_output_file}")
+    print(f"    Manifest: {manifest_path}")
+    print(f"    Size:     {target_output_file.stat().st_size:,} bytes")
+    print(f"    SHA-256:  {sha}")
 
     return target_output_file
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Prepare authentic ConfuserEx fixture")
+    parser = argparse.ArgumentParser(description="Prepare authentic ConfuserEx fixture with provenance manifest")
     parser.add_argument("--force", action="store_true", help="Force regeneration of fixture")
     args = parser.parse_args()
 

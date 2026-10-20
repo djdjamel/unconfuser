@@ -28,6 +28,46 @@ namespace ConfuserExKillerRunner.Tests
             catch { }
         }
 
+        internal static void ExecuteFixturePreparation(string root, string prepScript, int timeoutMs = 60000)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "python",
+                Arguments = $"\"{prepScript}\"",
+                WorkingDirectory = root,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+
+            using (var p = Process.Start(psi))
+            {
+                if (p == null)
+                    throw new InvalidOperationException("Failed to start python process for fixture preparation.");
+
+                bool exited = p.WaitForExit(timeoutMs);
+                if (!exited)
+                {
+                    try
+                    {
+                        p.Kill();
+                    }
+                    catch
+                    {
+                        // Process may have exited just before kill
+                    }
+                    throw new TimeoutException($"Fixture preparation script '{prepScript}' timed out after {timeoutMs}ms.");
+                }
+
+                if (p.ExitCode != 0)
+                {
+                    string err = p.StandardError.ReadToEnd();
+                    string stdout = p.StandardOutput.ReadToEnd();
+                    throw new InvalidOperationException($"Fixture preparation failed (exit code {p.ExitCode}): {err}\n{stdout}");
+                }
+            }
+        }
+
         private static string GetFixturePath(string relativePath)
         {
             string root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", ".."));
@@ -37,26 +77,7 @@ namespace ConfuserExKillerRunner.Tests
                 string prepScript = Path.Combine(root, "benchmarks", "prepare_real_fixture.py");
                 if (relativePath.Contains("real_confuserex") && File.Exists(prepScript))
                 {
-                    try
-                    {
-                        var psi = new ProcessStartInfo
-                        {
-                            FileName = "python",
-                            Arguments = $"\"{prepScript}\"",
-                            WorkingDirectory = root,
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true,
-                            UseShellExecute = false
-                        };
-                        using (var p = Process.Start(psi))
-                        {
-                            p?.WaitForExit(45000);
-                        }
-                    }
-                    catch
-                    {
-                        // Fall through to strict file check
-                    }
+                    ExecuteFixturePreparation(root, prepScript, timeoutMs: 60000);
                 }
             }
 
