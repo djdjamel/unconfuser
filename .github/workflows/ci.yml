@@ -2,9 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
+      - 'fix/**'
+      - 'feature/**'
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+      - 'fix/**'
 
 jobs:
   build-and-test:
@@ -14,10 +19,12 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Setup .NET SDK
+    - name: Setup .NET SDKs
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: 8.0.x
+        dotnet-version: |
+          8.0.x
+          6.0.x
 
     - name: Setup Python
       uses: actions/setup-python@v5
@@ -32,7 +39,7 @@ jobs:
     - name: Restore dependencies
       run: dotnet restore unconfuser.sln
 
-    - name: Build solution (Release)
+    - name: Build solution across all TFMs (Release)
       run: dotnet build unconfuser.sln -c Release --no-restore
 
     - name: Run C# Unit Tests
@@ -52,4 +59,14 @@ jobs:
 
     - name: Run Python Detector Regression Suite
       run: python test_detector.py
+
+    - name: Upload Benchmark Reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-reports
+        path: |
+          benchmarks/benchmark_report.md
+          benchmarks/benchmark_report.json
+
 

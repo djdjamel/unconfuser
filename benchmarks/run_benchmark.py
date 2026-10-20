@@ -729,6 +729,8 @@ def generate_markdown_report(summary: Dict[str, Any], report_path: Path):
         lines.append("")
 
     report_path.write_text("\n".join(lines), encoding="utf-8")
+    json_path = report_path.with_suffix(".json")
+    json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
 def print_console_summary(summary: Dict[str, Any]):
