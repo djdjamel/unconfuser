@@ -22,6 +22,14 @@ from typing import Dict, Any, List, Optional, Tuple
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
 BENCHMARKS_DIR = WORKSPACE_ROOT / "benchmarks"
+
+# Import dedicated real fixture preparer
+sys.path.insert(0, str(BENCHMARKS_DIR))
+try:
+    from prepare_real_fixture import prepare_real_confuserex_fixture
+except ImportError:
+    from benchmarks.prepare_real_fixture import prepare_real_confuserex_fixture
+
 FIXTURES_DIR = BENCHMARKS_DIR / "fixtures"
 BENIGN_DIR = BENCHMARKS_DIR / "BenignSample"
 
@@ -539,62 +547,19 @@ def run_all_benchmarks(
                 "verdict": "REAL_PROTECTOR_FAIL",
             })
         else:
-            # Clean output directory for each run to prevent stale protected outputs from being reused
-            cli_fixture_dir = fixtures_dir / "real_confuserex"
-            if cli_fixture_dir.exists():
-                shutil.rmtree(cli_fixture_dir, ignore_errors=True)
-            cli_fixture_dir.mkdir(parents=True, exist_ok=True)
             real_target_module = BENIGN_NET48_EXE if BENIGN_NET48_EXE.exists() else BENIGN_DLL
-            cli_output_file = cli_fixture_dir / real_target_module.name
-
-            # Generate config project from template
-            crproj_content = PROFILE_CRPROJ.read_text(encoding="utf-8")
-            crproj_instance = crproj_content.format(
-                output_dir=str(cli_fixture_dir),
-                base_dir=str(real_target_module.parent),
-                module_path=str(real_target_module),
-            )
-            instance_crproj_path = cli_fixture_dir / "confuser_run.crproj"
-            instance_crproj_path.write_text(crproj_instance, encoding="utf-8")
-
             try:
-                prot_proc = subprocess.run(
-                    [str(confuser_cli_path), "-n", str(instance_crproj_path)],
-                    capture_output=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=60,
+                cli_output_file = prepare_real_confuserex_fixture(force=False)
+                res = run_benchmark_case(
+                    real_case_name,
+                    cli_output_file,
+                    "real_confuserex",
+                    runner_path,
+                    expected_baseline,
+                    baseline_dll_path=real_target_module,
+                    is_synthetic=False,
                 )
-                err_msg = (prot_proc.stderr.strip() or prot_proc.stdout.strip())[:300]
-                if prot_proc.returncode == 0 and cli_output_file.exists():
-                    res = run_benchmark_case(
-                        real_case_name,
-                        cli_output_file,
-                        "real_confuserex",
-                        runner_path,
-                        expected_baseline,
-                        baseline_dll_path=real_target_module,
-                        is_synthetic=False,
-                    )
-                    results.append(res)
-                else:
-                    results.append({
-                        "case_name": real_case_name,
-                        "fixture_name": "BenignSample.dll",
-                        "scenario": "real_confuserex",
-                        "is_synthetic": False,
-                        "input_sha256": "N/A",
-                        "output_produced": False,
-                        "output_sha256": None,
-                        "deobfuscator_returncode": None,
-                        "metrics": {},
-                        "audit_status": "FAILED",
-                        "behavioral_match": False,
-                        "execution_returncode": None,
-                        "structural_verification": {},
-                        "error": f"Confuser.CLI.exe protection failed (exit code {prot_proc.returncode}): {err_msg}",
-                        "verdict": "REAL_PROTECTOR_FAIL",
-                    })
+                results.append(res)
             except Exception as ex:
                 results.append({
                     "case_name": real_case_name,
@@ -610,9 +575,10 @@ def run_all_benchmarks(
                     "behavioral_match": False,
                     "execution_returncode": None,
                     "structural_verification": {},
-                    "error": f"Confuser.CLI.exe execution exception: {str(ex)}",
+                    "error": f"Confuser.CLI.exe protection failed: {ex}",
                     "verdict": "REAL_PROTECTOR_FAIL",
                 })
+
     else:
         # Tool is not provisioned: explicitly record SKIPPED_TOOL_MISSING with clear reason
         results.append({

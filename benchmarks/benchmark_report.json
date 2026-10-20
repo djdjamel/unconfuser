@@ -368,9 +368,9 @@
       "fixture_name": "BenignSample.exe",
       "scenario": "real_confuserex",
       "is_synthetic": false,
-      "input_sha256": "80d2281148fa19dfacfc762f0354774287a92b114974a5d5226efc5bd47fd92f",
+      "input_sha256": "e8014a2c33ef7d85daa8c0d69c07444c720029f0545b747e2efdfb58863b65d8",
       "output_produced": true,
-      "output_sha256": "fa6d7a0f50d685ec1938637f77bd420fc2c1780a71e32c6961d8d9512d415a58",
+      "output_sha256": "48f806c96c7f13be35c0f737bc75f3dfc725c642546866f36472b0a9fdc13277",
       "deobfuscator_returncode": 0,
       "metrics": {
         "constants_decrypted": 25,

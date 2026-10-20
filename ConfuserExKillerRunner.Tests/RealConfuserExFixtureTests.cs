@@ -33,7 +33,35 @@ namespace ConfuserExKillerRunner.Tests
             string root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", ".."));
             string fullPath = Path.Combine(root, relativePath);
             if (!File.Exists(fullPath))
-                throw new FileNotFoundException($"Fixture not found at {fullPath}");
+            {
+                string prepScript = Path.Combine(root, "benchmarks", "prepare_real_fixture.py");
+                if (relativePath.Contains("real_confuserex") && File.Exists(prepScript))
+                {
+                    try
+                    {
+                        var psi = new ProcessStartInfo
+                        {
+                            FileName = "python",
+                            Arguments = $"\"{prepScript}\"",
+                            WorkingDirectory = root,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            UseShellExecute = false
+                        };
+                        using (var p = Process.Start(psi))
+                        {
+                            p?.WaitForExit(45000);
+                        }
+                    }
+                    catch
+                    {
+                        // Fall through to strict file check
+                    }
+                }
+            }
+
+            if (!File.Exists(fullPath))
+                throw new FileNotFoundException($"Fixture not found at {fullPath}. Please run 'python benchmarks/prepare_real_fixture.py' to generate it.");
             return fullPath;
         }
 

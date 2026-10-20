@@ -42,22 +42,28 @@ jobs:
     - name: Build solution across all TFMs (Release)
       run: dotnet build unconfuser.sln -c Release --no-restore
 
-    - name: Run C# Unit Tests
-      run: dotnet test unconfuser.sln -c Release --no-build --verbosity normal
-
-    - name: Generate Deobfuscation Benchmark Fixtures
+    - name: Generate Synthetic Deobfuscation Fixtures
       run: dotnet .\benchmarks\FixtureGenerator\bin\Release\net8.0-windows\FixtureGenerator.dll --input benchmarks\BenignSample\bin\Release\net8.0\BenignSample.dll --output-dir benchmarks\fixtures
 
     - name: Provision ConfuserEx Toolchain
       run: python benchmarks/provision_confuserex.py
 
+    - name: Prepare Real ConfuserEx Fixture
+      run: python benchmarks/prepare_real_fixture.py
+
+    - name: Run C# Unit & Integration Tests
+      run: dotnet test unconfuser.sln -c Release --no-build --verbosity normal
+
     - name: Run Deobfuscation Benchmark Suite
+      if: success() || failure()
       run: python benchmarks/run_benchmark.py
 
     - name: Run Python Pytest Suite
+      if: success() || failure()
       run: python -m pytest tests -v
 
     - name: Run Python Detector Regression Suite
+      if: success() || failure()
       run: python test_detector.py
 
     - name: Upload Benchmark Reports
