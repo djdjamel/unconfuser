@@ -16,9 +16,9 @@ using dnlib.DotNet.Writer;
 
 namespace ConfuserExKillerRunner
 {
-    class Program
+    public class Program
     {
-        static int Main(string[] args)
+        public static int Main(string[] args)
         {
             if (args != null && args.Length > 0 && args[0] == "--internal-worker")
             {
@@ -189,6 +189,7 @@ namespace ConfuserExKillerRunner
 
                 // Step 1: Safety Gate & Anti-Tamper
                 bool antiTamperDecrypted = false;
+                bool staticAntiTamperDetected = false;
                 if (!allowExecution)
                 {
                     Console.ForegroundColor = ConsoleColor.Yellow;
@@ -202,6 +203,23 @@ namespace ConfuserExKillerRunner
                     Console.WriteLine("[!] =================================================================");
                     Console.WriteLine();
                     Console.ResetColor();
+
+                    try
+                    {
+                        using (var probeMod = ModuleDefMD.Load(peImage))
+                        {
+                            if (ProtectionMatrix.HasAntiTamperNormal(probeMod))
+                            {
+                                staticAntiTamperDetected = true;
+                                Console.ForegroundColor = ConsoleColor.Yellow;
+                                Console.WriteLine("[!] Anti-Tamper encrypted section hooks detected in pure static mode.");
+                                Console.WriteLine("[!] Method bytecode is encrypted in PE sections and cannot be statically deobfuscated.");
+                                Console.WriteLine("[!] Re-run with '--allow-execution' to decrypt and deobfuscate.");
+                                Console.ResetColor();
+                            }
+                        }
+                    }
+                    catch { }
                 }
                 else
                 {
@@ -392,7 +410,7 @@ namespace ConfuserExKillerRunner
 
                 using (var module = ModuleDefMD.Load(bytesToLoad))
                 {
-                    jitDetected = AntiTamperKiller.DetectJitMode(module);
+                    jitDetected = !antiTamperDecrypted && !staticAntiTamperDetected && AntiTamperKiller.DetectJitMode(module);
                     if (jitDetected)
                     {
                         Console.ForegroundColor = ConsoleColor.Yellow;
@@ -400,119 +418,126 @@ namespace ConfuserExKillerRunner
                         Console.ResetColor();
                     }
 
-                    // Step 2.1: In-memory Resource Extraction & Re-Embedding (runs before method AST deletions)
-                    Console.WriteLine("[*] Step 2.1: Running ResourceKiller (Extracting decrypted resources)...");
-                    if (allowExecution)
+                    if (!staticAntiTamperDetected)
                     {
-                        var workerOpts = new WorkerOptions
+                        // Step 2.1: In-memory Resource Extraction & Re-Embedding (runs before method AST deletions)
+                        Console.WriteLine("[*] Step 2.1: Running ResourceKiller (Extracting decrypted resources)...");
+                        if (allowExecution)
                         {
-                            TimeoutMs = workerTimeoutMs,
-                            AllowTargetDirectoryDependencies = allowTargetDeps,
-                            AllowedDependencyDirectories = allowedDepDirs,
-                            TempDirectory = executionTempDir
-                        };
-
-                        string resInputPath = assemblyPath;
-                        if (antiTamperDecrypted)
-                        {
-                            resInputPath = Path.Combine(executionTempDir, $"worker_at_decrypted_{Guid.NewGuid():N}.dll");
-                            File.WriteAllBytes(resInputPath, bytesToLoad);
-                        }
-
-                        try
-                        {
-                            var dynamicRes = WorkerClient.ExecuteResourceExtraction(resInputPath, workerOpts);
-                            if (dynamicRes.Success && dynamicRes.DecryptedResourceContainer != null && dynamicRes.DecryptedResourceContainer.Length > 0)
+                            var workerOpts = new WorkerOptions
                             {
-                                using (var resMod = ModuleDefMD.Load(dynamicRes.DecryptedResourceContainer))
+                                TimeoutMs = workerTimeoutMs,
+                                AllowTargetDirectoryDependencies = allowTargetDeps,
+                                AllowedDependencyDirectories = allowedDepDirs,
+                                TempDirectory = executionTempDir
+                            };
+
+                            string resInputPath = assemblyPath;
+                            if (antiTamperDecrypted)
+                            {
+                                resInputPath = Path.Combine(executionTempDir, $"worker_at_decrypted_{Guid.NewGuid():N}.dll");
+                                File.WriteAllBytes(resInputPath, bytesToLoad);
+                            }
+
+                            try
+                            {
+                                var dynamicRes = WorkerClient.ExecuteResourceExtraction(resInputPath, workerOpts);
+                                if (dynamicRes.Success && dynamicRes.DecryptedResourceContainer != null && dynamicRes.DecryptedResourceContainer.Length > 0)
                                 {
-                                    int reEmbeddedCount = 0;
-                                    foreach (var r in resMod.Resources)
+                                    using (var resMod = ModuleDefMD.Load(dynamicRes.DecryptedResourceContainer))
                                     {
-                                        var existing = module.Resources.Find(r.Name);
-                                        if (existing != null) module.Resources.Remove(existing);
+                                        int reEmbeddedCount = 0;
+                                        foreach (var r in resMod.Resources)
+                                        {
+                                            var existing = module.Resources.Find(r.Name);
+                                            if (existing != null) module.Resources.Remove(existing);
 
-                                        if (r is EmbeddedResource er)
-                                        {
-                                            module.Resources.Add(new EmbeddedResource(er.Name, er.GetResourceData(), er.Attributes));
+                                            if (r is EmbeddedResource er)
+                                            {
+                                                module.Resources.Add(new EmbeddedResource(er.Name, er.GetResourceData(), er.Attributes));
+                                            }
+                                            else
+                                            {
+                                                module.Resources.Add(r);
+                                            }
+                                            reEmbeddedCount++;
                                         }
-                                        else
-                                        {
-                                            module.Resources.Add(r);
-                                        }
-                                        reEmbeddedCount++;
+
+                                        resourcesDecrypted = true;
+                                        totalResourcesExtracted = reEmbeddedCount;
+                                        Console.WriteLine($"[+] ResourceKiller: Extracted & re-embedded {reEmbeddedCount} decrypted resources via isolated worker ({module.Resources.Count} total in manifest)");
                                     }
-
-                                    resourcesDecrypted = true;
-                                    totalResourcesExtracted = reEmbeddedCount;
-                                    Console.WriteLine($"[+] ResourceKiller: Extracted & re-embedded {reEmbeddedCount} decrypted resources via isolated worker ({module.Resources.Count} total in manifest)");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Tool.Logger.LogWarning($"[ResourceKiller] Re-embedding decrypted resources from worker failed: {ex.Message}");
+                            }
+                            finally
+                            {
+                                if (antiTamperDecrypted && resInputPath != assemblyPath)
+                                {
+                                    try { File.Delete(resInputPath); } catch { }
                                 }
                             }
                         }
-                        catch (Exception ex)
+
+                        var resResult = ResourceKiller.Execute(module, reflModule: null, resourcesAlreadyDecrypted: resourcesDecrypted);
+                        if (resResult.HandlerStripped)
                         {
-                            Tool.Logger.LogWarning($"[ResourceKiller] Re-embedding decrypted resources from worker failed: {ex.Message}");
+                            totalCleanerHooks++;
+                            Console.WriteLine("[+] ResourceKiller: Stripped runtime ResourceResolve hook");
                         }
-                        finally
+
+                        // Step 2.2: ProxyKiller + ConstantKiller
+                        int proxyCount = ProxyKillerImpl.Execute(module, false, true);
+                        totalProxiesInlined += proxyCount;
+                        Console.WriteLine($"[+] ProxyKiller: {proxyCount} proxy methods/delegates inlined");
+
+                        if (!constantsDecrypted)
                         {
-                            if (antiTamperDecrypted && resInputPath != assemblyPath)
-                            {
-                                try { File.Delete(resInputPath); } catch { }
-                            }
+                            var constResult = ConstantKillerImpl.Execute(module, reflModule: null);
+                            constantsDecrypted = constResult.AllReferencesResolved;
+                            totalConstantsDecrypted += constResult.DecryptedConstantsCount;
+                            allConstantsResolved = constResult.AllReferencesResolved;
+                            Console.WriteLine($"[+] ConstantKiller: {constResult.DecryptedConstantsCount} constants decrypted (with stack evaluation)");
+                            if (constResult.TotalReferencesCount > 0 && !constResult.AllReferencesResolved)
+                                Console.WriteLine($"[!] ConstantKiller: Partial decryption ({constResult.ResolvedReferencesCount}/{constResult.TotalReferencesCount} references rewritten). Decrypter and buffer preserved.");
                         }
-                    }
 
-                    var resResult = ResourceKiller.Execute(module, reflModule: null, resourcesAlreadyDecrypted: resourcesDecrypted);
-                    if (resResult.HandlerStripped)
+                        // Step 3: Protector hook stripping
+                        Console.WriteLine("[*] Step 3: Cleaning Protector Hooks...");
+                        var cleanResult = CleanerKiller.StripProtectorHooks(module, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
+                        totalCleanerHooks += cleanResult.StrippedHooksCount + cleanResult.RemovedMethodsCount;
+                        if (cleanResult.StrippedHooksCount > 0)
+                            Console.WriteLine($"[+] CleanerKiller: Stripped {cleanResult.StrippedHooksCount} protector initializers from <Module>.cctor");
+
+                        // Step 3.5: DeadCodeStripper & PredicateKiller pre-switch
+                        Console.WriteLine("[*] Step 3.5: Running DeadCodeStripper & PredicateKiller...");
+                        var dcsPre = DeadCodeStripper.Execute(module);
+                        totalJunkStripped += dcsPre.JunkPairsStripped + dcsPre.TrampolinesFlattened;
+                        if (dcsPre.MethodsOptimized > 0)
+                            Console.WriteLine($"[+] DeadCodeStripper (Pre): {dcsPre.Message}");
+
+                        var predResult = PredicateKiller.Execute(module);
+                        if (predResult.MethodsOptimized > 0)
+                            Console.WriteLine($"[+] PredicateKiller: {predResult.Message}");
+
+                        // Step 4: SwitchKiller + Post-Switch DeadCodeStripper
+                        Console.WriteLine("[*] Step 4: Running SwitchKiller (control flow cleanup)...");
+                        int switchCount = SwitchKillerImpl.Execute(module);
+                        totalSwitchesResolved += switchCount;
+                        Console.WriteLine($"[+] SwitchKiller: {switchCount} switches resolved");
+
+                        var dcsPost = DeadCodeStripper.Execute(module);
+                        totalJunkStripped += dcsPost.JunkPairsStripped + dcsPost.TrampolinesFlattened;
+                        if (dcsPost.MethodsOptimized > 0)
+                            Console.WriteLine($"[+] DeadCodeStripper (Post): {dcsPost.Message}");
+                    }
+                    else
                     {
-                        totalCleanerHooks++;
-                        Console.WriteLine("[+] ResourceKiller: Stripped runtime ResourceResolve hook");
+                        Console.WriteLine("[!] Static mode: Skipping AST & IL rewriting on Anti-Tamper encrypted method bodies.");
                     }
-
-                    // Step 2.2: ProxyKiller + ConstantKiller
-                    int proxyCount = ProxyKillerImpl.Execute(module, false, true);
-                    totalProxiesInlined += proxyCount;
-                    Console.WriteLine($"[+] ProxyKiller: {proxyCount} proxy methods/delegates inlined");
-
-                    if (!constantsDecrypted)
-                    {
-                        var constResult = ConstantKillerImpl.Execute(module, reflModule: null);
-                        constantsDecrypted = constResult.AllReferencesResolved;
-                        totalConstantsDecrypted += constResult.DecryptedConstantsCount;
-                        allConstantsResolved = constResult.AllReferencesResolved;
-                        Console.WriteLine($"[+] ConstantKiller: {constResult.DecryptedConstantsCount} constants decrypted (with stack evaluation)");
-                        if (constResult.TotalReferencesCount > 0 && !constResult.AllReferencesResolved)
-                            Console.WriteLine($"[!] ConstantKiller: Partial decryption ({constResult.ResolvedReferencesCount}/{constResult.TotalReferencesCount} references rewritten). Decrypter and buffer preserved.");
-                    }
-
-                // Step 3: Protector hook stripping
-                Console.WriteLine("[*] Step 3: Cleaning Protector Hooks...");
-                var cleanResult = CleanerKiller.StripProtectorHooks(module, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
-                totalCleanerHooks += cleanResult.StrippedHooksCount + cleanResult.RemovedMethodsCount;
-                if (cleanResult.StrippedHooksCount > 0)
-                    Console.WriteLine($"[+] CleanerKiller: Stripped {cleanResult.StrippedHooksCount} protector initializers from <Module>.cctor");
-
-                // Step 3.5: DeadCodeStripper & PredicateKiller pre-switch
-                Console.WriteLine("[*] Step 3.5: Running DeadCodeStripper & PredicateKiller...");
-                var dcsPre = DeadCodeStripper.Execute(module);
-                totalJunkStripped += dcsPre.JunkPairsStripped + dcsPre.TrampolinesFlattened;
-                if (dcsPre.MethodsOptimized > 0)
-                    Console.WriteLine($"[+] DeadCodeStripper (Pre): {dcsPre.Message}");
-
-                var predResult = PredicateKiller.Execute(module);
-                if (predResult.MethodsOptimized > 0)
-                    Console.WriteLine($"[+] PredicateKiller: {predResult.Message}");
-
-                // Step 4: SwitchKiller + Post-Switch DeadCodeStripper
-                Console.WriteLine("[*] Step 4: Running SwitchKiller (control flow cleanup)...");
-                int switchCount = SwitchKillerImpl.Execute(module);
-                totalSwitchesResolved += switchCount;
-                Console.WriteLine($"[+] SwitchKiller: {switchCount} switches resolved");
-
-                var dcsPost = DeadCodeStripper.Execute(module);
-                totalJunkStripped += dcsPost.JunkPairsStripped + dcsPost.TrampolinesFlattened;
-                if (dcsPost.MethodsOptimized > 0)
-                    Console.WriteLine($"[+] DeadCodeStripper (Post): {dcsPost.Message}");
 
                 Console.WriteLine($"[*] Writing intermediate module: {cexkPath}");
                 var writerOpts = new ModuleWriterOptions(module) { Logger = DnlibLogger.Instance };
@@ -593,17 +618,20 @@ namespace ConfuserExKillerRunner
 
             using (var module2 = ModuleDefMD.Load(currentIntermediate))
             {
-                var cleanFinal = CleanerKiller.StripProtectorHooks(module2, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
-                totalCleanerHooks += cleanFinal.StrippedHooksCount + cleanFinal.RemovedMethodsCount;
-                PredicateKiller.Execute(module2);
-                var dcsFinal1 = DeadCodeStripper.Execute(module2);
-                totalJunkStripped += dcsFinal1.JunkPairsStripped + dcsFinal1.TrampolinesFlattened;
-                int switchCount2 = SwitchKillerImpl.Execute(module2);
-                totalSwitchesResolved += switchCount2;
-                var dcsFinal2 = DeadCodeStripper.Execute(module2);
-                totalJunkStripped += dcsFinal2.JunkPairsStripped + dcsFinal2.TrampolinesFlattened;
-                Console.WriteLine($"[+] Final SwitchKiller: {switchCount2} switches resolved");
-                FinalizeMethodBodies(module2);
+                if (!staticAntiTamperDetected)
+                {
+                    var cleanFinal = CleanerKiller.StripProtectorHooks(module2, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
+                    totalCleanerHooks += cleanFinal.StrippedHooksCount + cleanFinal.RemovedMethodsCount;
+                    PredicateKiller.Execute(module2);
+                    var dcsFinal1 = DeadCodeStripper.Execute(module2);
+                    totalJunkStripped += dcsFinal1.JunkPairsStripped + dcsFinal1.TrampolinesFlattened;
+                    int switchCount2 = SwitchKillerImpl.Execute(module2);
+                    totalSwitchesResolved += switchCount2;
+                    var dcsFinal2 = DeadCodeStripper.Execute(module2);
+                    totalJunkStripped += dcsFinal2.JunkPairsStripped + dcsFinal2.TrampolinesFlattened;
+                    Console.WriteLine($"[+] Final SwitchKiller: {switchCount2} switches resolved");
+                    FinalizeMethodBodies(module2);
+                }
                 var writerOpts2 = new ModuleWriterOptions(module2) { Logger = DnlibLogger.Instance };
                 writerOpts2.MetaDataOptions.Flags |= MetaDataFlags.KeepOldMaxStack;
                 module2.Write(candidatePath, writerOpts2);
@@ -651,7 +679,7 @@ namespace ConfuserExKillerRunner
             }
             Console.WriteLine("===============================================================");
 
-            if (auditReport.Status == "FAILED")
+            if (auditReport.Status == "FAILED" && (!staticAntiTamperDetected || regressions.Count > 0))
             {
                 try { if (File.Exists(candidatePath)) File.Delete(candidatePath); } catch { }
                 Console.ForegroundColor = ConsoleColor.Red;

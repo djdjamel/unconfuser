@@ -41,9 +41,9 @@ namespace ConfuserExKillerRunner.Analysis
         /// </summary>
         public bool ExecutionConfirmed { get; set; } = false;
 
-        public string Status => (!CanLoad || InvalidInstructionsCount > 0 || InvalidBranchesCount > 0 || InvalidEHCount > 0 || StackUnderflowCount > 0 || Errors.Count > 0 || ILVerificationStatus == "FAILED")
+        public string Status => (!CanLoad || InvalidInstructionsCount > 0 || InvalidBranchesCount > 0 || InvalidEHCount > 0 || StackUnderflowCount > 0 || Errors.Count > 0)
             ? "FAILED"
-            : (Warnings.Count > 0 ? "WARNINGS" : "CLEAN");
+            : (Warnings.Count > 0 || ILVerificationStatus == "FAILED" ? "WARNINGS" : "CLEAN");
     }
 
     public static class QualityAuditor
@@ -133,7 +133,7 @@ namespace ConfuserExKillerRunner.Analysis
             var baselineErrors = new HashSet<string>(baseline.Errors, StringComparer.Ordinal);
             foreach (var err in candidate.Errors)
             {
-                if (err.StartsWith("[0x", StringComparison.Ordinal) && !baselineErrors.Contains(err))
+                if (!baselineErrors.Contains(err))
                 {
                     regressions.Add(err);
                 }

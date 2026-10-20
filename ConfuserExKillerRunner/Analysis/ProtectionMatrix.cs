@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using dnlib.DotNet;
+using dnlib.DotNet.Emit;
 
 namespace ConfuserExKillerRunner.Analysis
 {
@@ -511,18 +512,55 @@ namespace ConfuserExKillerRunner.Analysis
 
         // --- Detection Heuristics ---
 
-        private static bool HasAntiTamperNormal(ModuleDef module)
+        public static bool HasAntiTamperNormal(ModuleDef module)
         {
             if (module == null) return false;
             if (module.GlobalType == null) return false;
-            var cctor = module.GlobalType.FindStaticConstructor();
-            if (cctor == null || !cctor.HasBody) return false;
 
-            // Search for characteristic VirtualProtect or section unscrambling in <Module>..cctor
-            foreach (var instr in cctor.Body.Instructions)
+            // 1. Check if GlobalType has a P/Invoke to VirtualProtect in kernel32.dll
+            foreach (var m in module.GlobalType.Methods)
             {
-                if (instr.Operand is IMethod m && (m.Name == "VirtualProtect" || m.Name.Contains("Decrypter") || m.Name.Contains("AntiTamper")))
-                    return true;
+                if (m.IsPinvokeImpl && m.ImplMap != null)
+                {
+                    string pName = m.ImplMap.Name?.String;
+                    if (string.Equals(pName, "VirtualProtect", StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+
+            // 2. Check for characteristic VirtualProtect or section unscrambling in <Module>..cctor or called methods
+            var cctor = module.GlobalType.FindStaticConstructor();
+            if (cctor != null && cctor.HasBody)
+            {
+                foreach (var instr in cctor.Body.Instructions)
+                {
+                    if (instr.Operand is IMethod m)
+                    {
+                        if (m.Name.IndexOf("VirtualProtect", StringComparison.OrdinalIgnoreCase) >= 0 || m.Name.Contains("AntiTamper"))
+                            return true;
+
+                        var mDef = m.ResolveMethodDef();
+                        if (mDef != null && mDef.HasBody)
+                        {
+                            foreach (var inner in mDef.Body.Instructions)
+                            {
+                                if (inner.Operand is IMethod innerM)
+                                {
+                                    if (innerM.Name.IndexOf("VirtualProtect", StringComparison.OrdinalIgnoreCase) >= 0)
+                                        return true;
+
+                                    var innerDef = innerM.ResolveMethodDef();
+                                    if (innerDef != null && innerDef.IsPinvokeImpl && innerDef.ImplMap != null)
+                                    {
+                                        string pinvokeName = innerDef.ImplMap.Name?.String;
+                                        if (string.Equals(pinvokeName, "VirtualProtect", StringComparison.OrdinalIgnoreCase))
+                                            return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             return false;
         }
@@ -567,13 +605,16 @@ namespace ConfuserExKillerRunner.Analysis
 
         private static bool HasConstantDecrypters(ModuleDef module)
         {
-            if (module == null) return false;
-            foreach (var t in module.GetTypes())
+            if (module == null || module.GlobalType == null) return false;
+            foreach (var m in module.GlobalType.Methods)
             {
-                foreach (var f in t.Fields)
+                if (!m.HasBody) continue;
+                if (!m.IsStatic || !m.HasGenericParameters) continue;
+                if (m.ReturnType.ElementType == ElementType.MVar &&
+                    m.Parameters.Count == 1 &&
+                    m.Parameters[0].Type.ElementType == ElementType.U4)
                 {
-                    if (f.IsStatic && f.HasFieldRVA && f.InitialValue != null && f.InitialValue.Length > 16)
-                        return true;
+                    return true;
                 }
             }
             return false;
@@ -592,8 +633,21 @@ namespace ConfuserExKillerRunner.Analysis
             {
                 foreach (var m in t.Methods)
                 {
-                    if (m.HasBody && m.Body.Instructions.Any(i => i.OpCode == dnlib.DotNet.Emit.OpCodes.Switch))
-                        return true;
+                    if (!m.HasBody) continue;
+                    var instrs = m.Body.Instructions;
+                    for (int i = 0; i < instrs.Count; i++)
+                    {
+                        if (instrs[i].OpCode == OpCodes.Switch)
+                        {
+                            // In ConfuserEx switch flattening, switch is preceded by an arithmetic/bitwise operation (xor, rem, rem_un)
+                            for (int k = Math.Max(0, i - 6); k < i; k++)
+                            {
+                                var op = instrs[k].OpCode;
+                                if (op == OpCodes.Xor || op == OpCodes.Rem || op == OpCodes.Rem_Un)
+                                    return true;
+                            }
+                        }
+                    }
                 }
             }
             return false;
@@ -614,8 +668,20 @@ namespace ConfuserExKillerRunner.Analysis
             if (module == null) return false;
             foreach (var t in module.GetTypes())
             {
-                if (t.Methods.Any(m => m.IsStatic && m.HasBody && m.Body.Instructions.Count == 2 && m.Body.Instructions[1].OpCode == dnlib.DotNet.Emit.OpCodes.Ret))
-                    return true;
+                foreach (var m in t.Methods)
+                {
+                    if (ConfuserExTools.ProxyKiller.ProxyKillerImpl.TryAnalyzeClassicProxy(m, ignoreAccess: false, out _, out _))
+                        return true;
+                }
+            }
+            if (module.GlobalType != null)
+            {
+                foreach (var f in module.GlobalType.Fields)
+                {
+                    var ft = (f.FieldSig?.Type?.ToTypeDefOrRef() as TypeDef) ?? f.FieldSig?.Type?.ToTypeDefOrRef()?.ResolveTypeDef();
+                    if (ft != null && ft.BaseType != null && ft.BaseType.FullName == "System.MulticastDelegate")
+                        return true;
+                }
             }
             return false;
         }
@@ -623,7 +689,22 @@ namespace ConfuserExKillerRunner.Analysis
         private static bool HasEncryptedResources(ModuleDef module)
         {
             if (module == null) return false;
-            return module.Resources.Any(r => r.Name.Contains("resources") || r.Name.Length == 8);
+            if (module.GlobalType != null)
+            {
+                foreach (var m in module.GlobalType.Methods)
+                {
+                    if (!m.HasBody) continue;
+                    foreach (var inst in m.Body.Instructions)
+                    {
+                        if (inst.Operand is IMethod target &&
+                            (target.Name == "GetManifestResourceStream" || target.Name == "add_ResourceResolve"))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
         }
 
         private static bool HasCompressor(ModuleDef module)
