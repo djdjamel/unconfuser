@@ -120,14 +120,42 @@ For a full matrix of supported ConfuserEx 1.0.0 protections, static vs. dynamic 
 dotnet build ConfuserExKillerRunner/ConfuserExKillerRunner.csproj -c Release
 
 # Execute deobfuscation (targeting net48 for x86 32-bit targets)
-dotnet run --project ConfuserExKillerRunner/ConfuserExKillerRunner.csproj -f net48 -c Release -- "path/to/target.dll" --allow-execution --no-de4dot
+dotnet run --project ConfuserExKillerRunner/ConfuserExKillerRunner.csproj -f net48 -c Release -- "path/to/target.dll" --allow-execution --json-report report.json
+
+# CLI Options:
+#   --allow-execution       Allow target module execution via isolated worker process
+#   --worker-timeout <ms>   Timeout in milliseconds for isolated worker process (default: 30000)
+#   --allow-target-deps     Permit worker to resolve dependencies from target assembly directory
+#   --dep-dir <path>        Add explicitly authorized directory for dependency resolution
+#   -o, --output <path>     Specify custom destination path for final cleaned assembly
+#   -d, --de4dot <path>     Specify explicit path to de4dot-cex executable
+#   --no-de4dot             Skip de4dot external process pass
+#   --no-netdetect          Skip NetDetect pre/post obfuscation audit
+#   --json-report <path>    Generate structured versioned JSON audit report
+#   --strict-exit-codes     Return exit code 2 on any partial deobfuscation
+#   --verbose               Enable verbose console output
+
+# Exit Codes:
+#   0: Success - all requested protections resolved or fully clean output
+#   1: Fatal Error - corrupt assembly, structural audit failed, or unhandled exception
+#   2: Partial Result - candidate promoted with known limitations (dynamic required, unsupported)
 ```
 
 ---
 
 ## Verification & Testing
 
-Run all unit tests:
+Run all .NET unit tests:
+```bash
+dotnet test unconfuser.sln -c Release
+```
+
+Run the Deobfuscation Benchmark Suite (including authentic ConfuserEx binaries):
+```bash
+python benchmarks/run_benchmark.py
+```
+
+Run Python test suites:
 ```bash
 python -m pytest
 ```
