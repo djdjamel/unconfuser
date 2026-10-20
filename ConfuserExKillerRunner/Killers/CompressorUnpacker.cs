@@ -11,6 +11,15 @@ using Tool;
 
 namespace ConfuserExKillerRunner.Killers
 {
+    public enum PackerClassification
+    {
+        NotACompressorStub,
+        CosturaFodyPacker,
+        GenericApplicationWithEmbeddedPayload,
+        OtherPackagingFormat,
+        ConfuserExCompressorStub
+    }
+
     public sealed class UnpackResult
     {
         public bool IsCompressed { get; set; }
@@ -19,6 +28,7 @@ namespace ConfuserExKillerRunner.Killers
         public string CompressorType { get; set; }
         public uint RecoveredEntryPointToken { get; set; }
         public string Message { get; set; }
+        public PackerClassification Classification { get; set; } = PackerClassification.NotACompressorStub;
     }
 
     public static class CompressorUnpacker
@@ -40,30 +50,56 @@ namespace ConfuserExKillerRunner.Killers
             if (module == null) throw new ArgumentNullException(nameof(module));
             var result = new UnpackResult { IsCompressed = false, SuccessfullyUnpacked = false };
 
-            bool isPackedByFileTable = CheckFileTable(module, out string packedModuleName);
-            bool hasAssemblyLoad = false;
-            bool hasCompressionRef = false;
-
-            foreach (var memberRef in module.GetMemberRefs())
+            // 1. Check for Costura.Fody or other third-party packaging patterns
+            if (IsCosturaFody(module, out string costuraDetail))
             {
-                if (memberRef.Name == "Load" && memberRef.DeclaringType.FullName == "System.Reflection.Assembly")
-                    hasAssemblyLoad = true;
-                if (memberRef.DeclaringType.FullName.IndexOf("Compression", StringComparison.OrdinalIgnoreCase) >= 0)
-                    hasCompressionRef = true;
-            }
-
-            if (!isPackedByFileTable && !hasAssemblyLoad && !hasCompressionRef)
-            {
-                result.Message = "Not a compressor stub (no FileTable markers, Assembly.Load, or Compression references)";
+                result.Classification = PackerClassification.CosturaFodyPacker;
+                result.IsCompressed = false;
+                result.SuccessfullyUnpacked = false;
+                result.Message = $"Identified Costura.Fody embedded dependency packaging ({costuraDetail}). ConfuserEx unpacker skipped to preserve host application integrity.";
+                Logger.LogInfo($"[CompressorUnpacker] {result.Message}");
                 return result;
             }
 
+            if (IsOtherKnownPacker(module, out string otherPackerName))
+            {
+                result.Classification = PackerClassification.OtherPackagingFormat;
+                result.IsCompressed = false;
+                result.SuccessfullyUnpacked = false;
+                result.Message = $"Identified non-ConfuserEx packaging format ({otherPackerName}). Unpacker skipped.";
+                Logger.LogInfo($"[CompressorUnpacker] {result.Message}");
+                return result;
+            }
+
+            // 2. Classify whether this is an authentic ConfuserEx compressor stub
+            bool isPackedByFileTable = CheckFileTable(module, out string packedModuleName);
+            uint entryPointToken = ResolveOriginalEntryPoint(module);
+            bool isEntryPointStub = IsBootstrapEntryPointStub(module);
+            bool hasConfuserPayloadResource = HasConfuserPayloadResource(module, out var confuserResource);
+
+            // Strict determination of whether this module is a ConfuserEx compressor stub:
+            // Must have FileTable marker, OR ResolveSignature in EntryPoint, OR (Bootstrap stub + Confuser payload resource).
+            bool isConfuserExStub = isPackedByFileTable ||
+                                    (entryPointToken != 0) ||
+                                    (isEntryPointStub && hasConfuserPayloadResource);
+
+            if (!isConfuserExStub)
+            {
+                result.Classification = HasAnyEmbeddedPe(module)
+                    ? PackerClassification.GenericApplicationWithEmbeddedPayload
+                    : PackerClassification.NotACompressorStub;
+                result.IsCompressed = false;
+                result.SuccessfullyUnpacked = false;
+                result.Message = "Target assembly is not an authentic ConfuserEx compressor stub (unrelated application or arbitrary embedded resources preserved).";
+                return result;
+            }
+
+            result.Classification = PackerClassification.ConfuserExCompressorStub;
             result.IsCompressed = true;
+
             if (isPackedByFileTable)
                 Logger.LogInfo($"[CompressorUnpacker] Detected ConfuserEx FileTable packed module: '{packedModuleName}'");
 
-            // Attempt to resolve real entrypoint token from compressor stub
-            uint entryPointToken = ResolveOriginalEntryPoint(module);
             if (entryPointToken != 0)
             {
                 result.RecoveredEntryPointToken = entryPointToken;
@@ -74,8 +110,23 @@ namespace ConfuserExKillerRunner.Killers
             byte[] unpackedBytes = null;
             string compressorKind = null;
 
-            foreach (var res in module.Resources.OfType<EmbeddedResource>())
+            // Prioritize explicitly recognized ConfuserEx payload resources
+            var candidateResources = module.Resources.OfType<EmbeddedResource>().ToList();
+            if (hasConfuserPayloadResource && confuserResource != null)
             {
+                candidateResources.Remove(confuserResource);
+                candidateResources.Insert(0, confuserResource);
+            }
+
+            foreach (var res in candidateResources)
+            {
+                // If not FileTable and no entryPointToken, strictly only unpack resources with Confuser naming
+                if (!isPackedByFileTable && entryPointToken == 0)
+                {
+                    if (!IsConfuserResourceName(res.Name.String))
+                        continue;
+                }
+
                 byte[] data = null;
                 if (res.Data != null)
                 {
@@ -87,7 +138,7 @@ namespace ConfuserExKillerRunner.Killers
                     continue;
 
                 // Raw PE
-                if (IsPeFile(data))
+                if (ValidateUnpackedPe(data, out _))
                 {
                     unpackedBytes = data;
                     compressorKind = "Raw Resource Container";
@@ -96,7 +147,7 @@ namespace ConfuserExKillerRunner.Killers
 
                 // Standard Deflate
                 byte[] deflated = TryDeflateDecompress(data, MaxDecompressedSize);
-                if (deflated != null && IsPeFile(deflated))
+                if (deflated != null && ValidateUnpackedPe(deflated, out _))
                 {
                     unpackedBytes = deflated;
                     compressorKind = "ConfuserEx Deflate Compressor";
@@ -106,20 +157,24 @@ namespace ConfuserExKillerRunner.Killers
                 // Deflate with 4-byte length prefix
                 if (data.Length > 4)
                 {
-                    byte[] dataNoHeader = new byte[data.Length - 4];
-                    Buffer.BlockCopy(data, 4, dataNoHeader, 0, dataNoHeader.Length);
-                    byte[] deflated2 = TryDeflateDecompress(dataNoHeader, MaxDecompressedSize);
-                    if (deflated2 != null && IsPeFile(deflated2))
+                    int declaredLength = BitConverter.ToInt32(data, 0);
+                    if (declaredLength > 0 && declaredLength <= MaxDecompressedSize)
                     {
-                        unpackedBytes = deflated2;
-                        compressorKind = "ConfuserEx Deflate (Length Prefixed)";
-                        break;
+                        byte[] dataNoHeader = new byte[data.Length - 4];
+                        Buffer.BlockCopy(data, 4, dataNoHeader, 0, dataNoHeader.Length);
+                        byte[] deflated2 = TryDeflateDecompress(dataNoHeader, MaxDecompressedSize);
+                        if (deflated2 != null && ValidateUnpackedPe(deflated2, out _))
+                        {
+                            unpackedBytes = deflated2;
+                            compressorKind = "ConfuserEx Deflate (Length Prefixed)";
+                            break;
+                        }
                     }
                 }
 
                 // GZip
                 byte[] gzipped = TryGzipDecompress(data, MaxDecompressedSize);
-                if (gzipped != null && IsPeFile(gzipped))
+                if (gzipped != null && ValidateUnpackedPe(gzipped, out _))
                 {
                     unpackedBytes = gzipped;
                     compressorKind = "GZip Compressor";
@@ -139,8 +194,10 @@ namespace ConfuserExKillerRunner.Killers
                     try
                     {
                         unpackedBytes = TryDynamicMethodRewriteUnpack(module);
-                        if (unpackedBytes != null && IsPeFile(unpackedBytes))
+                        if (unpackedBytes != null && ValidateUnpackedPe(unpackedBytes, out _))
                             compressorKind = "Dynamic Method-Rewrite Unpacker";
+                        else
+                            unpackedBytes = null;
                     }
                     catch (Exception ex)
                     {
@@ -149,9 +206,9 @@ namespace ConfuserExKillerRunner.Killers
                 }
             }
 
-            if (unpackedBytes != null && IsPeFile(unpackedBytes))
+            // Stage 3: Verification and Finalization
+            if (unpackedBytes != null && ValidateUnpackedPe(unpackedBytes, out string peValidationErr))
             {
-                // Finalize unpacked module: restore EntryPoint and transplant manifest resources
                 try
                 {
                     using (var unpackedMod = ModuleDefMD.Load(unpackedBytes))
@@ -193,24 +250,207 @@ namespace ConfuserExKillerRunner.Killers
                             unpackedBytes = ms.ToArray();
                         }
                     }
+
+                    result.SuccessfullyUnpacked = true;
+                    result.UnpackedAssemblyBytes = unpackedBytes;
+                    result.CompressorType = compressorKind ?? "ConfuserEx Compressor";
+                    result.Message = $"Successfully unpacked {result.CompressorType} ({unpackedBytes.Length} bytes)";
+                    Logger.LogInfo($"[CompressorUnpacker] {result.Message}");
+                    return result;
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogWarning($"[CompressorUnpacker] Post-processing unpacked module warning: {ex.Message}");
+                    Logger.LogWarning($"[CompressorUnpacker] Post-processing unpacked module error: {ex.Message}");
                 }
-
-                result.SuccessfullyUnpacked = true;
-                result.UnpackedAssemblyBytes = unpackedBytes;
-                result.CompressorType = compressorKind ?? "ConfuserEx Compressor";
-                result.Message = $"Successfully unpacked {result.CompressorType} ({unpackedBytes.Length} bytes)";
-                Logger.LogInfo($"[CompressorUnpacker] {result.Message}");
-                return result;
             }
 
-            result.Message = isPackedByFileTable
-                ? "ConfuserEx Compressor detected via FileTable, but decompression failed or required runtime execution."
-                : "Compressor stub detected with unsupported encoding.";
+            // Return "Detected but not unpacked" state safely
+            result.SuccessfullyUnpacked = false;
+            result.CompressorType = isPackedByFileTable ? "ConfuserEx Compressor (FileTable)" : "ConfuserEx Compressor (Signature)";
+            result.Message = "ConfuserEx Compressor stub detected, but payload could not be unpacked safely (requires unsupported cipher, LZMA format, or dynamic execution). Target assembly preserved.";
+            Logger.LogWarning($"[CompressorUnpacker] {result.Message}");
             return result;
+        }
+
+        public static bool IsCosturaFody(ModuleDefMD module, out string detail)
+        {
+            detail = null;
+            if (module == null) return false;
+
+            // 1. Check for Costura types
+            foreach (var type in module.Types)
+            {
+                if (type.FullName.StartsWith("Costura.", StringComparison.OrdinalIgnoreCase) ||
+                    type.FullName.IndexOf("Costura", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    detail = $"type '{type.FullName}'";
+                    return true;
+                }
+            }
+
+            // 2. Check for Costura embedded resource conventions
+            foreach (var res in module.Resources)
+            {
+                string rName = res.Name.String;
+                if (rName.StartsWith("costura.", StringComparison.OrdinalIgnoreCase) ||
+                    rName.StartsWith("costura32.", StringComparison.OrdinalIgnoreCase) ||
+                    rName.StartsWith("costura64.", StringComparison.OrdinalIgnoreCase))
+                {
+                    detail = $"resource '{rName}'";
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public static bool IsOtherKnownPacker(ModuleDefMD module, out string packerName)
+        {
+            packerName = null;
+            if (module == null) return false;
+
+            foreach (var type in module.Types)
+            {
+                if (type.FullName.StartsWith("LibZ.", StringComparison.OrdinalIgnoreCase))
+                {
+                    packerName = "LibZ";
+                    return true;
+                }
+                if (type.FullName.IndexOf("BoxedApp", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    packerName = "BoxedApp";
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsBootstrapEntryPointStub(ModuleDefMD module)
+        {
+            var ep = module.EntryPoint;
+            if (ep == null || !ep.HasBody)
+                return false;
+
+            // True compressor stubs have at most 2-3 user types (the stub type, <Module>, maybe an inner decoder class)
+            int userTypes = module.Types.Count(t => !t.IsGlobalModuleType &&
+                                                    !t.FullName.StartsWith("<PrivateImplementationDetails>") &&
+                                                    !t.FullName.StartsWith("<>c"));
+            if (userTypes > 3)
+                return false;
+
+            // Check if EntryPoint body has compressor bootstrap characteristics
+            var insts = ep.Body.Instructions;
+            if (insts.Count > 60)
+                return false;
+
+            bool callsAssemblyLoad = false;
+            bool callsResolveSignature = false;
+            bool usesGcHandle = false;
+
+            foreach (var inst in insts)
+            {
+                if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
+                {
+                    string target = inst.Operand?.ToString() ?? string.Empty;
+                    if (target.Contains("Assembly::Load"))
+                        callsAssemblyLoad = true;
+                    if (target.Contains("ResolveSignature"))
+                        callsResolveSignature = true;
+                    if (target.Contains("GCHandle"))
+                        usesGcHandle = true;
+                }
+            }
+
+            return callsAssemblyLoad || callsResolveSignature || usesGcHandle;
+        }
+
+        private static bool HasConfuserPayloadResource(ModuleDefMD module, out EmbeddedResource resource)
+        {
+            resource = null;
+            foreach (var r in module.Resources.OfType<EmbeddedResource>())
+            {
+                if (IsConfuserResourceName(r.Name.String))
+                {
+                    resource = r;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool IsConfuserResourceName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            return name.Equals("ConfuserEx.CompressedPayload", StringComparison.OrdinalIgnoreCase) ||
+                   name.StartsWith("Confuser.", StringComparison.OrdinalIgnoreCase) ||
+                   name.StartsWith("koi.", StringComparison.OrdinalIgnoreCase) ||
+                   name.Equals("koi", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool HasAnyEmbeddedPe(ModuleDefMD module)
+        {
+            foreach (var res in module.Resources.OfType<EmbeddedResource>())
+            {
+                if (res.Data != null && res.Data.Length >= 64)
+                {
+                    res.Data.Position = 0;
+                    byte[] header = res.Data.ReadBytes(64);
+                    if (header.Length >= 2 && header[0] == 0x4D && header[1] == 0x5A)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        public static bool ValidateUnpackedPe(byte[] bytes, out string error)
+        {
+            error = null;
+            if (bytes == null || bytes.Length < 512)
+            {
+                error = "Payload is null or smaller than minimum PE header size.";
+                return false;
+            }
+
+            if (bytes[0] != 0x4D || bytes[1] != 0x5A) // 'MZ'
+            {
+                error = "Missing MZ DOS header signature.";
+                return false;
+            }
+
+            uint e_lfanew = BitConverter.ToUInt32(bytes, 0x3C);
+            if (e_lfanew > (uint)(bytes.Length - 0x100))
+            {
+                error = $"e_lfanew offset (0x{e_lfanew:X}) out of bounds (length: {bytes.Length}).";
+                return false;
+            }
+
+            uint peSig = BitConverter.ToUInt32(bytes, (int)e_lfanew);
+            if (peSig != 0x00004550) // 'PE\0\0'
+            {
+                error = $"Invalid PE NT signature (expected 0x00004550, got 0x{peSig:X8}).";
+                return false;
+            }
+
+            // Verify with dnlib that it parses as a valid .NET assembly
+            try
+            {
+                using (var testMod = ModuleDefMD.Load(bytes))
+                {
+                    if (testMod.Assembly == null && testMod.Types.Count == 0)
+                    {
+                        error = "PE contains no .NET assembly manifest or types.";
+                        return false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                error = $"Failed to parse payload as a valid .NET module: {ex.Message}";
+                return false;
+            }
+
+            return true;
         }
 
         private static bool CheckFileTable(ModuleDefMD module, out string packedModuleName)
@@ -328,21 +568,6 @@ namespace ConfuserExKillerRunner.Killers
             }
         }
 
-        private static bool IsPeFile(byte[] bytes)
-        {
-            if (bytes == null || bytes.Length < 64)
-                return false;
-            if (bytes[0] != 0x4D || bytes[1] != 0x5A) // 'MZ'
-                return false;
-
-            uint e_lfanew = BitConverter.ToUInt32(bytes, 0x3C);
-            if (e_lfanew + 4 > bytes.Length)
-                return false;
-
-            uint peSig = BitConverter.ToUInt32(bytes, (int)e_lfanew);
-            return peSig == 0x00004550; // 'PE\0\0'
-        }
-
         private static byte[] DecompressBounded(Stream decompressStream, int maxSize)
         {
             byte[] buffer = new byte[81920]; // 80 KB chunks
@@ -364,8 +589,9 @@ namespace ConfuserExKillerRunner.Killers
             }
         }
 
-        internal static byte[] TryDeflateDecompress(byte[] compressed, int maxSize = DefaultMaxDecompressedSize)
+        public static byte[] TryDeflateDecompress(byte[] compressed, int maxSize = DefaultMaxDecompressedSize)
         {
+            if (compressed == null || compressed.Length == 0) return null;
             try
             {
                 using (var input = new MemoryStream(compressed))
@@ -380,8 +606,9 @@ namespace ConfuserExKillerRunner.Killers
             }
         }
 
-        internal static byte[] TryGzipDecompress(byte[] compressed, int maxSize = DefaultMaxDecompressedSize)
+        public static byte[] TryGzipDecompress(byte[] compressed, int maxSize = DefaultMaxDecompressedSize)
         {
+            if (compressed == null || compressed.Length == 0) return null;
             try
             {
                 using (var input = new MemoryStream(compressed))

@@ -236,5 +236,282 @@ namespace ConfuserExKillerRunner.Tests
             byte[] decompExceeded = CompressorUnpacker.TryGzipDecompress(compressed, maxSize: 10 * 1024);
             Assert.Null(decompExceeded);
         }
+
+        private static byte[] CreateValidSmallNetPe(string asmName = "InnerPayloadAsm")
+        {
+            var innerMod = new ModuleDefUser(asmName + ".dll");
+            var innerAsm = new AssemblyDefUser(asmName);
+            innerAsm.Modules.Add(innerMod);
+
+            var sampleType = new TypeDefUser("InnerNamespace", "InnerClass", innerMod.CorLibTypes.Object.TypeDefOrRef);
+            innerMod.Types.Add(sampleType);
+
+            using (var ms = new MemoryStream())
+            {
+                innerMod.Write(ms, new dnlib.DotNet.Writer.ModuleWriterOptions(innerMod) { Logger = DummyLogger.NoThrowInstance });
+                return ms.ToArray();
+            }
+        }
+
+        [Fact]
+        public void TryUnpack_CosturaFodyApplication_IsDetectedAndSkippedWithoutHijackingAssembly()
+        {
+            // Simulate an application packaged with Costura.Fody
+            var module = new ModuleDefUser("MainCosturaApp.exe");
+            var asm = new AssemblyDefUser("MainCosturaApp");
+            asm.Modules.Add(module);
+
+            // 1. Costura AssemblyLoader type
+            var costuraType = new TypeDefUser("Costura", "AssemblyLoader", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(costuraType);
+
+            // 2. Normal application domain types
+            var appType1 = new TypeDefUser("App.Services", "OrderService", module.CorLibTypes.Object.TypeDefOrRef);
+            var appType2 = new TypeDefUser("App.Views", "MainWindow", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(appType1);
+            module.Types.Add(appType2);
+
+            // 3. Embedded compressed dependency (e.g. Newtonsoft.Json)
+            byte[] innerPe = CreateValidSmallNetPe("Newtonsoft.Json");
+            byte[] compressedDependency;
+            using (var ms = new MemoryStream())
+            {
+                using (var deflate = new System.IO.Compression.DeflateStream(ms, System.IO.Compression.CompressionLevel.Optimal, true))
+                {
+                    deflate.Write(innerPe, 0, innerPe.Length);
+                }
+                compressedDependency = ms.ToArray();
+            }
+            module.Resources.Add(new EmbeddedResource("costura.newtonsoft.json.dll.compressed", compressedDependency));
+
+            // 4. Application EntryPoint
+            var ep = new MethodDefUser("Main", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            ep.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            module.GlobalType.Methods.Add(ep);
+            module.EntryPoint = ep;
+
+            using (var ms = new MemoryStream())
+            {
+                module.Write(ms, new dnlib.DotNet.Writer.ModuleWriterOptions(module) { Logger = DummyLogger.NoThrowInstance });
+                using (var modMD = ModuleDefMD.Load(ms.ToArray()))
+                {
+                    var result = CompressorUnpacker.TryUnpack(modMD, ms.ToArray(), allowExecution: false);
+
+                    // Must NOT be unpacked, must NOT hijack host application
+                    Assert.False(result.SuccessfullyUnpacked);
+                    Assert.False(result.IsCompressed);
+                    Assert.Equal(PackerClassification.CosturaFodyPacker, result.Classification);
+                    Assert.Null(result.UnpackedAssemblyBytes);
+                    Assert.Contains("Costura.Fody", result.Message);
+                }
+            }
+        }
+
+        [Fact]
+        public void TryUnpack_BenignAssemblyWithRawEmbeddedPe_IsSkippedWithoutReplacingTarget()
+        {
+            var module = new ModuleDefUser("PluginHostApp.exe");
+            var asm = new AssemblyDefUser("PluginHostApp");
+            asm.Modules.Add(module);
+
+            // Normal application types
+            module.Types.Add(new TypeDefUser("App.Core", "PluginManager", module.CorLibTypes.Object.TypeDefOrRef));
+            module.Types.Add(new TypeDefUser("App.Core", "ConfigService", module.CorLibTypes.Object.TypeDefOrRef));
+            module.Types.Add(new TypeDefUser("App.Core", "UiPresenter", module.CorLibTypes.Object.TypeDefOrRef));
+            module.Types.Add(new TypeDefUser("App.Core", "DataRepository", module.CorLibTypes.Object.TypeDefOrRef));
+
+            // Embed raw PE plugin
+            byte[] innerPe = CreateValidSmallNetPe("SamplePlugin");
+            module.Resources.Add(new EmbeddedResource("MyEmbeddedPlugin.dll", innerPe));
+
+            var ep = new MethodDefUser("Main", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            ep.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            module.GlobalType.Methods.Add(ep);
+            module.EntryPoint = ep;
+
+            using (var ms = new MemoryStream())
+            {
+                module.Write(ms, new dnlib.DotNet.Writer.ModuleWriterOptions(module) { Logger = DummyLogger.NoThrowInstance });
+                using (var modMD = ModuleDefMD.Load(ms.ToArray()))
+                {
+                    var result = CompressorUnpacker.TryUnpack(modMD, ms.ToArray(), allowExecution: false);
+
+                    Assert.False(result.SuccessfullyUnpacked);
+                    Assert.False(result.IsCompressed);
+                    Assert.Equal(PackerClassification.GenericApplicationWithEmbeddedPayload, result.Classification);
+                    Assert.Null(result.UnpackedAssemblyBytes);
+                }
+            }
+        }
+
+        [Fact]
+        public void TryUnpack_BenignAssemblyWithDeflateCompressedPe_IsSkippedWithoutReplacingTarget()
+        {
+            var module = new ModuleDefUser("BackupUtilityApp.exe");
+            var asm = new AssemblyDefUser("BackupUtilityApp");
+            asm.Modules.Add(module);
+
+            // Normal application types
+            module.Types.Add(new TypeDefUser("Backup.Engine", "Worker", module.CorLibTypes.Object.TypeDefOrRef));
+            module.Types.Add(new TypeDefUser("Backup.Engine", "Archiver", module.CorLibTypes.Object.TypeDefOrRef));
+            module.Types.Add(new TypeDefUser("Backup.Engine", "ReportGenerator", module.CorLibTypes.Object.TypeDefOrRef));
+            module.Types.Add(new TypeDefUser("Backup.Engine", "Settings", module.CorLibTypes.Object.TypeDefOrRef));
+
+            // Embed deflated PE
+            byte[] innerPe = CreateValidSmallNetPe("HelperAssembly");
+            byte[] compressed;
+            using (var compMs = new MemoryStream())
+            {
+                using (var deflate = new System.IO.Compression.DeflateStream(compMs, System.IO.Compression.CompressionLevel.Optimal, true))
+                {
+                    deflate.Write(innerPe, 0, innerPe.Length);
+                }
+                compressed = compMs.ToArray();
+            }
+            module.Resources.Add(new EmbeddedResource("ZippedHelper.bin", compressed));
+
+            var ep = new MethodDefUser("Main", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            ep.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            module.GlobalType.Methods.Add(ep);
+            module.EntryPoint = ep;
+
+            using (var ms = new MemoryStream())
+            {
+                module.Write(ms, new dnlib.DotNet.Writer.ModuleWriterOptions(module) { Logger = DummyLogger.NoThrowInstance });
+                using (var modMD = ModuleDefMD.Load(ms.ToArray()))
+                {
+                    var result = CompressorUnpacker.TryUnpack(modMD, ms.ToArray(), allowExecution: false);
+
+                    Assert.False(result.SuccessfullyUnpacked);
+                    Assert.False(result.IsCompressed);
+                    Assert.Null(result.UnpackedAssemblyBytes);
+                }
+            }
+        }
+
+        [Fact]
+        public void TryUnpack_OtherPacker_LibZ_IsDetectedAndSkipped()
+        {
+            var module = new ModuleDefUser("LibZPackedApp.exe");
+            var asm = new AssemblyDefUser("LibZPackedApp");
+            asm.Modules.Add(module);
+
+            var libzType = new TypeDefUser("LibZ", "Loader", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(libzType);
+
+            using (var ms = new MemoryStream())
+            {
+                module.Write(ms, new dnlib.DotNet.Writer.ModuleWriterOptions(module) { Logger = DummyLogger.NoThrowInstance });
+                using (var modMD = ModuleDefMD.Load(ms.ToArray()))
+                {
+                    var result = CompressorUnpacker.TryUnpack(modMD, ms.ToArray(), allowExecution: false);
+
+                    Assert.False(result.SuccessfullyUnpacked);
+                    Assert.False(result.IsCompressed);
+                    Assert.Equal(PackerClassification.OtherPackagingFormat, result.Classification);
+                    Assert.Contains("LibZ", result.Message);
+                }
+            }
+        }
+
+        [Fact]
+        public void TryUnpack_AuthenticConfuserExDeflateStub_SuccessfullyUnpacks()
+        {
+            byte[] innerPe = CreateValidSmallNetPe("RealTargetApp");
+            byte[] compressed;
+            using (var compMs = new MemoryStream())
+            {
+                using (var deflate = new System.IO.Compression.DeflateStream(compMs, System.IO.Compression.CompressionLevel.Optimal, true))
+                {
+                    deflate.Write(innerPe, 0, innerPe.Length);
+                }
+                compressed = compMs.ToArray();
+            }
+
+            var stubMod = new ModuleDefUser("ConfuserStub.exe");
+            var stubAsm = new AssemblyDefUser("ConfuserStub");
+            stubAsm.Modules.Add(stubMod);
+
+            stubMod.Resources.Add(new EmbeddedResource("ConfuserEx.CompressedPayload", compressed));
+
+            // Bootstrap EntryPoint
+            var ep = new MethodDefUser("Main", MethodSig.CreateStatic(stubMod.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var asmLoadRef = stubMod.Import(typeof(System.Reflection.Assembly).GetMethod("Load", new[] { typeof(byte[]) }));
+            ep.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            ep.Body.Instructions.Add(Instruction.Create(OpCodes.Call, asmLoadRef));
+            ep.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            ep.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            stubMod.GlobalType.Methods.Add(ep);
+            stubMod.EntryPoint = ep;
+
+            using (var ms = new MemoryStream())
+            {
+                stubMod.Write(ms, new dnlib.DotNet.Writer.ModuleWriterOptions(stubMod) { Logger = DummyLogger.NoThrowInstance });
+                using (var modMD = ModuleDefMD.Load(ms.ToArray()))
+                {
+                    var result = CompressorUnpacker.TryUnpack(modMD, ms.ToArray(), allowExecution: false);
+
+                    Assert.True(result.IsCompressed);
+                    Assert.True(result.SuccessfullyUnpacked);
+                    Assert.Equal(PackerClassification.ConfuserExCompressorStub, result.Classification);
+                    Assert.NotNull(result.UnpackedAssemblyBytes);
+                    Assert.True(result.UnpackedAssemblyBytes.Length > 0);
+
+                    // Verify unpacked bytes load cleanly as the target assembly
+                    using (var unpackedMod = ModuleDefMD.Load(result.UnpackedAssemblyBytes))
+                    {
+                        Assert.Equal("RealTargetApp", unpackedMod.Assembly.Name);
+                    }
+                }
+            }
+        }
+
+        [Fact]
+        public void ValidateUnpackedPe_CorruptedAndTruncated_ReturnsFalse()
+        {
+            Assert.False(CompressorUnpacker.ValidateUnpackedPe(null, out _));
+            Assert.False(CompressorUnpacker.ValidateUnpackedPe(new byte[10], out _));
+            Assert.False(CompressorUnpacker.ValidateUnpackedPe(new byte[600], out _)); // All zeros
+
+            // MZ with out of bounds e_lfanew
+            byte[] badLfanew = new byte[600];
+            badLfanew[0] = 0x4D; badLfanew[1] = 0x5A;
+            BitConverter.GetBytes(0x7FFFFFFF).CopyTo(badLfanew, 0x3C);
+            Assert.False(CompressorUnpacker.ValidateUnpackedPe(badLfanew, out _));
+
+            // MZ with valid e_lfanew but wrong PE signature
+            byte[] badSig = new byte[600];
+            badSig[0] = 0x4D; badSig[1] = 0x5A;
+            BitConverter.GetBytes(128).CopyTo(badSig, 0x3C);
+            badSig[128] = (byte)'N'; badSig[129] = (byte)'O'; badSig[130] = (byte)'P'; badSig[131] = (byte)'E';
+            Assert.False(CompressorUnpacker.ValidateUnpackedPe(badSig, out _));
+
+            // Valid PE header but random non-.NET garbage in data sections
+            byte[] fakePe = new byte[1024];
+            fakePe[0] = 0x4D; fakePe[1] = 0x5A;
+            BitConverter.GetBytes(128).CopyTo(fakePe, 0x3C);
+            fakePe[128] = (byte)'P'; fakePe[129] = (byte)'E'; fakePe[130] = 0; fakePe[131] = 0;
+            Assert.False(CompressorUnpacker.ValidateUnpackedPe(fakePe, out _));
+        }
     }
 }
