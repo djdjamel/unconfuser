@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using ConfuserExKillerRunner.Core;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
 
@@ -28,7 +29,7 @@ namespace ConfuserExKillerRunner.Analysis
         public bool StructuralAuditPassed => CanLoad && InvalidInstructionsCount == 0 && InvalidBranchesCount == 0 && InvalidEHCount == 0 && StackUnderflowCount == 0 && Errors.Count == 0;
 
         /// <summary>
-        /// Explicit IL verification status: "VERIFIED", "UNVERIFIED", or "FAILED".
+        /// Explicit IL verification status: "PASSED", "UNVERIFIED", or "FAILED".
         /// External IL verification (via ilverify/peverify) is marked UNVERIFIED if tools are not installed or target is historical .NET Framework.
         /// </summary>
         public string ILVerificationStatus { get; set; } = "UNVERIFIED";
@@ -47,18 +48,118 @@ namespace ConfuserExKillerRunner.Analysis
 
     public static class QualityAuditor
     {
-        public static AuditReport Audit(string filePath)
+        public static string ResolvePEVerifyPath()
+        {
+            string env = Environment.GetEnvironmentVariable("PEVERIFY_PATH");
+            if (!string.IsNullOrEmpty(env) && File.Exists(env))
+                return Path.GetFullPath(env);
+
+            var candidates = new List<string>
+            {
+                @"C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.8 Tools\PEVerify.exe",
+                @"C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.8 Tools\x64\PEVerify.exe",
+                @"C:\Program Files (x86)\Microsoft SDKs\Windows\v8.1A\bin\NETFX 4.5.1 Tools\PEVerify.exe",
+                @"C:\Program Files (x86)\Microsoft SDKs\Windows\v7.0A\Bin\PEVerify.exe"
+            };
+
+            foreach (var cand in candidates)
+            {
+                if (File.Exists(cand))
+                    return Path.GetFullPath(cand);
+            }
+
+            return ProcessRunner.ResolveExecutablePath("PEVerify.exe");
+        }
+
+        public static string ResolveILVerifyPath()
+        {
+            string env = Environment.GetEnvironmentVariable("ILVERIFY_PATH");
+            if (!string.IsNullOrEmpty(env) && File.Exists(env))
+                return Path.GetFullPath(env);
+
+            return ProcessRunner.ResolveExecutablePath("ilverify.exe") ?? ProcessRunner.ResolveExecutablePath("ilverify");
+        }
+
+        public static bool IsNetFrameworkTarget(ModuleDef module)
+        {
+            if (module == null) return false;
+
+            // 1. Check TargetFrameworkAttribute
+            if (module.Assembly != null)
+            {
+                foreach (var ca in module.Assembly.CustomAttributes)
+                {
+                    if (ca.TypeFullName == "System.Runtime.Versioning.TargetFrameworkAttribute" && ca.ConstructorArguments.Count > 0)
+                    {
+                        string tf = ca.ConstructorArguments[0].Value?.ToString();
+                        if (!string.IsNullOrEmpty(tf))
+                        {
+                            if (tf.StartsWith(".NETFramework", StringComparison.OrdinalIgnoreCase))
+                                return true;
+                            if (tf.StartsWith(".NETCoreApp", StringComparison.OrdinalIgnoreCase) || tf.StartsWith(".NETStandard", StringComparison.OrdinalIgnoreCase))
+                                return false;
+                        }
+                    }
+                }
+            }
+
+            // 2. Check CorLib assembly reference name
+            if (module.CorLibTypes.AssemblyRef != null && !UTF8String.IsNullOrEmpty(module.CorLibTypes.AssemblyRef.Name))
+            {
+                string corLib = module.CorLibTypes.AssemblyRef.Name.String;
+                if (string.Equals(corLib, "mscorlib", StringComparison.OrdinalIgnoreCase))
+                    return true;
+                if (string.Equals(corLib, "System.Runtime", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(corLib, "System.Private.CoreLib", StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+
+            // 3. Fallback: check assembly references
+            foreach (var ar in module.GetAssemblyRefs())
+            {
+                if (!UTF8String.IsNullOrEmpty(ar.Name) && string.Equals(ar.Name.String, "mscorlib", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
+        public static List<string> DetectRegressions(AuditReport baseline, AuditReport candidate)
+        {
+            var regressions = new List<string>();
+            if (candidate == null) return regressions;
+            if (baseline == null) return new List<string>(candidate.Errors);
+
+            var baselineErrors = new HashSet<string>(baseline.Errors, StringComparer.Ordinal);
+            foreach (var err in candidate.Errors)
+            {
+                if (err.StartsWith("[0x", StringComparison.Ordinal) && !baselineErrors.Contains(err))
+                {
+                    regressions.Add(err);
+                }
+            }
+
+            return regressions;
+        }
+
+        public static AuditReport Audit(string filePath, bool runExternalVerifier = true, string workingDir = null)
         {
             if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
                 throw new FileNotFoundException("Assembly file not found for audit", filePath);
 
             var report = new AuditReport { TargetPath = filePath, CanLoad = false };
 
+            if (string.IsNullOrEmpty(workingDir))
+                workingDir = Path.GetDirectoryName(filePath);
+
+            bool isNetFramework = false;
             try
             {
                 using (var module = ModuleDefMD.Load(filePath))
                 {
                     report.CanLoad = true;
+                    isNetFramework = IsNetFrameworkTarget(module);
+
                     var types = module.GetTypes();
                     report.TotalTypes = 0;
                     report.TotalMethods = 0;
@@ -86,7 +187,85 @@ namespace ConfuserExKillerRunner.Analysis
                 report.Warnings.Add($"Failed to load assembly in dnlib: {ex.Message}");
             }
 
+            // Run external verification when requested and structurally valid
+            if (runExternalVerifier && report.CanLoad && report.StructuralAuditPassed)
+            {
+                RunExternalVerification(filePath, isNetFramework, report, workingDir);
+            }
+
             return report;
+        }
+
+        private static void RunExternalVerification(string filePath, bool isNetFramework, AuditReport report, string workingDir)
+        {
+            if (isNetFramework)
+            {
+                string peverify = ResolvePEVerifyPath();
+                if (peverify != null)
+                {
+                    try
+                    {
+                        var proc = ProcessRunner.Run(peverify, $"\"{filePath}\" /IL /MD", workingDir, timeoutMs: 30000);
+                        if (proc.ExitCode == 0)
+                        {
+                            report.ILVerificationStatus = "PASSED";
+                            report.ILVerificationNotes = "PEVerify: All classes and methods verified.";
+                        }
+                        else
+                        {
+                            report.ILVerificationStatus = "FAILED";
+                            string outSnippet = proc.StandardOutput.Trim();
+                            if (outSnippet.Length > 200) outSnippet = outSnippet.Substring(0, 200) + "...";
+                            report.ILVerificationNotes = $"PEVerify reported errors (ExitCode {proc.ExitCode}): {outSnippet}";
+                            report.Warnings.Add($"PEVerify reported errors: {outSnippet}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        report.ILVerificationStatus = "UNVERIFIED";
+                        report.ILVerificationNotes = $"PEVerify invocation failed: {ex.Message}";
+                    }
+                }
+                else
+                {
+                    report.ILVerificationStatus = "UNVERIFIED";
+                    report.ILVerificationNotes = "External IL verification tool (PEVerify) not found in environment; structural audit passed.";
+                }
+            }
+            else
+            {
+                string ilverify = ResolveILVerifyPath();
+                if (ilverify != null)
+                {
+                    try
+                    {
+                        var proc = ProcessRunner.Run(ilverify, $"\"{filePath}\"", workingDir, timeoutMs: 30000);
+                        if (proc.ExitCode == 0)
+                        {
+                            report.ILVerificationStatus = "PASSED";
+                            report.ILVerificationNotes = "dotnet-ilverify: All classes and methods verified.";
+                        }
+                        else
+                        {
+                            report.ILVerificationStatus = "FAILED";
+                            string outSnippet = proc.StandardOutput.Trim();
+                            if (outSnippet.Length > 200) outSnippet = outSnippet.Substring(0, 200) + "...";
+                            report.ILVerificationNotes = $"dotnet-ilverify reported errors (ExitCode {proc.ExitCode}): {outSnippet}";
+                            report.Warnings.Add($"dotnet-ilverify reported errors: {outSnippet}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        report.ILVerificationStatus = "UNVERIFIED";
+                        report.ILVerificationNotes = $"dotnet-ilverify invocation failed: {ex.Message}";
+                    }
+                }
+                else
+                {
+                    report.ILVerificationStatus = "UNVERIFIED";
+                    report.ILVerificationNotes = "dotnet-ilverify tool not installed on system; external verification skipped for .NET Core target.";
+                }
+            }
         }
 
         /// <summary>

@@ -96,47 +96,61 @@ namespace ConfuserExKillerRunner.Analysis
             return result;
         }
 
-        private static NetDetectScanResult ParseNetDetectJson(string json)
+        public static NetDetectScanResult ParseNetDetectJson(string json)
         {
             var result = new NetDetectScanResult { Available = true };
+            if (string.IsNullOrWhiteSpace(json))
+                return result;
 
-            // Lightweight regex-based parser to avoid external JSON library dependencies
-            var detectedMatch = Regex.Match(json, "\"detected\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
-            if (detectedMatch.Success)
-                result.Detected = bool.Parse(detectedMatch.Groups[1].Value);
-
-            var primaryMatch = Regex.Match(json, "\"primary_detector\"\\s*:\\s*\"([^\"]+)\"");
-            if (primaryMatch.Success)
-                result.PrimaryDetector = primaryMatch.Groups[1].Value;
-
-            var confMatch = Regex.Match(json, "\"confidence\"\\s*:\\s*\"([^\"]+)\"");
-            if (confMatch.Success)
-                result.Confidence = confMatch.Groups[1].Value;
-
-            var scoreMatch = Regex.Match(json, "\"verdict_score\"\\s*:\\s*(\\d+)");
-            if (scoreMatch.Success)
-                result.VerdictScore = int.Parse(scoreMatch.Groups[1].Value);
-
-            var summaryMatch = Regex.Match(json, "\"summary\"\\s*:\\s*\"([^\"]+)\"");
-            if (summaryMatch.Success)
-                result.Summary = summaryMatch.Groups[1].Value;
-
-            // Extract protectors
-            var protectorMatches = Regex.Matches(json, "\"name\"\\s*:\\s*\"([^\"]+)\"");
-            foreach (Match m in protectorMatches)
+            try
             {
-                string name = m.Groups[1].Value;
-                if (!result.Protectors.Contains(name) && name != ".text" && name != ".rsrc" && name != ".reloc")
-                    result.Protectors.Add(name);
+                var root = JsonValue.Parse(json);
+                if (root == null || !root.IsObject)
+                    return result;
+
+                // Support both nested payload format ({"detection": { ... }}) and flat format ({ ... })
+                var detObj = root.ContainsKey("detection") && root["detection"].IsObject ? root["detection"] : root;
+
+                result.Detected = detObj["detected"].AsBool(false);
+                result.PrimaryDetector = detObj["primary_detector"].AsString("None");
+                result.Confidence = detObj["confidence"].AsString("None");
+                result.VerdictScore = detObj["verdict_score"].AsInt(0);
+                result.Summary = detObj["summary"].AsString(string.Empty);
+
+                // Extract protectors from "protectors" or "matches" array
+                var protectorsNode = detObj.ContainsKey("protectors") && detObj["protectors"].IsArray
+                    ? detObj["protectors"]
+                    : (detObj.ContainsKey("matches") && detObj["matches"].IsArray ? detObj["matches"] : null);
+
+                if (protectorsNode != null)
+                {
+                    foreach (var p in protectorsNode.AsArray())
+                    {
+                        string name = p.IsObject ? p["name"].AsString() : p.AsString();
+                        if (!string.IsNullOrEmpty(name) && !result.Protectors.Contains(name) &&
+                            name != ".text" && name != ".rsrc" && name != ".reloc")
+                        {
+                            result.Protectors.Add(name);
+                        }
+                    }
+                }
+
+                // Extract generic techniques from "techniques" array
+                if (detObj.ContainsKey("techniques") && detObj["techniques"].IsArray)
+                {
+                    foreach (var t in detObj["techniques"].AsArray())
+                    {
+                        string tech = t.IsObject ? t["technique"].AsString(t["name"].AsString()) : t.AsString();
+                        if (!string.IsNullOrEmpty(tech) && !result.GenericTechniques.Contains(tech))
+                        {
+                            result.GenericTechniques.Add(tech);
+                        }
+                    }
+                }
             }
-
-            // Extract techniques
-            var techniqueMatches = Regex.Matches(json, "\"technique\"\\s*:\\s*\"([^\"]+)\"");
-            foreach (Match m in techniqueMatches)
+            catch (Exception ex)
             {
-                string tech = m.Groups[1].Value;
-                if (!result.GenericTechniques.Contains(tech))
-                    result.GenericTechniques.Add(tech);
+                Logger.LogWarning($"[NetDetect] Failed to parse JSON report: {ex.Message}");
             }
 
             return result;

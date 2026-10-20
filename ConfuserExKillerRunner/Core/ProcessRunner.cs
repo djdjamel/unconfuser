@@ -183,5 +183,30 @@ namespace ConfuserExKillerRunner.Core
 
             return null;
         }
+
+        public static string ResolveExecutablePath(string exeName)
+        {
+            if (string.IsNullOrEmpty(exeName)) return null;
+            if (File.Exists(exeName)) return Path.GetFullPath(exeName);
+
+            string pathEnv = Environment.GetEnvironmentVariable("PATH");
+            if (!string.IsNullOrEmpty(pathEnv))
+            {
+                foreach (var dir in pathEnv.Split(Path.PathSeparator))
+                {
+                    try
+                    {
+                        string trimmed = dir.Trim();
+                        if (string.IsNullOrEmpty(trimmed)) continue;
+                        string fullPath = Path.Combine(trimmed, exeName);
+                        if (File.Exists(fullPath))
+                            return Path.GetFullPath(fullPath);
+                    }
+                    catch { }
+                }
+            }
+
+            return null;
+        }
     }
 }

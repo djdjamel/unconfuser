@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -39,6 +40,8 @@ namespace ConfuserExKillerRunner
             bool skipDe4dot = false;
             bool skipNetDetect = false;
             string outputPath = null;
+            string jsonReportPath = null;
+            bool strictExitCodes = false;
             bool verbose = false;
 
             for (int i = 0; i < args.Length; i++)
@@ -80,6 +83,14 @@ namespace ConfuserExKillerRunner
                 else if ((arg == "-o" || arg == "--output") && i + 1 < args.Length)
                 {
                     outputPath = args[++i];
+                }
+                else if ((arg == "--json-report" || arg == "--report") && i + 1 < args.Length)
+                {
+                    jsonReportPath = Path.GetFullPath(args[++i]);
+                }
+                else if (arg == "--strict-exit-codes")
+                {
+                    strictExitCodes = true;
                 }
                 else if (!arg.StartsWith("-") && assemblyPath == null)
                 {
@@ -126,6 +137,20 @@ namespace ConfuserExKillerRunner
             string executionTempDir = Path.Combine(Path.GetTempPath(), "unconfuser_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(executionTempDir);
 
+            var swTotal = Stopwatch.StartNew();
+            var stepTimings = new Dictionary<string, long>(StringComparer.Ordinal);
+            var exceptionsAndRollbacks = new List<string>();
+
+            AuditReport baselineAudit = null;
+            try
+            {
+                baselineAudit = QualityAuditor.Audit(originalInputPath, runExternalVerifier: false);
+            }
+            catch (Exception ex)
+            {
+                exceptionsAndRollbacks.Add($"Baseline audit error: {ex.Message}");
+            }
+
             try
             {
                 byte[] peImageOld = File.ReadAllBytes(assemblyPath);
@@ -134,7 +159,9 @@ namespace ConfuserExKillerRunner
                 NetDetectScanResult preScan = null;
                 if (!skipNetDetect)
                 {
+                    var swPre = Stopwatch.StartNew();
                     preScan = NetDetectIntegration.RunScan(assemblyPath);
+                    stepTimings["PreScan_NetDetect"] = swPre.ElapsedMilliseconds;
                     NetDetectIntegration.PrintPreScanReport(preScan);
                 }
 
@@ -587,7 +614,21 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("===============================================================");
             Console.WriteLine("    Assembly Structural & Control-Flow Integrity Audit Report  ");
             Console.WriteLine("===============================================================");
-            var auditReport = QualityAuditor.Audit(candidatePath);
+            var swAudit = Stopwatch.StartNew();
+            var auditReport = QualityAuditor.Audit(candidatePath, runExternalVerifier: true, workingDir: targetDir);
+            var regressions = QualityAuditor.DetectRegressions(baselineAudit, auditReport);
+            if (regressions.Count > 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                foreach (var reg in regressions)
+                {
+                    Console.WriteLine($"  [!] Engine Regression Detected: {reg}");
+                    auditReport.Errors.Add("Engine Regression: " + reg);
+                }
+                Console.ResetColor();
+            }
+            stepTimings["Step7_QualityAudit"] = swAudit.ElapsedMilliseconds;
+
             Console.WriteLine($"[*] Status:                 [{auditReport.Status}]");
             Console.WriteLine($"[*] Loadable (dnlib):       [{(auditReport.CanLoad ? "YES" : "NO")}]");
             Console.WriteLine($"[*] Structural Integrity:   [{(auditReport.StructuralAuditPassed ? "PASSED" : "FAILED")}]");
@@ -616,6 +657,57 @@ namespace ConfuserExKillerRunner
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine("[!] Deobfuscation audit reported FAILED. Candidate assembly rejected; no corrupt output written.");
                 Console.ResetColor();
+
+                if (!string.IsNullOrEmpty(jsonReportPath))
+                {
+                    try
+                    {
+                        var failReport = new DeobfuscationReport
+                        {
+                            Input = new FileReportInfo
+                            {
+                                Path = originalInputPath,
+                                Sha256 = DeobfuscationReport.ComputeSha256(originalInputPath),
+                                SizeBytes = new FileInfo(originalInputPath).Length,
+                                TargetArchitecture = archInfo != null ? archInfo.Architecture.ToString() : "Unknown",
+                                TargetFramework = archInfo?.IsPe32Plus == true ? "PE32+" : "PE32"
+                            },
+                            Output = new FileReportInfo
+                            {
+                                Path = finalOutputPath,
+                                Sha256 = string.Empty,
+                                SizeBytes = 0
+                            },
+                            QualityAudit = new QualityAuditReportInfo
+                            {
+                                Status = auditReport.Status,
+                                CanLoad = auditReport.CanLoad,
+                                StructuralAuditPassed = auditReport.StructuralAuditPassed,
+                                ILVerificationStatus = auditReport.ILVerificationStatus,
+                                ILVerificationNotes = auditReport.ILVerificationNotes,
+                                InvalidInstructionsCount = auditReport.InvalidInstructionsCount,
+                                InvalidBranchesCount = auditReport.InvalidBranchesCount,
+                                InvalidEHCount = auditReport.InvalidEHCount,
+                                StackUnderflowCount = auditReport.StackUnderflowCount,
+                                UnresolvedCallSitesCount = auditReport.UnresolvedCallSitesCount,
+                                Warnings = auditReport.Warnings,
+                                Errors = auditReport.Errors,
+                                RegressionsIntroducedCount = regressions.Count,
+                                Regressions = regressions
+                            },
+                            PassTimingsMs = stepTimings,
+                            TotalElapsedMs = swTotal.ElapsedMilliseconds,
+                            ExceptionsAndRollbacks = exceptionsAndRollbacks,
+                            FinalStatus = "FAILED",
+                            OverallVerdict = "FAILED (Candidate Assembly Rejected by QualityAuditor)",
+                            ExitCode = 1,
+                            SummaryNotes = "Candidate assembly was rejected because it failed structural integrity or external verification audits."
+                        };
+                        failReport.Save(jsonReportPath);
+                    }
+                    catch { }
+                }
+
                 return 1;
             }
 
@@ -672,11 +764,12 @@ namespace ConfuserExKillerRunner
             }
 
             // Protection Coverage & Support Matrix
+            ProtectionMatrixResult matrix = null;
             try
             {
                 using (var finalModule = ModuleDefMD.Load(finalOutputPath))
                 {
-                    var matrix = ProtectionMatrix.Evaluate(
+                    matrix = ProtectionMatrix.Evaluate(
                         finalModule,
                         allowExecution: allowExecution,
                         antiTamperDecrypted: antiTamperDecrypted,
@@ -699,7 +792,99 @@ namespace ConfuserExKillerRunner
                     Console.WriteLine($"[!] Could not generate protection coverage matrix: {ex.Message}");
             }
 
-            return 0;
+            int exitCode = 0;
+            string finalStatus = "SUCCESS";
+            if (matrix != null && (matrix.HasRequiresDynamicSkipped || matrix.HasUnsupported || (strictExitCodes && matrix.HasPartiallyProcessed)))
+            {
+                exitCode = 2;
+                finalStatus = "PARTIAL_SUCCESS";
+            }
+            else
+            {
+                exitCode = 0;
+                finalStatus = "SUCCESS";
+            }
+
+            if (!string.IsNullOrEmpty(jsonReportPath))
+            {
+                try
+                {
+                    var report = new DeobfuscationReport
+                    {
+                        Input = new FileReportInfo
+                        {
+                            Path = originalInputPath,
+                            Sha256 = DeobfuscationReport.ComputeSha256(originalInputPath),
+                            SizeBytes = new FileInfo(originalInputPath).Length,
+                            TargetArchitecture = archInfo != null ? archInfo.Architecture.ToString() : "Unknown",
+                            TargetFramework = archInfo?.IsPe32Plus == true ? "PE32+" : "PE32"
+                        },
+                        Output = new FileReportInfo
+                        {
+                            Path = finalOutputPath,
+                            Sha256 = DeobfuscationReport.ComputeSha256(finalOutputPath),
+                            SizeBytes = File.Exists(finalOutputPath) ? new FileInfo(finalOutputPath).Length : 0
+                        },
+                        Protections = matrix?.Items ?? new List<ProtectionItem>(),
+                        Transformations = new TransformationReportMetrics
+                        {
+                            MethodsInspected = auditReport?.TotalMethods ?? 0,
+                            MethodsWithBodies = auditReport?.MethodsWithBody ?? 0,
+                            ConstantsDecryptedCount = totalConstantsDecrypted,
+                            AllConstantsResolved = allConstantsResolved,
+                            ResourcesExtractedCount = totalResourcesExtracted,
+                            ProxiesInlinedCount = totalProxiesInlined,
+                            SwitchesResolvedCount = totalSwitchesResolved,
+                            JunkInstructionsStrippedCount = totalJunkStripped,
+                            CleanerHooksStrippedCount = totalCleanerHooks
+                        },
+                        QualityAudit = new QualityAuditReportInfo
+                        {
+                            Status = auditReport?.Status ?? "CLEAN",
+                            CanLoad = auditReport?.CanLoad ?? true,
+                            StructuralAuditPassed = auditReport?.StructuralAuditPassed ?? true,
+                            ILVerificationStatus = auditReport?.ILVerificationStatus ?? "UNVERIFIED",
+                            ILVerificationNotes = auditReport?.ILVerificationNotes ?? string.Empty,
+                            InvalidInstructionsCount = auditReport?.InvalidInstructionsCount ?? 0,
+                            InvalidBranchesCount = auditReport?.InvalidBranchesCount ?? 0,
+                            InvalidEHCount = auditReport?.InvalidEHCount ?? 0,
+                            StackUnderflowCount = auditReport?.StackUnderflowCount ?? 0,
+                            UnresolvedCallSitesCount = auditReport?.UnresolvedCallSitesCount ?? 0,
+                            Warnings = auditReport?.Warnings ?? new List<string>(),
+                            Errors = auditReport?.Errors ?? new List<string>(),
+                            RegressionsIntroducedCount = regressions?.Count ?? 0,
+                            Regressions = regressions ?? new List<string>()
+                        },
+                        PassTimingsMs = stepTimings,
+                        TotalElapsedMs = swTotal.ElapsedMilliseconds,
+                        ExceptionsAndRollbacks = exceptionsAndRollbacks,
+                        FinalStatus = finalStatus,
+                        OverallVerdict = matrix?.OverallVerdict ?? finalStatus,
+                        ExitCode = exitCode,
+                        SummaryNotes = matrix?.SummaryNotes ?? string.Empty
+                    };
+
+                    if (matrix != null)
+                    {
+                        if (matrix.HasRequiresDynamicSkipped)
+                            report.KnownLimitations.Add("Dynamic execution required for full deobfuscation (--allow-execution).");
+                        if (matrix.HasUnsupported)
+                            report.KnownLimitations.Add("Unsupported native x86 machine-code or JIT hooks preserved.");
+                        if (matrix.HasPartiallyProcessed)
+                            report.KnownLimitations.Add("Some constants or proxies could not be resolved and were preserved.");
+                    }
+
+                    report.Save(jsonReportPath);
+                    Console.WriteLine($"[+] Deobfuscation audit report saved to: {jsonReportPath}");
+                }
+                catch (Exception ex)
+                {
+                    if (verbose)
+                        Console.WriteLine($"[!] Failed to write JSON report: {ex.Message}");
+                }
+            }
+
+            return exitCode;
             }
             finally
             {
@@ -733,8 +918,15 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("  -d, --de4dot <path>     Specify explicit path to de4dot-cex executable");
             Console.WriteLine("  --no-de4dot             Skip de4dot external process pass");
             Console.WriteLine("  --no-netdetect          Skip NetDetect pre/post obfuscation audit");
+            Console.WriteLine("  --json-report <path>    Generate structured versioned JSON audit report");
+            Console.WriteLine("  --strict-exit-codes     Return exit code 2 on any partial deobfuscation");
             Console.WriteLine("  --verbose               Enable verbose console output");
             Console.WriteLine("  -h, --help              Show this help message");
+            Console.WriteLine();
+            Console.WriteLine("Exit Codes:");
+            Console.WriteLine("  0: Success - all requested protections resolved or fully clean output");
+            Console.WriteLine("  1: Fatal Error - corrupt assembly, structural audit failed, or unhandled exception");
+            Console.WriteLine("  2: Partial Result - candidate promoted with known limitations (dynamic required, unsupported)");
         }
 
         private static void FinalizeMethodBodies(ModuleDef module)
