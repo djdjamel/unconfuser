@@ -253,17 +253,30 @@ namespace ConfuserExKillerRunner
                     Tool.Logger.LogInfo($"Initial ModuleDefMD load failed: {initialEx.Message}. Evaluating COR20 repair...");
                 }
 
+                bool cor20WasRepaired = false;
+                bool jitDetected = false;
+                int totalConstantsDecrypted = 0;
+                bool allConstantsResolved = true;
+                int totalResourcesExtracted = 0;
+                int totalProxiesInlined = 0;
+                int totalSwitchesResolved = 0;
+                int totalJunkStripped = 0;
+                int totalCleanerHooks = 0;
+
                 if (!initialLoadOk)
                 {
                     byte[] candidateBytes = (byte[])peImage.Clone();
                     var repairResult = Cor20Repair.Repair(candidateBytes, peImageOld);
 
-                    if (repairResult.Success && (repairResult.CbRepaired || repairResult.MetaDataRvaRepaired))
+                    if (repairResult.Success && (repairResult.CbRepaired || repairResult.MetaDataRvaRepaired || repairResult.BsjbRepaired))
                     {
+                        cor20WasRepaired = true;
                         if (repairResult.CbRepaired)
                             Console.WriteLine($"[+] Anti-Dump: Fixed COR20 header cb from {repairResult.OriginalCb} to 72");
                         if (repairResult.MetaDataRvaRepaired)
                             Console.WriteLine($"[+] Anti-Dump: Restored MetaData RVA to 0x{repairResult.RepairedMetaDataRva:X8}");
+                        if (repairResult.BsjbRepaired)
+                            Console.WriteLine("[+] Anti-Dump: Restored BSJB metadata header signature");
 
                         try
                         {
@@ -297,12 +310,15 @@ namespace ConfuserExKillerRunner
                 {
                     // If initial load succeeded, check if COR20 header cb or RVA needs normalization
                     var repairResult = Cor20Repair.Repair(bytesToLoad, peImageOld);
-                    if (repairResult.Success && (repairResult.CbRepaired || repairResult.MetaDataRvaRepaired))
+                    if (repairResult.Success && (repairResult.CbRepaired || repairResult.MetaDataRvaRepaired || repairResult.BsjbRepaired))
                     {
+                        cor20WasRepaired = true;
                         if (repairResult.CbRepaired)
                             Console.WriteLine($"[+] Anti-Dump: Fixed COR20 header cb from {repairResult.OriginalCb} to 72");
                         if (repairResult.MetaDataRvaRepaired)
                             Console.WriteLine($"[+] Anti-Dump: Restored MetaData RVA to 0x{repairResult.RepairedMetaDataRva:X8}");
+                        if (repairResult.BsjbRepaired)
+                            Console.WriteLine("[+] Anti-Dump: Restored BSJB metadata header signature");
                     }
                 }
 
@@ -339,6 +355,8 @@ namespace ConfuserExKillerRunner
                     {
                         bytesToLoad = dynamicConst.outputPe;
                         constantsDecrypted = dynamicConst.allResolved;
+                        totalConstantsDecrypted = dynamicConst.decryptedCount;
+                        allConstantsResolved = dynamicConst.allResolved;
                         Console.WriteLine($"[+] ConstantKiller: {dynamicConst.decryptedCount} constants decrypted (with stack evaluation)");
                         if (!dynamicConst.allResolved)
                             Console.WriteLine("[!] ConstantKiller: Partial decryption. Decrypter and buffer preserved.");
@@ -347,7 +365,8 @@ namespace ConfuserExKillerRunner
 
                 using (var module = ModuleDefMD.Load(bytesToLoad))
                 {
-                    if (AntiTamperKiller.DetectJitMode(module))
+                    jitDetected = AntiTamperKiller.DetectJitMode(module);
+                    if (jitDetected)
                     {
                         Console.ForegroundColor = ConsoleColor.Yellow;
                         Console.WriteLine("[!] WARNING: ConfuserEx Anti-Tamper mode JIT détecté (déchiffrement JIT non pris en charge : détecté, non déchiffré).");
@@ -398,6 +417,7 @@ namespace ConfuserExKillerRunner
                                     }
 
                                     resourcesDecrypted = true;
+                                    totalResourcesExtracted = reEmbeddedCount;
                                     Console.WriteLine($"[+] ResourceKiller: Extracted & re-embedded {reEmbeddedCount} decrypted resources via isolated worker ({module.Resources.Count} total in manifest)");
                                 }
                             }
@@ -417,16 +437,22 @@ namespace ConfuserExKillerRunner
 
                     var resResult = ResourceKiller.Execute(module, reflModule: null, resourcesAlreadyDecrypted: resourcesDecrypted);
                     if (resResult.HandlerStripped)
+                    {
+                        totalCleanerHooks++;
                         Console.WriteLine("[+] ResourceKiller: Stripped runtime ResourceResolve hook");
+                    }
 
                     // Step 2.2: ProxyKiller + ConstantKiller
                     int proxyCount = ProxyKillerImpl.Execute(module, false, true);
+                    totalProxiesInlined += proxyCount;
                     Console.WriteLine($"[+] ProxyKiller: {proxyCount} proxy methods/delegates inlined");
 
                     if (!constantsDecrypted)
                     {
                         var constResult = ConstantKillerImpl.Execute(module, reflModule: null);
                         constantsDecrypted = constResult.AllReferencesResolved;
+                        totalConstantsDecrypted += constResult.DecryptedConstantsCount;
+                        allConstantsResolved = constResult.AllReferencesResolved;
                         Console.WriteLine($"[+] ConstantKiller: {constResult.DecryptedConstantsCount} constants decrypted (with stack evaluation)");
                         if (constResult.TotalReferencesCount > 0 && !constResult.AllReferencesResolved)
                             Console.WriteLine($"[!] ConstantKiller: Partial decryption ({constResult.ResolvedReferencesCount}/{constResult.TotalReferencesCount} references rewritten). Decrypter and buffer preserved.");
@@ -435,12 +461,14 @@ namespace ConfuserExKillerRunner
                 // Step 3: Protector hook stripping
                 Console.WriteLine("[*] Step 3: Cleaning Protector Hooks...");
                 var cleanResult = CleanerKiller.StripProtectorHooks(module, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
+                totalCleanerHooks += cleanResult.StrippedHooksCount + cleanResult.RemovedMethodsCount;
                 if (cleanResult.StrippedHooksCount > 0)
                     Console.WriteLine($"[+] CleanerKiller: Stripped {cleanResult.StrippedHooksCount} protector initializers from <Module>.cctor");
 
                 // Step 3.5: DeadCodeStripper & PredicateKiller pre-switch
                 Console.WriteLine("[*] Step 3.5: Running DeadCodeStripper & PredicateKiller...");
                 var dcsPre = DeadCodeStripper.Execute(module);
+                totalJunkStripped += dcsPre.JunkPairsStripped + dcsPre.TrampolinesFlattened;
                 if (dcsPre.MethodsOptimized > 0)
                     Console.WriteLine($"[+] DeadCodeStripper (Pre): {dcsPre.Message}");
 
@@ -451,9 +479,11 @@ namespace ConfuserExKillerRunner
                 // Step 4: SwitchKiller + Post-Switch DeadCodeStripper
                 Console.WriteLine("[*] Step 4: Running SwitchKiller (control flow cleanup)...");
                 int switchCount = SwitchKillerImpl.Execute(module);
+                totalSwitchesResolved += switchCount;
                 Console.WriteLine($"[+] SwitchKiller: {switchCount} switches resolved");
 
                 var dcsPost = DeadCodeStripper.Execute(module);
+                totalJunkStripped += dcsPost.JunkPairsStripped + dcsPost.TrampolinesFlattened;
                 if (dcsPost.MethodsOptimized > 0)
                     Console.WriteLine($"[+] DeadCodeStripper (Post): {dcsPost.Message}");
 
@@ -536,11 +566,15 @@ namespace ConfuserExKillerRunner
 
             using (var module2 = ModuleDefMD.Load(currentIntermediate))
             {
-                CleanerKiller.StripProtectorHooks(module2, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
+                var cleanFinal = CleanerKiller.StripProtectorHooks(module2, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
+                totalCleanerHooks += cleanFinal.StrippedHooksCount + cleanFinal.RemovedMethodsCount;
                 PredicateKiller.Execute(module2);
-                DeadCodeStripper.Execute(module2);
+                var dcsFinal1 = DeadCodeStripper.Execute(module2);
+                totalJunkStripped += dcsFinal1.JunkPairsStripped + dcsFinal1.TrampolinesFlattened;
                 int switchCount2 = SwitchKillerImpl.Execute(module2);
-                DeadCodeStripper.Execute(module2);
+                totalSwitchesResolved += switchCount2;
+                var dcsFinal2 = DeadCodeStripper.Execute(module2);
+                totalJunkStripped += dcsFinal2.JunkPairsStripped + dcsFinal2.TrampolinesFlattened;
                 Console.WriteLine($"[+] Final SwitchKiller: {switchCount2} switches resolved");
                 FinalizeMethodBodies(module2);
                 var writerOpts2 = new ModuleWriterOptions(module2) { Logger = DnlibLogger.Instance };
@@ -635,6 +669,34 @@ namespace ConfuserExKillerRunner
             {
                 var postScan = NetDetectIntegration.RunScan(finalOutputPath);
                 NetDetectIntegration.PrintComparisonReport(preScan, postScan);
+            }
+
+            // Protection Coverage & Support Matrix
+            try
+            {
+                using (var finalModule = ModuleDefMD.Load(finalOutputPath))
+                {
+                    var matrix = ProtectionMatrix.Evaluate(
+                        finalModule,
+                        allowExecution: allowExecution,
+                        antiTamperDecrypted: antiTamperDecrypted,
+                        jitModeDetected: jitDetected,
+                        cor20Repaired: cor20WasRepaired,
+                        constantsDecryptedCount: totalConstantsDecrypted,
+                        allConstantsResolved: allConstantsResolved,
+                        resourcesExtractedCount: totalResourcesExtracted,
+                        proxiesInlinedCount: totalProxiesInlined,
+                        switchesResolvedCount: totalSwitchesResolved,
+                        junkInstructionsStrippedCount: totalJunkStripped,
+                        cleanerHooksStrippedCount: totalCleanerHooks);
+
+                    Console.WriteLine(ProtectionMatrix.FormatReport(matrix));
+                }
+            }
+            catch (Exception ex)
+            {
+                if (verbose)
+                    Console.WriteLine($"[!] Could not generate protection coverage matrix: {ex.Message}");
             }
 
             return 0;

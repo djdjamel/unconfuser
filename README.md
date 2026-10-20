@@ -112,6 +112,8 @@ python netdetect_cli.py --dir C:\samples\ --json batch_report.json
 9. **Switch Killer:** Resolves control-flow flattening state machines and restores linear IL.
 10. **Quality Auditor:** Automated IL verification ensuring 0 invalid instructions and 0 unresolved call sites.
 
+For a full matrix of supported ConfuserEx 1.0.0 protections, static vs. dynamic modes, and unsupported edge cases, see the [ConfuserEx Support Matrix](docs/SUPPORT_MATRIX.md).
+
 ### Usage:
 ```bash
 # Build the runner
