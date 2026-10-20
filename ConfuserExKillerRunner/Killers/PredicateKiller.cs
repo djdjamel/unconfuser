@@ -61,7 +61,7 @@ namespace ConfuserExKillerRunner.Killers
                                 modified = true;
                             }
 
-                            int simplifiedIdents = FoldAlgebraicIdentities(method.Body, branchTargets, instIndex);
+                            int simplifiedIdents = FoldAlgebraicIdentities(method, branchTargets, instIndex);
                             if (simplifiedIdents > 0)
                             {
                                 methodIdentitiesSimplified += simplifiedIdents;
@@ -257,8 +257,101 @@ namespace ConfuserExKillerRunner.Killers
             return folded;
         }
 
-        private static int FoldAlgebraicIdentities(CilBody body, HashSet<Instruction> branchTargets, Dictionary<Instruction, int> instIndex)
+        private enum StackType
         {
+            Unknown,
+            Int32,
+            Int64
+        }
+
+        private static StackType InferStackTypeBefore(IList<Instruction> instrs, int index, MethodDef method)
+        {
+            int p = FindPreviousNonNop(instrs, index);
+            if (p < 0) return StackType.Unknown;
+            var inst = instrs[p];
+
+            if (inst.OpCode == OpCodes.Ldc_I8)
+                return StackType.Int64;
+
+            if (inst.IsLdcI4() || inst.OpCode == OpCodes.Ldc_I4 || inst.OpCode == OpCodes.Ldc_I4_S)
+                return StackType.Int32;
+
+            if (inst.IsLdloc() && method?.Body?.Variables != null)
+            {
+                var local = inst.GetLocal(method.Body.Variables);
+                if (local?.Type != null)
+                {
+                    var et = local.Type.GetElementType();
+                    if (et == ElementType.I8 || et == ElementType.U8)
+                        return StackType.Int64;
+                    if (et == ElementType.I4 || et == ElementType.U4 ||
+                        et == ElementType.I1 || et == ElementType.U1 ||
+                        et == ElementType.I2 || et == ElementType.U2 ||
+                        et == ElementType.Boolean || et == ElementType.Char)
+                        return StackType.Int32;
+                }
+            }
+
+            if (inst.IsLdarg() && method?.Parameters != null)
+            {
+                var param = inst.GetParameter(method.Parameters);
+                if (param?.Type != null)
+                {
+                    var et = param.Type.GetElementType();
+                    if (et == ElementType.I8 || et == ElementType.U8)
+                        return StackType.Int64;
+                    if (et == ElementType.I4 || et == ElementType.U4 ||
+                        et == ElementType.I1 || et == ElementType.U1 ||
+                        et == ElementType.I2 || et == ElementType.U2 ||
+                        et == ElementType.Boolean || et == ElementType.Char)
+                        return StackType.Int32;
+                }
+            }
+
+            if (inst.OpCode == OpCodes.Ldsfld || inst.OpCode == OpCodes.Ldfld)
+            {
+                if (inst.Operand is IField field && field.FieldSig?.Type != null)
+                {
+                    var et = field.FieldSig.Type.GetElementType();
+                    if (et == ElementType.I8 || et == ElementType.U8)
+                        return StackType.Int64;
+                    if (et == ElementType.I4 || et == ElementType.U4 ||
+                        et == ElementType.I1 || et == ElementType.U1 ||
+                        et == ElementType.I2 || et == ElementType.U2 ||
+                        et == ElementType.Boolean || et == ElementType.Char)
+                        return StackType.Int32;
+                }
+            }
+
+            if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
+            {
+                if (inst.Operand is IMethod callTarget && callTarget.MethodSig?.RetType != null)
+                {
+                    var et = callTarget.MethodSig.RetType.GetElementType();
+                    if (et == ElementType.I8 || et == ElementType.U8)
+                        return StackType.Int64;
+                    if (et == ElementType.I4 || et == ElementType.U4 ||
+                        et == ElementType.I1 || et == ElementType.U1 ||
+                        et == ElementType.I2 || et == ElementType.U2 ||
+                        et == ElementType.Boolean)
+                        return StackType.Int32;
+                }
+            }
+
+            if (inst.OpCode == OpCodes.Conv_I8 || inst.OpCode == OpCodes.Conv_U8)
+                return StackType.Int64;
+
+            if (inst.OpCode == OpCodes.Conv_I4 || inst.OpCode == OpCodes.Conv_U4 ||
+                inst.OpCode == OpCodes.Conv_I1 || inst.OpCode == OpCodes.Conv_U1 ||
+                inst.OpCode == OpCodes.Conv_I2 || inst.OpCode == OpCodes.Conv_U2)
+                return StackType.Int32;
+
+            return StackType.Unknown;
+        }
+
+        private static int FoldAlgebraicIdentities(MethodDef method, HashSet<Instruction> branchTargets, Dictionary<Instruction, int> instIndex)
+        {
+            var body = method.Body;
             var instrs = body.Instructions;
             int simplified = 0;
 
@@ -267,7 +360,7 @@ namespace ConfuserExKillerRunner.Killers
                 var instr = instrs[i];
                 if (instr.OpCode == OpCodes.Nop) continue;
 
-                // Identity: dup; xor => pop; ldc.i4.0 (x ^ x == 0)
+                // Identity: dup; xor => pop; ldc.i4.0 (for 32-bit) or pop; ldc.i8 0 (for 64-bit)
                 if (instr.OpCode == OpCodes.Xor)
                 {
                     int prevIdx = FindPreviousNonNop(instrs, i);
@@ -276,9 +369,24 @@ namespace ConfuserExKillerRunner.Killers
                         if (!CanSafelyTransformRange(instrs, prevIdx, i, branchTargets, body, instIndex))
                             continue;
 
-                        instrs[prevIdx].OpCode = OpCodes.Pop;
-                        instr.OpCode = OpCodes.Ldc_I4_0;
-                        simplified++;
+                        var stackType = InferStackTypeBefore(instrs, prevIdx, method);
+                        if (stackType == StackType.Int64)
+                        {
+                            instrs[prevIdx].OpCode = OpCodes.Pop;
+                            instr.OpCode = OpCodes.Ldc_I8;
+                            instr.Operand = 0L;
+                            simplified++;
+                            continue;
+                        }
+                        else if (stackType == StackType.Int32)
+                        {
+                            instrs[prevIdx].OpCode = OpCodes.Pop;
+                            instr.OpCode = OpCodes.Ldc_I4_0;
+                            instr.Operand = null;
+                            simplified++;
+                            continue;
+                        }
+                        // Ambiguous or unknown type: preserve original code to prevent type safety violation
                         continue;
                     }
                 }
@@ -297,10 +405,10 @@ namespace ConfuserExKillerRunner.Killers
                         if (matchesModulo)
                         {
                             int p2 = FindPreviousNonNop(instrs, p1); // mul
-                            if (p2 >= 0 && instrs[p2].OpCode == OpCodes.Mul)
+                            if (p2 >= 0 && instrs[p2].OpCode == OpCodes.Mul) // non-overflow mul only
                             {
                                 int p3 = FindPreviousNonNop(instrs, p2); // add
-                                if (p3 >= 0 && instrs[p3].OpCode == OpCodes.Add)
+                                if (p3 >= 0 && instrs[p3].OpCode == OpCodes.Add) // non-overflow add only
                                 {
                                     int p4 = FindPreviousNonNop(instrs, p3); // ldc.i4.1
                                     if (p4 >= 0 && instrs[p4].IsLdcI4() && instrs[p4].GetLdcI4Value() == 1)
@@ -309,6 +417,11 @@ namespace ConfuserExKillerRunner.Killers
                                         if (p5 >= 0 && instrs[p5].OpCode == OpCodes.Dup)
                                         {
                                             if (!CanSafelyTransformRange(instrs, p5, i, branchTargets, body, instIndex))
+                                                continue;
+
+                                            // Strictly verify that x is a 32-bit integer
+                                            var stackType = InferStackTypeBefore(instrs, p5, method);
+                                            if (stackType != StackType.Int32)
                                                 continue;
 
                                             // Product of consecutive numbers is always even; mod 2 or & 1 is strictly 0!
@@ -323,6 +436,7 @@ namespace ConfuserExKillerRunner.Killers
                                             instrs[p1].Operand = null;
 
                                             instr.OpCode = OpCodes.Ldc_I4_0;
+                                            instr.Operand = null;
                                             simplified++;
                                         }
                                     }

@@ -405,7 +405,11 @@ namespace ConfuserExKillerRunner
                     for (int j = 0; j < instrs.Count; j++)
                     {
                         if (!instrs[j].IsConditionalBranch()) continue;
+                        if (j + 1 >= instrs.Count) continue;
                         var condInstr = instrs[j];
+                        var nextInstr = instrs[j + 1];
+                        if (nextInstr == null) continue;
+
                         for (int k = 0; k < instrs.Count; k++)
                         {
                             if (!instrs[k].IsBr()) continue;
@@ -414,7 +418,8 @@ namespace ConfuserExKillerRunner
                             if (done.ContainsKey(brTarget)) continue;
                             instrs[k].OpCode = condInstr.GetOpCode();
                             instrs[k].Operand = condInstr.GetOperand();
-                            instrs.Insert(k + 1, OpCodes.Br.ToInstruction(instrs[j + 1]));
+                            instrs.Insert(k + 1, OpCodes.Br.ToInstruction(nextInstr));
+                            if (k < j) j++;
                             k++;
                             done.Add(brTarget, instrs[k]);
                         }
@@ -440,6 +445,26 @@ namespace ConfuserExKillerRunner
             }
         }
 
+        class ComplexDispatcher
+        {
+            public int HeaderIndex;
+            public int PatternSize; // 6 (local) or 4 (no-local)
+            public int IntValue;
+            public int ForRem;
+            public Instruction SwitchInstr;
+            public Local LocalVar; // null if no-local
+            public HashSet<Instruction> HeaderInstructions = new HashSet<Instruction>();
+        }
+
+        class ResolvedTransition
+        {
+            public ComplexDispatcher Dispatcher;
+            public int TransitionIndex; // i
+            public int Value;
+            public Instruction BranchInst;
+            public Instruction Destination;
+        }
+
         internal static int ResolveComplexSwitch(List<MethodDef> methods, BlocksCflowDeobfuscator deobfuscator)
         {
             int total = 0;
@@ -455,13 +480,10 @@ namespace ConfuserExKillerRunner
                     for (int i = 0; i < instrs.Count; i++)
                         instToIndex[instrs[i]] = i;
 
-                    var toberemoved   = new List<int>();
-                    var intValues     = new List<int>();
-                    var forRem        = new List<int>();
-                    var switchInstrs  = new List<Instruction>();
-                    Local localVar    = null;
-                    int methodTotal   = 0;
+                    int methodTotal = 0;
 
+                    // 1. First pattern: ldc xor dup stloc ldc rem switch (7-instruction pattern with local)
+                    var localDispatchers = new List<ComplexDispatcher>();
                     for (int j = 0; j + 6 < instrs.Count; j++)
                     {
                         if (instrs[j].IsLdcI4() && instrs[j + 1].OpCode == OpCodes.Xor
@@ -469,38 +491,53 @@ namespace ConfuserExKillerRunner
                             && instrs[j + 6].OpCode == OpCodes.Switch
                             && instrs[j + 3].IsStloc())
                         {
-                            toberemoved.Add(j);
-                            intValues.Add(instrs[j].GetLdcI4Value());
-                            localVar = instrs[j + 3].GetLocal(method.Body.Variables);
-                            forRem.Add(instrs[j + 4].GetLdcI4Value());
-                            switchInstrs.Add(instrs[j + 6]);
+                            var d = new ComplexDispatcher
+                            {
+                                HeaderIndex = j,
+                                PatternSize = 6,
+                                IntValue = instrs[j].GetLdcI4Value(),
+                                ForRem = instrs[j + 4].GetLdcI4Value(),
+                                SwitchInstr = instrs[j + 6],
+                                LocalVar = instrs[j + 3].GetLocal(method.Body.Variables)
+                            };
+                            for (int k = 0; k < 6; k++)
+                                d.HeaderInstructions.Add(instrs[j + k]);
+                            localDispatchers.Add(d);
                         }
                     }
 
-                    if (switchInstrs.Count > 0)
+                    if (localDispatchers.Count > 0)
                     {
-                        var state = new SwitchState(instrs, method, toberemoved, intValues, forRem, switchInstrs, localVar, instToIndex);
+                        var state = new SwitchState(instrs, method, localDispatchers, instToIndex);
                         state.Parse(0, 0u);
                         methodTotal += state.Apply();
                     }
 
-                    // Second pattern: ldc xor ldc [rem_un] switch (4-instr variant)
-                    toberemoved.Clear(); intValues.Clear(); forRem.Clear(); switchInstrs.Clear();
+                    // 2. Second pattern: ldc xor ldc [rem_un] switch (5-instruction pattern without local)
+                    var noLocalDispatchers = new List<ComplexDispatcher>();
                     for (int j = 0; j + 4 < instrs.Count; j++)
                     {
                         if (instrs[j].IsLdcI4() && instrs[j + 1].OpCode == OpCodes.Xor
                             && instrs[j + 2].IsLdcI4() && instrs[j + 4].OpCode == OpCodes.Switch)
                         {
-                            toberemoved.Add(j);
-                            intValues.Add(instrs[j].GetLdcI4Value());
-                            forRem.Add(instrs[j + 2].GetLdcI4Value());
-                            switchInstrs.Add(instrs[j + 4]);
+                            var d = new ComplexDispatcher
+                            {
+                                HeaderIndex = j,
+                                PatternSize = 4,
+                                IntValue = instrs[j].GetLdcI4Value(),
+                                ForRem = instrs[j + 2].GetLdcI4Value(),
+                                SwitchInstr = instrs[j + 4],
+                                LocalVar = null
+                            };
+                            for (int k = 0; k < 4; k++)
+                                d.HeaderInstructions.Add(instrs[j + k]);
+                            noLocalDispatchers.Add(d);
                         }
                     }
 
-                    if (switchInstrs.Count > 0)
+                    if (noLocalDispatchers.Count > 0)
                     {
-                        var state = new SwitchStateNoLocal(instrs, method, toberemoved, intValues, forRem, switchInstrs, instToIndex);
+                        var state = new SwitchStateNoLocal(instrs, method, noLocalDispatchers, instToIndex);
                         state.Parse(0);
                         methodTotal += state.Apply(4);
                     }
@@ -540,25 +577,21 @@ namespace ConfuserExKillerRunner
         {
             readonly IList<Instruction> instrs;
             readonly MethodDef method;
-            readonly List<int> toberemoved, intValues, forRem;
-            readonly List<Instruction> switchInstrs;
-            readonly Local localVar;
+            readonly List<ComplexDispatcher> dispatchers;
             readonly Dictionary<Instruction, int> instToIndex;
-            internal List<int> removedIdx = new List<int>();
-            internal HashSet<int> removedIdxSet = new HashSet<int>();
-            internal List<int> removedVals = new List<int>();
+            internal List<ResolvedTransition> resolvedTransitions = new List<ResolvedTransition>();
+            HashSet<int> removedIdxSet = new HashSet<int>();
             HashSet<Instruction> brInstrs = new HashSet<Instruction>();
             HashSet<Instruction> realBrInstrs = new HashSet<Instruction>();
             HashSet<Instruction> condInstrs = new HashSet<Instruction>();
             Dictionary<Instruction, int> localValues = new Dictionary<Instruction, int>();
 
             internal SwitchState(IList<Instruction> instrs, MethodDef method,
-                List<int> toberemoved, List<int> intValues, List<int> forRem,
-                List<Instruction> switchInstrs, Local localVar, Dictionary<Instruction, int> instToIndex)
+                List<ComplexDispatcher> dispatchers, Dictionary<Instruction, int> instToIndex)
             {
-                this.instrs = instrs; this.method = method;
-                this.toberemoved = toberemoved; this.intValues = intValues;
-                this.forRem = forRem; this.switchInstrs = switchInstrs; this.localVar = localVar;
+                this.instrs = instrs;
+                this.method = method;
+                this.dispatchers = dispatchers;
                 this.instToIndex = instToIndex;
             }
 
@@ -568,6 +601,17 @@ namespace ConfuserExKillerRunner
                 var visited = new HashSet<(int idx, uint localVal)>();
 
                 workStack.Push((startIdx, startLocalVal));
+
+                if (method.Body.HasExceptionHandlers)
+                {
+                    foreach (var eh in method.Body.ExceptionHandlers)
+                    {
+                        if (eh.HandlerStart != null && instToIndex.TryGetValue(eh.HandlerStart, out int hIdx))
+                            workStack.Push((hIdx, 0u));
+                        if (eh.FilterStart != null && instToIndex.TryGetValue(eh.FilterStart, out int fIdx))
+                            workStack.Push((fIdx, 0u));
+                    }
+                }
 
                 while (workStack.Count > 0)
                 {
@@ -608,24 +652,27 @@ namespace ConfuserExKillerRunner
 
                         if (inst.OpCode == OpCodes.Ret) break;
 
-                        if (inst.IsLdcI4() && i + 1 < instrs.Count && instrs[i + 1].IsStloc()
-                            && instrs[i + 1].GetLocal(method.Body.Variables) == localVar)
+                        if (inst.IsLdcI4() && i + 1 < instrs.Count && instrs[i + 1].IsStloc())
                         {
-                            localVal = (uint)inst.GetLdcI4Value();
-                            continue;
+                            var stlocLocal = instrs[i + 1].GetLocal(method.Body.Variables);
+                            if (dispatchers.Any(d => d.LocalVar == stlocLocal))
+                            {
+                                localVal = (uint)inst.GetLdcI4Value();
+                                continue;
+                            }
                         }
 
-                        if (inst.IsLdcI4() || (inst.IsLdloc() && inst.GetLocal(method.Body.Variables) == localVar))
+                        if (inst.IsLdcI4() || (inst.IsLdloc() && dispatchers.Any(d => d.LocalVar == inst.GetLocal(method.Body.Variables))))
                         {
                             uint num = inst.IsLdcI4() ? (uint)inst.GetLdcI4Value() : localVal;
                             int n2 = i + 1;
-                            if (instrs[i + 1].IsBr() && instrs[i + 1].Operand is Instruction brTarget && brTarget != null)
+                            if (i + 1 < instrs.Count && instrs[i + 1].IsBr() && instrs[i + 1].Operand is Instruction brTarget && brTarget != null)
                             {
                                 if (instToIndex.TryGetValue(brTarget, out int bIdx))
                                     n2 = bIdx;
                             }
 
-                            if (n2 < instrs.Count && (instrs[n2].IsLdcI4() || (instrs[n2].IsLdloc() && instrs[n2].GetLocal(method.Body.Variables) == localVar)))
+                            if (n2 < instrs.Count && (instrs[n2].IsLdcI4() || (instrs[n2].IsLdloc() && dispatchers.Any(d => d.LocalVar == instrs[n2].GetLocal(method.Body.Variables)))))
                             {
                                 uint num3 = instrs[n2].IsLdcI4() ? (uint)instrs[n2].GetLdcI4Value() : localVal;
                                 TryResolve(i, n2, num, num3, ref localVal, workStack);
@@ -633,7 +680,7 @@ namespace ConfuserExKillerRunner
                         }
                         else if (inst.OpCode == OpCodes.Switch)
                         {
-                            if (i < 6 || !IsKnownSwitch(i))
+                            if (!IsKnownSwitch(inst))
                             {
                                 if (inst.Operand is Instruction[] targets)
                                 {
@@ -649,10 +696,10 @@ namespace ConfuserExKillerRunner
                 }
             }
 
-            bool IsKnownSwitch(int i)
+            bool IsKnownSwitch(Instruction sw)
             {
-                foreach (var r in toberemoved)
-                    if (i - 6 == r) return true;
+                foreach (var d in dispatchers)
+                    if (d.SwitchInstr == sw) return true;
                 return false;
             }
 
@@ -667,26 +714,43 @@ namespace ConfuserExKillerRunner
                 uint num4 = 0;
                 if (instrs[n2 + 1].OpCode == OpCodes.Mul && instrs[n2 + 2].IsLdcI4()) num4 = (uint)instrs[n2 + 2].GetLdcI4Value();
                 if (instrs[n2 + 1].IsLdcI4() && instrs[n2 + 2].OpCode == OpCodes.Mul) num4 = (uint)instrs[n2 + 1].GetLdcI4Value();
-                for (int j = 0; j < toberemoved.Count; j++)
+
+                for (int j = 0; j < dispatchers.Count; j++)
                 {
-                    bool match = (n2 + 4 < instrs.Count && instrs[n2 + 4].IsBr() && instrs[n2 + 4].Operand as Instruction == instrs[toberemoved[j]])
-                              || n2 + 4 == toberemoved[j]
-                              || (instrs[n2 + 1].OpCode == OpCodes.Xor && n2 == toberemoved[j]);
+                    var d = dispatchers[j];
+                    Instruction brInst = null;
+                    if (n2 + 4 < instrs.Count && instrs[n2 + 4].IsBr())
+                        brInst = instrs[n2 + 4];
+
+                    bool match = (brInst != null && brInst.Operand as Instruction == instrs[d.HeaderIndex])
+                              || n2 + 4 == d.HeaderIndex
+                              || (instrs[n2 + 1].OpCode == OpCodes.Xor && n2 == d.HeaderIndex);
                     if (!match) continue;
+
                     uint num5 = instrs[n2 + 1].OpCode == OpCodes.Xor ? (num ^ num3)
                               : (instrs[n2 + 1].IsLdcI4() ? (num4 * num3 ^ num) : (num * num3 ^ num4));
-                    if (instrs[n2 + 1].OpCode != OpCodes.Xor) localVal = num5 ^ (uint)intValues[j];
+                    if (instrs[n2 + 1].OpCode != OpCodes.Xor) localVal = num5 ^ (uint)d.IntValue;
                     else localVal = num5;
-                    if ((uint)forRem[j] == 0) continue;
-                    uint idx = localVal % (uint)forRem[j];
-                    var arr = switchInstrs[j].Operand as Instruction[];
+                    if ((uint)d.ForRem == 0) continue;
+                    uint idx = localVal % (uint)d.ForRem;
+                    var arr = d.SwitchInstr.Operand as Instruction[];
                     if (arr == null || idx >= arr.Length) continue;
                     var dest = arr[(int)idx];
                     if (dest == null) continue;
+
                     if (removedIdxSet.Contains(i)) return;
                     removedIdxSet.Add(i);
-                    removedIdx.Add(i);
-                    removedVals.Add((int)idx);
+
+                    var trans = new ResolvedTransition
+                    {
+                        Dispatcher = d,
+                        TransitionIndex = i,
+                        Value = (int)idx,
+                        BranchInst = brInst,
+                        Destination = dest
+                    };
+                    resolvedTransitions.Add(trans);
+
                     if (!localValues.TryGetValue(dest, out int prevVal) || prevVal != (int)localVal)
                     {
                         brInstrs.Add(dest);
@@ -700,19 +764,51 @@ namespace ConfuserExKillerRunner
 
             internal int Apply()
             {
-                if (removedIdx.Count == 0) return 0;
-                foreach (int r in toberemoved)
-                    for (int j = 0; j < 6; j++)
-                    { instrs[r + j].OpCode = OpCodes.Nop; instrs[r + j].Operand = null; }
-                for (int j = 0; j < removedIdx.Count; j++)
+                if (resolvedTransitions.Count == 0) return 0;
+
+                foreach (var d in dispatchers)
                 {
-                    instrs[removedIdx[j]].OpCode = OpCodes.Ldc_I4;
-                    instrs[removedIdx[j]].Operand = removedVals[j];
-                    if (!instrs[removedIdx[j] + 1].IsBr())
-                        for (int k = 0; k < 4; k++)
-                        { instrs[removedIdx[j] + k + 1].OpCode = OpCodes.Nop; instrs[removedIdx[j] + k + 1].Operand = null; }
+                    bool hasEhTargeting = false;
+                    if (method.Body.HasExceptionHandlers)
+                    {
+                        foreach (var eh in method.Body.ExceptionHandlers)
+                        {
+                            if (d.HeaderInstructions.Contains(eh.TryStart) || d.HeaderInstructions.Contains(eh.TryEnd) ||
+                                d.HeaderInstructions.Contains(eh.HandlerStart) || d.HeaderInstructions.Contains(eh.HandlerEnd) ||
+                                d.HeaderInstructions.Contains(eh.FilterStart))
+                            {
+                                hasEhTargeting = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!hasEhTargeting)
+                    {
+                        for (int j = 0; j < d.PatternSize; j++)
+                        {
+                            instrs[d.HeaderIndex + j].OpCode = OpCodes.Nop;
+                            instrs[d.HeaderIndex + j].Operand = null;
+                        }
+                    }
                 }
-                return removedIdx.Count;
+
+                foreach (var trans in resolvedTransitions)
+                {
+                    int i = trans.TransitionIndex;
+                    instrs[i].OpCode = OpCodes.Ldc_I4;
+                    instrs[i].Operand = trans.Value;
+                    if (i + 1 < instrs.Count && !instrs[i + 1].IsBr())
+                    {
+                        for (int k = 0; k < 4 && i + k + 1 < instrs.Count; k++)
+                        {
+                            instrs[i + k + 1].OpCode = OpCodes.Nop;
+                            instrs[i + k + 1].Operand = null;
+                        }
+                    }
+                }
+
+                return resolvedTransitions.Count;
             }
         }
 
@@ -720,23 +816,20 @@ namespace ConfuserExKillerRunner
         {
             readonly IList<Instruction> instrs;
             readonly MethodDef method;
-            readonly List<int> toberemoved, intValues, forRem;
-            readonly List<Instruction> switchInstrs;
+            readonly List<ComplexDispatcher> dispatchers;
             readonly Dictionary<Instruction, int> instToIndex;
-            List<int> removedIdx = new List<int>();
+            internal List<ResolvedTransition> resolvedTransitions = new List<ResolvedTransition>();
             HashSet<int> removedIdxSet = new HashSet<int>();
-            List<int> removedVals = new List<int>();
             HashSet<Instruction> brInstrs = new HashSet<Instruction>();
             HashSet<Instruction> realBrInstrs = new HashSet<Instruction>();
             HashSet<Instruction> condInstrs = new HashSet<Instruction>();
 
             internal SwitchStateNoLocal(IList<Instruction> instrs, MethodDef method,
-                List<int> toberemoved, List<int> intValues, List<int> forRem, List<Instruction> switchInstrs,
-                Dictionary<Instruction, int> instToIndex)
+                List<ComplexDispatcher> dispatchers, Dictionary<Instruction, int> instToIndex)
             {
-                this.instrs = instrs; this.method = method;
-                this.toberemoved = toberemoved; this.intValues = intValues;
-                this.forRem = forRem; this.switchInstrs = switchInstrs;
+                this.instrs = instrs;
+                this.method = method;
+                this.dispatchers = dispatchers;
                 this.instToIndex = instToIndex;
             }
 
@@ -746,6 +839,17 @@ namespace ConfuserExKillerRunner
                 var visited = new HashSet<int>();
 
                 workStack.Push(startIdx);
+
+                if (method.Body.HasExceptionHandlers)
+                {
+                    foreach (var eh in method.Body.ExceptionHandlers)
+                    {
+                        if (eh.HandlerStart != null && instToIndex.TryGetValue(eh.HandlerStart, out int hIdx))
+                            workStack.Push(hIdx);
+                        if (eh.FilterStart != null && instToIndex.TryGetValue(eh.FilterStart, out int fIdx))
+                            workStack.Push(fIdx);
+                    }
+                }
 
                 while (workStack.Count > 0)
                 {
@@ -762,9 +866,7 @@ namespace ConfuserExKillerRunner
                             if (inst.Operand is Instruction t && t != null && instToIndex.TryGetValue(t, out int tIdx))
                             {
                                 if (!brInstrs.Contains(t) && realBrInstrs.Add(t))
-                                {
                                     workStack.Push(tIdx);
-                                }
                             }
                             break;
                         }
@@ -786,13 +888,13 @@ namespace ConfuserExKillerRunner
 
                         if (!inst.IsLdcI4())
                         {
-                            if (inst.OpCode == OpCodes.Switch) TrySwitch(i, workStack);
+                            if (inst.OpCode == OpCodes.Switch) TrySwitch(inst, workStack);
                             continue;
                         }
 
                         uint num = (uint)inst.GetLdcI4Value();
                         int n2 = i + 1;
-                        if (instrs[i + 1].IsBr() && instrs[i + 1].Operand is Instruction brTarget && brTarget != null)
+                        if (i + 1 < instrs.Count && instrs[i + 1].IsBr() && instrs[i + 1].Operand is Instruction brTarget && brTarget != null)
                         {
                             if (instToIndex.TryGetValue(brTarget, out int bIdx))
                                 n2 = bIdx;
@@ -805,14 +907,10 @@ namespace ConfuserExKillerRunner
                 }
             }
 
-            void TrySwitch(int i, Stack<int> workStack)
+            void TrySwitch(Instruction sw, Stack<int> workStack)
             {
-                bool known = false;
-                for (int j = 0; j < toberemoved.Count; j++)
-                {
-                    if (i - 4 == toberemoved[j]) { known = true; break; }
-                }
-                if (!known && instrs[i].Operand is Instruction[] targets)
+                bool known = dispatchers.Any(d => d.SwitchInstr == sw);
+                if (!known && sw.Operand is Instruction[] targets)
                 {
                     foreach (var t in targets)
                     {
@@ -833,25 +931,42 @@ namespace ConfuserExKillerRunner
                 uint num4 = 0;
                 if (instrs[n2 + 1].OpCode == OpCodes.Mul && instrs[n2 + 2].IsLdcI4()) num4 = (uint)instrs[n2 + 2].GetLdcI4Value();
                 if (instrs[n2 + 1].IsLdcI4() && instrs[n2 + 2].OpCode == OpCodes.Mul) num4 = (uint)instrs[n2 + 1].GetLdcI4Value();
-                for (int j = 0; j < toberemoved.Count; j++)
+
+                for (int j = 0; j < dispatchers.Count; j++)
                 {
-                    bool match = (n2 + 4 < instrs.Count && instrs[n2 + 4].IsBr() && instrs[n2 + 4].Operand as Instruction == instrs[toberemoved[j]])
-                              || n2 + 4 == toberemoved[j]
-                              || (instrs[n2 + 1].OpCode == OpCodes.Xor && n2 == toberemoved[j]);
+                    var d = dispatchers[j];
+                    Instruction brInst = null;
+                    if (n2 + 4 < instrs.Count && instrs[n2 + 4].IsBr())
+                        brInst = instrs[n2 + 4];
+
+                    bool match = (brInst != null && brInst.Operand as Instruction == instrs[d.HeaderIndex])
+                              || n2 + 4 == d.HeaderIndex
+                              || (instrs[n2 + 1].OpCode == OpCodes.Xor && n2 == d.HeaderIndex);
                     if (!match) continue;
+
                     uint num5 = instrs[n2 + 1].OpCode == OpCodes.Xor ? (num ^ num3)
                               : (instrs[n2 + 1].IsLdcI4() ? (num4 * num3 ^ num) : (num * num3 ^ num4));
-                    uint num6 = instrs[n2 + 1].OpCode != OpCodes.Xor ? (num5 ^ (uint)intValues[j]) : num5;
-                    if ((uint)forRem[j] == 0) continue;
-                    uint idx = num6 % (uint)forRem[j];
-                    var arr = switchInstrs[j].Operand as Instruction[];
+                    uint num6 = instrs[n2 + 1].OpCode != OpCodes.Xor ? (num5 ^ (uint)d.IntValue) : num5;
+                    if ((uint)d.ForRem == 0) continue;
+                    uint idx = num6 % (uint)d.ForRem;
+                    var arr = d.SwitchInstr.Operand as Instruction[];
                     if (arr == null || idx >= arr.Length) continue;
                     var dest = arr[(int)idx];
                     if (dest == null) continue;
+
                     if (removedIdxSet.Contains(i)) return;
                     removedIdxSet.Add(i);
-                    removedIdx.Add(i);
-                    removedVals.Add((int)idx);
+
+                    var trans = new ResolvedTransition
+                    {
+                        Dispatcher = d,
+                        TransitionIndex = i,
+                        Value = (int)idx,
+                        BranchInst = brInst,
+                        Destination = dest
+                    };
+                    resolvedTransitions.Add(trans);
+
                     if (brInstrs.Add(dest))
                     {
                         if (instToIndex.TryGetValue(dest, out int destIdx))
@@ -863,19 +978,51 @@ namespace ConfuserExKillerRunner
 
             internal int Apply(int patternSize)
             {
-                if (removedIdx.Count == 0) return 0;
-                foreach (int r in toberemoved)
-                    for (int j = 0; j < patternSize; j++)
-                    { instrs[r + j].OpCode = OpCodes.Nop; instrs[r + j].Operand = null; }
-                for (int j = 0; j < removedIdx.Count; j++)
+                if (resolvedTransitions.Count == 0) return 0;
+
+                foreach (var d in dispatchers)
                 {
-                    instrs[removedIdx[j]].OpCode = OpCodes.Ldc_I4;
-                    instrs[removedIdx[j]].Operand = removedVals[j];
-                    if (!instrs[removedIdx[j] + 1].IsBr())
-                        for (int k = 0; k < 4; k++)
-                        { instrs[removedIdx[j] + k + 1].OpCode = OpCodes.Nop; instrs[removedIdx[j] + k + 1].Operand = null; }
+                    bool hasEhTargeting = false;
+                    if (method.Body.HasExceptionHandlers)
+                    {
+                        foreach (var eh in method.Body.ExceptionHandlers)
+                        {
+                            if (d.HeaderInstructions.Contains(eh.TryStart) || d.HeaderInstructions.Contains(eh.TryEnd) ||
+                                d.HeaderInstructions.Contains(eh.HandlerStart) || d.HeaderInstructions.Contains(eh.HandlerEnd) ||
+                                d.HeaderInstructions.Contains(eh.FilterStart))
+                            {
+                                hasEhTargeting = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!hasEhTargeting)
+                    {
+                        for (int j = 0; j < d.PatternSize; j++)
+                        {
+                            instrs[d.HeaderIndex + j].OpCode = OpCodes.Nop;
+                            instrs[d.HeaderIndex + j].Operand = null;
+                        }
+                    }
                 }
-                return removedIdx.Count;
+
+                foreach (var trans in resolvedTransitions)
+                {
+                    int i = trans.TransitionIndex;
+                    instrs[i].OpCode = OpCodes.Ldc_I4;
+                    instrs[i].Operand = trans.Value;
+                    if (i + 1 < instrs.Count && !instrs[i + 1].IsBr())
+                    {
+                        for (int k = 0; k < 4 && i + k + 1 < instrs.Count; k++)
+                        {
+                            instrs[i + k + 1].OpCode = OpCodes.Nop;
+                            instrs[i + k + 1].Operand = null;
+                        }
+                    }
+                }
+
+                return resolvedTransitions.Count;
             }
         }
     }
