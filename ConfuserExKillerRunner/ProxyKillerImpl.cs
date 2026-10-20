@@ -28,13 +28,55 @@ namespace ConfuserExTools.ProxyKiller
 				}
 			}
 
+			// Flatten recursive proxy chains (e.g. ProxyA -> ProxyB -> Target) with cycle detection
+			if (proxyMethods.Count > 0)
+			{
+				var flattenedProxyMethods = new Dictionary<MethodDef, Instruction>();
+				foreach (var kvp in proxyMethods)
+				{
+					var currentProxy = kvp.Key;
+					var currentInst = kvp.Value;
+					var visited = new HashSet<MethodDef> { currentProxy };
+					bool valid = true;
+
+					while (currentInst.Operand is IMethod nextMethod)
+					{
+						var nextDef = (nextMethod as MethodDef) ?? nextMethod.ResolveMethodDef();
+						if (nextDef != null && proxyMethods.TryGetValue(nextDef, out var nextInst))
+						{
+							if (!visited.Add(nextDef) || visited.Count > 25)
+							{
+								// Cycle detected or excessive recursion depth
+								valid = false;
+								break;
+							}
+							currentInst = nextInst;
+						}
+						else
+						{
+							break;
+						}
+					}
+
+					if (valid)
+					{
+						flattenedProxyMethods[currentProxy] = currentInst;
+					}
+				}
+				proxyMethods = flattenedProxyMethods;
+			}
+
 			int totalRestored = 0;
 			var oldAssemblyResolver = module.Context.AssemblyResolver;
 			var oldResolver = module.Context.Resolver;
 			try
 			{
-				module.Context.AssemblyResolver = NullResolver.Instance;
-				module.Context.Resolver = new Resolver(NullResolver.Instance);
+				// Preserve existing assembly resolver if configured; only fallback to NullResolver if none present
+				if (module.Context.AssemblyResolver == null)
+				{
+					module.Context.AssemblyResolver = NullResolver.Instance;
+					module.Context.Resolver = new Resolver(NullResolver.Instance);
+				}
 
 				if (proxyMethods.Count > 0)
 				{
@@ -47,110 +89,110 @@ namespace ConfuserExTools.ProxyKiller
 						proxyRewrittenCounts[pm] = 0;
 					}
 
-				// First pass: count all call sites referencing proxy methods
-				foreach (var method in module.EnumerateMethods())
-				{
-					if (!method.HasBody || proxyMethods.ContainsKey(method))
-						continue;
-
-					foreach (var instruction in method.Body.Instructions)
+					// First pass: count all call sites referencing proxy methods
+					foreach (var method in module.EnumerateMethods())
 					{
-						if (instruction.OpCode.Code != Code.Call && instruction.OpCode.Code != Code.Callvirt)
+						if (!method.HasBody || proxyMethods.ContainsKey(method))
 							continue;
-						if (instruction.Operand is IMethod operand)
+
+						foreach (var instruction in method.Body.Instructions)
 						{
-							var def = operand.ResolveMethodDef();
-							if (def != null && proxyReferenceCounts.ContainsKey(def))
-								proxyReferenceCounts[def]++;
-						}
-					}
-				}
-
-				// Second pass: rewrite call sites with per-method error isolation & rollback
-				totalRestored = 0;
-				foreach (var method in module.EnumerateMethods())
-				{
-					if (!method.HasBody || proxyMethods.ContainsKey(method))
-						continue;
-
-					// Snapshot body in case transformation fails
-					var originalBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
-					try
-					{
-						int methodRestored = 0;
-						var methodRewrittenCounts = new Dictionary<MethodDef, int>();
-
-						for (int i = 0; i < method.Body.Instructions.Count; i++)
-						{
-							var instruction = method.Body.Instructions[i];
 							if (instruction.OpCode.Code != Code.Call && instruction.OpCode.Code != Code.Callvirt)
 								continue;
-
-							if (instruction.Operand is IMethod operandMethod)
+							if (instruction.Operand is IMethod operand)
 							{
-								var targetDef = operandMethod.ResolveMethodDef();
-								if (targetDef != null && proxyMethods.TryGetValue(targetDef, out var realCall))
+								var def = (operand as MethodDef) ?? operand.ResolveMethodDef();
+								if (def != null && proxyReferenceCounts.ContainsKey(def))
+									proxyReferenceCounts[def]++;
+							}
+						}
+					}
+
+					// Second pass: rewrite call sites with per-method error isolation & rollback
+					totalRestored = 0;
+					foreach (var method in module.EnumerateMethods())
+					{
+						if (!method.HasBody || proxyMethods.ContainsKey(method))
+							continue;
+
+						// Snapshot body in case transformation fails
+						var originalBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
+						try
+						{
+							int methodRestored = 0;
+							var methodRewrittenCounts = new Dictionary<MethodDef, int>();
+
+							for (int i = 0; i < method.Body.Instructions.Count; i++)
+							{
+								var instruction = method.Body.Instructions[i];
+								if (instruction.OpCode.Code != Code.Call && instruction.OpCode.Code != Code.Callvirt)
+									continue;
+
+								if (instruction.Operand is IMethod operandMethod)
 								{
-									instruction.OpCode = realCall.OpCode;
-									instruction.Operand = realCall.Operand;
-									methodRewrittenCounts[targetDef] = methodRewrittenCounts.TryGetValue(targetDef, out int cur) ? cur + 1 : 1;
-									methodRestored++;
+									var targetDef = (operandMethod as MethodDef) ?? operandMethod.ResolveMethodDef();
+									if (targetDef != null && proxyMethods.TryGetValue(targetDef, out var realCall))
+									{
+										instruction.OpCode = realCall.OpCode;
+										instruction.Operand = realCall.Operand;
+										methodRewrittenCounts[targetDef] = methodRewrittenCounts.TryGetValue(targetDef, out int cur) ? cur + 1 : 1;
+										methodRestored++;
+									}
 								}
 							}
+
+							if (methodRestored > 0)
+							{
+								if (!ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(method, out var errors))
+								{
+									method.Body = originalBody;
+									Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] Proxy inlining introduced structural defects in {method}: {string.Join("; ", errors)}. Rolled back.");
+									continue;
+								}
+
+								// Commit counts only after method transformation successfully completes and passes audit
+								foreach (var kvp in methodRewrittenCounts)
+								{
+									proxyRewrittenCounts[kvp.Key] += kvp.Value;
+								}
+								totalRestored += methodRestored;
+							}
 						}
-
-						if (methodRestored > 0)
+						catch (Exception ex)
 						{
-							if (!ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(method, out var errors))
-							{
-								method.Body = originalBody;
-								Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] Proxy inlining introduced structural defects in {method}: {string.Join("; ", errors)}. Rolled back.");
-								continue;
-							}
-
-							// Commit counts only after method transformation successfully completes and passes audit
-							foreach (var kvp in methodRewrittenCounts)
-							{
-								proxyRewrittenCounts[kvp.Key] += kvp.Value;
-							}
-							totalRestored += methodRestored;
+							// Atomic rollback method on error
+							method.Body = originalBody;
+							Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] Proxy inlining failed in {method}: {ex.Message}. Rolled back.");
 						}
 					}
-					catch (Exception ex)
+
+					// Safely prune proxy methods only if 100% of their references were rewritten
+					if (removeProxyMethods)
 					{
-						// Atomic rollback method on error
-						method.Body = originalBody;
-						Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] Proxy inlining failed in {method}: {ex.Message}. Rolled back.");
-					}
-				}
-
-				// Safely prune proxy methods only if 100% of their references were rewritten
-				if (removeProxyMethods)
-				{
-					int prunedCount = 0;
-					foreach (var kvp in proxyMethods)
-					{
-						var proxyMethod = kvp.Key;
-						int totalRefs = proxyReferenceCounts[proxyMethod];
-						int rewrittenRefs = proxyRewrittenCounts[proxyMethod];
-
-						if (totalRefs > 0 && rewrittenRefs >= totalRefs)
+						int prunedCount = 0;
+						foreach (var kvp in proxyMethods)
 						{
-							if (proxyMethod.DeclaringType != null && proxyMethod.DeclaringType.Methods.Contains(proxyMethod))
+							var proxyMethod = kvp.Key;
+							int totalRefs = proxyReferenceCounts[proxyMethod];
+							int rewrittenRefs = proxyRewrittenCounts[proxyMethod];
+
+							if (totalRefs > 0 && rewrittenRefs >= totalRefs)
 							{
-								proxyMethod.DeclaringType.Methods.Remove(proxyMethod);
-								prunedCount++;
+								if (proxyMethod.DeclaringType != null && proxyMethod.DeclaringType.Methods.Contains(proxyMethod))
+								{
+									proxyMethod.DeclaringType.Methods.Remove(proxyMethod);
+									prunedCount++;
+								}
+							}
+							else if (totalRefs > rewrittenRefs)
+							{
+								Logger.LogWarning($"[0x{proxyMethod.MDToken.Raw:X8}] Retaining proxy method {proxyMethod.Name} ({totalRefs - rewrittenRefs} unrewritten references remain).");
 							}
 						}
-						else if (totalRefs > rewrittenRefs)
-						{
-							Logger.LogWarning($"[0x{proxyMethod.MDToken.Raw:X8}] Retaining proxy method {proxyMethod.Name} ({totalRefs - rewrittenRefs} unrewritten references remain).");
-						}
 					}
 				}
-				}
 
-				int strongCount = InlineStrongDelegateProxies(module);
+				int strongCount = InlineStrongDelegateProxies(module, removeProxyMethods);
 				if (strongCount > 0)
 					Logger.LogInfo($"[ProxyKiller] Inlined {strongCount} strong delegate proxies");
 				totalRestored += strongCount;
@@ -159,8 +201,11 @@ namespace ConfuserExTools.ProxyKiller
 			}
 			finally
 			{
-				module.Context.AssemblyResolver = oldAssemblyResolver;
-				module.Context.Resolver = oldResolver;
+				if (oldAssemblyResolver == null)
+				{
+					module.Context.AssemblyResolver = null;
+					module.Context.Resolver = oldResolver;
+				}
 			}
 		}
 
@@ -170,10 +215,11 @@ namespace ConfuserExTools.ProxyKiller
 			public FieldDef Field { get; set; }
 		}
 
-		private static int InlineStrongDelegateProxies(ModuleDef module)
+		private static int InlineStrongDelegateProxies(ModuleDef module, bool removeProxyMethods)
 		{
 			var delegateMap = new Dictionary<FieldDef, (IMethod TargetMethod, OpCode CallOpCode)>();
 			var delegateTypes = new HashSet<TypeDef>();
+			var cctorInitRanges = new Dictionary<FieldDef, (MethodDef Method, int StartIdx, int EndIdx)>();
 
 			if (module.GlobalType != null)
 			{
@@ -238,16 +284,32 @@ namespace ConfuserExTools.ProxyKiller
 									continue;
 
 								var methodDef = (targetMethod as MethodDef) ?? targetMethod.ResolveMethodDef();
-								// Target method must be successfully resolved and explicitly static
-								if (methodDef == null || !methodDef.IsStatic)
+								bool isStatic;
+								bool isVirtual = false;
+								if (methodDef != null)
+								{
+									isStatic = methodDef.IsStatic;
+									isVirtual = methodDef.IsVirtual;
+								}
+								else if (targetMethod.MethodSig != null)
+								{
+									isStatic = !targetMethod.MethodSig.HasThis;
+									isVirtual = false;
+								}
+								else
+								{
+									continue;
+								}
+
+								if (!isStatic)
 									continue;
 
 								if (targetMethod.MethodSig != null && targetMethod.MethodSig.HasThis)
 									continue;
 
-								bool isVirtual = methodDef.IsVirtual;
 								var opCode = isVirtual ? OpCodes.Callvirt : OpCodes.Call;
 								delegateMap[fieldDef] = (targetMethod, opCode);
+								cctorInitRanges[fieldDef] = (method, ldtokenIdx, i);
 
 								var fieldType = (fieldDef.FieldSig?.Type?.ToTypeDefOrRef() as TypeDef) ?? fieldDef.FieldSig?.Type?.ToTypeDefOrRef()?.ResolveTypeDef();
 								if (fieldType != null && fieldType.BaseType != null &&
@@ -270,172 +332,231 @@ namespace ConfuserExTools.ProxyKiller
 				if (!method.HasBody || method.DeclaringType == module.GlobalType)
 					continue;
 
-				var instrs = method.Body.Instructions;
-				var branchTargets = new HashSet<Instruction>();
-				foreach (var inst in instrs)
+				var originalBody = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(method.Body);
+				try
 				{
-					if (inst.Operand is Instruction t && t != null) branchTargets.Add(t);
-					else if (inst.Operand is IList<Instruction> mt) { foreach (var x in mt) if (x != null) branchTargets.Add(x); }
-				}
-				if (method.Body.HasExceptionHandlers)
-				{
-					foreach (var eh in method.Body.ExceptionHandlers)
+					var instrs = method.Body.Instructions;
+					var branchTargets = new HashSet<Instruction>();
+					foreach (var inst in instrs)
 					{
-						if (eh.TryStart != null) branchTargets.Add(eh.TryStart);
-						if (eh.TryEnd != null) branchTargets.Add(eh.TryEnd);
-						if (eh.HandlerStart != null) branchTargets.Add(eh.HandlerStart);
-						if (eh.HandlerEnd != null) branchTargets.Add(eh.HandlerEnd);
-						if (eh.FilterStart != null) branchTargets.Add(eh.FilterStart);
+						if (inst.Operand is Instruction t && t != null) branchTargets.Add(t);
+						else if (inst.Operand is IList<Instruction> mt) { foreach (var x in mt) if (x != null) branchTargets.Add(x); }
 					}
-				}
-
-				// Stack simulation to reliably associate ldsfld with its corresponding callvirt Invoke
-				var stack = new List<DelegateStackItem>();
-				var rewritePairs = new List<(Instruction Ldsfld, Instruction Invoke, IMethod Target, OpCode OpCode)>();
-
-				for (int i = 0; i < instrs.Count; i++)
-				{
-					var inst = instrs[i];
-					if (inst.OpCode == OpCodes.Nop) continue;
-
-					if (inst.OpCode == OpCodes.Ldsfld && inst.Operand is IField field)
+					if (method.Body.HasExceptionHandlers)
 					{
-						var fieldDef = (field as FieldDef) ?? field.ResolveFieldDef();
-						if (fieldDef != null && delegateMap.ContainsKey(fieldDef))
+						foreach (var eh in method.Body.ExceptionHandlers)
 						{
-							stack.Add(new DelegateStackItem
-							{
-								SourceLdsfld = inst,
-								Field = fieldDef
-							});
-							continue;
+							if (eh.TryStart != null) branchTargets.Add(eh.TryStart);
+							if (eh.TryEnd != null) branchTargets.Add(eh.TryEnd);
+							if (eh.HandlerStart != null) branchTargets.Add(eh.HandlerStart);
+							if (eh.HandlerEnd != null) branchTargets.Add(eh.HandlerEnd);
+							if (eh.FilterStart != null) branchTargets.Add(eh.FilterStart);
 						}
 					}
 
-					if (inst.OpCode == OpCodes.Callvirt && inst.Operand is IMethod called && called.Name == "Invoke")
+					// Stack simulation to reliably associate ldsfld with its corresponding callvirt Invoke
+					var stack = new List<DelegateStackItem>();
+					var rewritePairs = new List<(Instruction Ldsfld, Instruction Invoke, IMethod Target, OpCode OpCode)>();
+
+					for (int i = 0; i < instrs.Count; i++)
 					{
-						int paramCount = called.MethodSig?.Params?.Count ?? 0;
-						int requiredPops = paramCount + 1; // params + this (delegate instance)
-						if (stack.Count >= requiredPops)
+						var inst = instrs[i];
+						if (inst.OpCode == OpCodes.Nop) continue;
+
+						if (inst.OpCode == OpCodes.Ldsfld && inst.Operand is IField field)
 						{
-							int delegateIndex = stack.Count - requiredPops;
-							var delegateItem = stack[delegateIndex];
-							if (delegateItem != null && delegateItem.Field != null && delegateMap.TryGetValue(delegateItem.Field, out var mapping))
+							var fieldDef = (field as FieldDef) ?? field.ResolveFieldDef();
+							if (fieldDef != null && delegateMap.ContainsKey(fieldDef))
 							{
-								// Verify declaring type and signature compatibility
-								bool typesMatch = called.DeclaringType != null && delegateItem.Field.FieldSig?.Type != null
-									&& string.Equals(called.DeclaringType.FullName, delegateItem.Field.FieldSig.Type.FullName, StringComparison.Ordinal);
-
-								bool paramsMatch = mapping.TargetMethod.MethodSig != null && mapping.TargetMethod.MethodSig.Params.Count == paramCount;
-
-								if (typesMatch && paramsMatch)
+								stack.Add(new DelegateStackItem
 								{
-									rewritePairs.Add((delegateItem.SourceLdsfld, inst, mapping.TargetMethod, mapping.CallOpCode));
+									SourceLdsfld = inst,
+									Field = fieldDef
+								});
+								continue;
+							}
+						}
+
+						if (inst.OpCode == OpCodes.Callvirt && inst.Operand is IMethod called && called.Name == "Invoke")
+						{
+							int paramCount = called.MethodSig?.Params?.Count ?? 0;
+							int requiredPops = paramCount + 1; // params + this (delegate instance)
+							if (stack.Count >= requiredPops)
+							{
+								int delegateIndex = stack.Count - requiredPops;
+								var delegateItem = stack[delegateIndex];
+								if (delegateItem != null && delegateItem.Field != null && delegateMap.TryGetValue(delegateItem.Field, out var mapping))
+								{
+									// Verify declaring type and signature compatibility
+									bool typesMatch = called.DeclaringType != null && delegateItem.Field.FieldSig?.Type != null
+										&& string.Equals(called.DeclaringType.FullName, delegateItem.Field.FieldSig.Type.FullName, StringComparison.Ordinal);
+
+									bool paramsMatch = mapping.TargetMethod.MethodSig != null && mapping.TargetMethod.MethodSig.Params.Count == paramCount;
+
+									if (typesMatch && paramsMatch)
+									{
+										rewritePairs.Add((delegateItem.SourceLdsfld, inst, mapping.TargetMethod, mapping.CallOpCode));
+									}
+								}
+
+								// Pop arguments and this
+								stack.RemoveRange(delegateIndex, requiredPops);
+
+								// Push return value if non-void
+								if (called.MethodSig != null && called.MethodSig.RetType.ElementType != ElementType.Void)
+								{
+									stack.Add(new DelegateStackItem());
+								}
+								continue;
+							}
+							else
+							{
+								stack.Clear();
+								continue;
+							}
+						}
+
+						// Generic instruction stack update
+						inst.CalculateStackUsage(out int pushes, out int pops);
+						if (pops > 0)
+						{
+							int toPop = Math.Min(pops, stack.Count);
+							if (toPop > 0)
+								stack.RemoveRange(stack.Count - toPop, toPop);
+						}
+						for (int p = 0; p < pushes; p++)
+						{
+							stack.Add(new DelegateStackItem());
+						}
+					}
+
+					// Apply rewrites if no internal branch targets, branch instructions, or EH boundaries intersect
+					int methodInlined = 0;
+					foreach (var pair in rewritePairs)
+					{
+						int ldsfldIdx = instrs.IndexOf(pair.Ldsfld);
+						int invokeIdx = instrs.IndexOf(pair.Invoke);
+						if (ldsfldIdx >= 0 && invokeIdx > ldsfldIdx)
+						{
+							bool hasInterferingBranch = false;
+							for (int k = ldsfldIdx + 1; k < invokeIdx; k++)
+							{
+								var mid = instrs[k];
+								if (branchTargets.Contains(mid) ||
+									mid.OpCode.FlowControl == FlowControl.Branch ||
+									mid.OpCode.FlowControl == FlowControl.Cond_Branch ||
+									mid.OpCode.FlowControl == FlowControl.Return ||
+									mid.OpCode.FlowControl == FlowControl.Throw)
+								{
+									hasInterferingBranch = true;
+									break;
 								}
 							}
 
-							// Pop arguments and this
-							stack.RemoveRange(delegateIndex, requiredPops);
-
-							// Push return value if non-void
-							if (called.MethodSig != null && called.MethodSig.RetType.ElementType != ElementType.Void)
+							if (!hasInterferingBranch)
 							{
-								stack.Add(new DelegateStackItem());
+								pair.Ldsfld.OpCode = OpCodes.Nop;
+								pair.Ldsfld.Operand = null;
+								pair.Invoke.OpCode = pair.OpCode;
+								pair.Invoke.Operand = pair.Target;
+								methodInlined++;
 							}
+						}
+					}
+
+					if (methodInlined > 0)
+					{
+						if (!ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(method, out var errors))
+						{
+							method.Body = originalBody;
+							Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] Delegate proxy inlining introduced structural defects in {method}: {string.Join("; ", errors)}. Rolled back.");
 							continue;
 						}
+						inlinedCount += methodInlined;
+					}
+				}
+				catch (Exception ex)
+				{
+					method.Body = originalBody;
+					Logger.LogWarning($"[0x{method.MDToken.Raw:X8}] Delegate proxy inlining failed in {method}: {ex.Message}. Rolled back.");
+				}
+			}
+
+			if (removeProxyMethods)
+			{
+				// Check for remaining references across user methods
+				var userRemainingFieldRefs = new HashSet<FieldDef>();
+				foreach (var m in module.EnumerateMethods())
+				{
+					if (!m.HasBody || m.DeclaringType == module.GlobalType) continue;
+					foreach (var inst in m.Body.Instructions)
+					{
+						if (inst.Operand is IField f)
+						{
+							var fDef = (f as FieldDef) ?? f.ResolveFieldDef();
+							if (fDef != null) userRemainingFieldRefs.Add(fDef);
+						}
+					}
+				}
+
+				// Neutralize cctor initialization for fields that have 0 remaining references in user methods
+				foreach (var kvp in cctorInitRanges)
+				{
+					var fieldDef = kvp.Key;
+					if (!userRemainingFieldRefs.Contains(fieldDef))
+					{
+						var (cctorMethod, startIdx, endIdx) = kvp.Value;
+						for (int k = startIdx; k <= endIdx && k < cctorMethod.Body.Instructions.Count; k++)
+						{
+							cctorMethod.Body.Instructions[k].OpCode = OpCodes.Nop;
+							cctorMethod.Body.Instructions[k].Operand = null;
+						}
+					}
+				}
+
+				// Clean up delegate fields and types only if no references remain anywhere in the module
+				var remainingFieldRefs = new HashSet<FieldDef>();
+				foreach (var m in module.EnumerateMethods())
+				{
+					if (!m.HasBody) continue;
+					foreach (var inst in m.Body.Instructions)
+					{
+						if (inst.Operand is IField f)
+						{
+							var fDef = (f as FieldDef) ?? f.ResolveFieldDef();
+							if (fDef != null) remainingFieldRefs.Add(fDef);
+						}
+					}
+				}
+
+				if (module.GlobalType != null)
+				{
+					foreach (var field in delegateMap.Keys)
+					{
+						if (!remainingFieldRefs.Contains(field))
+							module.GlobalType.Fields.Remove(field);
+					}
+				}
+
+				var remainingTypeRefs = new HashSet<TypeDef>();
+				if (module.GlobalType != null)
+				{
+					foreach (var f in module.GlobalType.Fields)
+					{
+						var td = (f.FieldSig?.Type?.ToTypeDefOrRef() as TypeDef) ?? f.FieldSig?.Type?.ToTypeDefOrRef()?.ResolveTypeDef();
+						if (td != null) remainingTypeRefs.Add(td);
+					}
+				}
+
+				foreach (var delType in delegateTypes)
+				{
+					if (!remainingTypeRefs.Contains(delType))
+					{
+						if (delType.DeclaringType != null)
+							delType.DeclaringType.NestedTypes.Remove(delType);
 						else
-						{
-							stack.Clear();
-							continue;
-						}
+							module.Types.Remove(delType);
 					}
-
-					// Generic instruction stack update
-					inst.CalculateStackUsage(out int pushes, out int pops);
-					if (pops > 0)
-					{
-						int toPop = Math.Min(pops, stack.Count);
-						if (toPop > 0)
-							stack.RemoveRange(stack.Count - toPop, toPop);
-					}
-					for (int p = 0; p < pushes; p++)
-					{
-						stack.Add(new DelegateStackItem());
-					}
-				}
-
-				// Apply rewrites if no internal branch targets or EH boundaries intersect
-				foreach (var pair in rewritePairs)
-				{
-					int ldsfldIdx = instrs.IndexOf(pair.Ldsfld);
-					int invokeIdx = instrs.IndexOf(pair.Invoke);
-					if (ldsfldIdx >= 0 && invokeIdx > ldsfldIdx)
-					{
-						bool hasInterferingBranch = false;
-						for (int k = ldsfldIdx + 1; k < invokeIdx; k++)
-						{
-							if (branchTargets.Contains(instrs[k]))
-							{
-								hasInterferingBranch = true;
-								break;
-							}
-						}
-
-						if (!hasInterferingBranch)
-						{
-							pair.Ldsfld.OpCode = OpCodes.Nop;
-							pair.Ldsfld.Operand = null;
-							pair.Invoke.OpCode = pair.OpCode;
-							pair.Invoke.Operand = pair.Target;
-							inlinedCount++;
-						}
-					}
-				}
-			}
-
-			// Clean up delegate fields and types only if no references remain in the module
-			var remainingFieldRefs = new HashSet<FieldDef>();
-			foreach (var m in module.EnumerateMethods())
-			{
-				if (!m.HasBody) continue;
-				foreach (var inst in m.Body.Instructions)
-				{
-					if (inst.Operand is IField f)
-					{
-						var fDef = f.ResolveFieldDef();
-						if (fDef != null) remainingFieldRefs.Add(fDef);
-					}
-				}
-			}
-
-			if (module.GlobalType != null)
-			{
-				foreach (var field in delegateMap.Keys)
-				{
-					if (!remainingFieldRefs.Contains(field))
-						module.GlobalType.Fields.Remove(field);
-				}
-			}
-
-			var remainingTypeRefs = new HashSet<TypeDef>();
-			if (module.GlobalType != null)
-			{
-				foreach (var f in module.GlobalType.Fields)
-				{
-					var td = f.FieldSig?.Type?.ToTypeDefOrRef()?.ResolveTypeDef();
-					if (td != null) remainingTypeRefs.Add(td);
-				}
-			}
-
-			foreach (var delType in delegateTypes)
-			{
-				if (!remainingTypeRefs.Contains(delType))
-				{
-					if (delType.DeclaringType != null)
-						delType.DeclaringType.NestedTypes.Remove(delType);
-					else
-						module.Types.Remove(delType);
 				}
 			}
 

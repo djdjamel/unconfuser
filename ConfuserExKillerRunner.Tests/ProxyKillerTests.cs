@@ -359,5 +359,259 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(0, inlined);
             Assert.Equal(OpCodes.Ldsfld, ldsfld.OpCode);
         }
+
+        [Fact]
+        public void Execute_RecursiveProxyChain_InlinedAndPrunedSuccessfully()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            // Target: int RealTarget(int a, int b)
+            var realTarget = new MethodDefUser("RealTarget",
+                MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static);
+            type.Methods.Add(realTarget);
+
+            // Proxy 2: calls RealTarget
+            var proxy2 = new MethodDefUser("Proxy_Two",
+                MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            proxy2.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy2.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
+            proxy2.Body.Instructions.Add(Instruction.Create(OpCodes.Call, realTarget));
+            proxy2.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(proxy2);
+
+            // Proxy 1: calls Proxy 2
+            var proxy1 = new MethodDefUser("Proxy_One",
+                MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            proxy1.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy1.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
+            proxy1.Body.Instructions.Add(Instruction.Create(OpCodes.Call, proxy2));
+            proxy1.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(proxy1);
+
+            // Caller: calls Proxy 1
+            var caller = new MethodDefUser("CallerMethod", MethodSig.CreateStatic(module.CorLibTypes.Int32))
+            {
+                Body = new CilBody()
+            };
+            var ldc1 = Instruction.Create(OpCodes.Ldc_I4, 10);
+            var ldc2 = Instruction.Create(OpCodes.Ldc_I4, 20);
+            var callProxy1 = Instruction.Create(OpCodes.Call, proxy1);
+            var ret = Instruction.Create(OpCodes.Ret);
+            caller.Body.Instructions.Add(ldc1);
+            caller.Body.Instructions.Add(ldc2);
+            caller.Body.Instructions.Add(callProxy1);
+            caller.Body.Instructions.Add(ret);
+            type.Methods.Add(caller);
+
+            // Caller 2: calls Proxy 2 directly
+            var caller2 = new MethodDefUser("CallerMethod2", MethodSig.CreateStatic(module.CorLibTypes.Int32))
+            {
+                Body = new CilBody()
+            };
+            var callProxy2 = Instruction.Create(OpCodes.Call, proxy2);
+            caller2.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 1));
+            caller2.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 2));
+            caller2.Body.Instructions.Add(callProxy2);
+            caller2.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(caller2);
+
+            int inlined = ProxyKillerImpl.Execute(module, ignoreAccess: true, removeProxyMethods: true);
+
+            Assert.Equal(2, inlined);
+            // CallProxy1 was rewritten directly to realTarget (flattened across proxy1 -> proxy2)
+            Assert.Equal(OpCodes.Call, callProxy1.OpCode);
+            Assert.Equal(realTarget, callProxy1.Operand);
+
+            // CallProxy2 was also rewritten directly to realTarget
+            Assert.Equal(OpCodes.Call, callProxy2.OpCode);
+            Assert.Equal(realTarget, callProxy2.Operand);
+
+            // Both proxy methods were cleanly pruned
+            Assert.DoesNotContain(proxy1, type.Methods);
+            Assert.DoesNotContain(proxy2, type.Methods);
+        }
+
+        [Fact]
+        public void Execute_RecursiveProxyCycle_SafelyIgnoredWithoutLooping()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            // Proxy A declares calling Proxy B
+            var proxyA = new MethodDefUser("Proxy_A",
+                MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+
+            // Proxy B declares calling Proxy A (cycle!)
+            var proxyB = new MethodDefUser("Proxy_B",
+                MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+
+            proxyA.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxyA.Body.Instructions.Add(Instruction.Create(OpCodes.Call, proxyB));
+            proxyA.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            proxyB.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxyB.Body.Instructions.Add(Instruction.Create(OpCodes.Call, proxyA));
+            proxyB.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            type.Methods.Add(proxyA);
+            type.Methods.Add(proxyB);
+
+            var caller = new MethodDefUser("CallerMethod", MethodSig.CreateStatic(module.CorLibTypes.Int32))
+            {
+                Body = new CilBody()
+            };
+            var ldc = Instruction.Create(OpCodes.Ldc_I4, 42);
+            var callProxyA = Instruction.Create(OpCodes.Call, proxyA);
+            var ret = Instruction.Create(OpCodes.Ret);
+            caller.Body.Instructions.Add(ldc);
+            caller.Body.Instructions.Add(callProxyA);
+            caller.Body.Instructions.Add(ret);
+            type.Methods.Add(caller);
+
+            // Must terminate safely and not infinite-loop
+            int inlined = ProxyKillerImpl.Execute(module, ignoreAccess: true, removeProxyMethods: true);
+
+            Assert.Equal(0, inlined);
+            Assert.Equal(proxyA, callProxyA.Operand);
+        }
+
+        [Fact]
+        public void Execute_StrongDelegateProxy_ExternalTarget_InlinedSuccessfully()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Target is an external static method (e.g. System.Console.WriteLine(string))
+            var consoleRef = module.CorLibTypes.GetTypeRef("System", "Console");
+            var writeLineSig = MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.String);
+            var writeLineRef = new MemberRefUser(module, "WriteLine", writeLineSig, consoleRef);
+
+            var delType = new TypeDefUser("WriteDelegate", module.CorLibTypes.GetTypeRef("System", "MulticastDelegate"));
+            module.Types.Add(delType);
+            var invoke = new MethodDefUser("Invoke", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String));
+            delType.Methods.Add(invoke);
+
+            var field = new FieldDefUser("FieldDelExt", new FieldSig(delType.ToTypeSig()), FieldAttributes.Public | FieldAttributes.Static);
+            globalType.Fields.Add(field);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, writeLineRef));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Stsfld, field));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var userType = new TypeDefUser("UserType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+            var caller = new MethodDefUser("CallerMethod", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var ldsfld = Instruction.Create(OpCodes.Ldsfld, field);
+            var ldstr = Instruction.Create(OpCodes.Ldstr, "Hello World");
+            var callInvoke = Instruction.Create(OpCodes.Callvirt, invoke);
+            var ret = Instruction.Create(OpCodes.Ret);
+            caller.Body.Instructions.Add(ldsfld);
+            caller.Body.Instructions.Add(ldstr);
+            caller.Body.Instructions.Add(callInvoke);
+            caller.Body.Instructions.Add(ret);
+            userType.Methods.Add(caller);
+
+            int inlined = ProxyKillerImpl.Execute(module, ignoreAccess: true, removeProxyMethods: true);
+
+            Assert.Equal(1, inlined);
+            Assert.Equal(OpCodes.Nop, ldsfld.OpCode);
+            Assert.Equal(OpCodes.Call, callInvoke.OpCode);
+            Assert.Equal(writeLineRef, callInvoke.Operand);
+
+            // Delegate field and type pruned cleanly
+            Assert.DoesNotContain(field, globalType.Fields);
+            Assert.DoesNotContain(delType, module.Types);
+        }
+
+        [Fact]
+        public void Execute_StrongDelegateProxy_InterveningBranchInCaller_IsRetained()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            var targetStatic = new MethodDefUser("TargetStatic", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            globalType.Methods.Add(targetStatic);
+
+            var delType = new TypeDefUser("MyVoidAction", module.CorLibTypes.GetTypeRef("System", "MulticastDelegate"));
+            module.Types.Add(delType);
+            var invoke = new MethodDefUser("Invoke", MethodSig.CreateInstance(module.CorLibTypes.Void));
+            delType.Methods.Add(invoke);
+
+            var field = new FieldDefUser("FieldDel", new FieldSig(delType.ToTypeSig()), FieldAttributes.Public | FieldAttributes.Static);
+            globalType.Fields.Add(field);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, targetStatic));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Stsfld, field));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var userType = new TypeDefUser("UserType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+            var caller = new MethodDefUser("CallerWithBranch", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var ldsfld = Instruction.Create(OpCodes.Ldsfld, field);
+            var dummyTarget = Instruction.Create(OpCodes.Nop);
+            var br = Instruction.Create(OpCodes.Br_S, dummyTarget);
+            var callInvoke = Instruction.Create(OpCodes.Callvirt, invoke);
+            var ret = Instruction.Create(OpCodes.Ret);
+
+            // Intervening branch between ldsfld and callvirt
+            caller.Body.Instructions.Add(ldsfld);
+            caller.Body.Instructions.Add(br);
+            caller.Body.Instructions.Add(dummyTarget);
+            caller.Body.Instructions.Add(callInvoke);
+            caller.Body.Instructions.Add(ret);
+            userType.Methods.Add(caller);
+
+            int inlined = ProxyKillerImpl.Execute(module, ignoreAccess: true, removeProxyMethods: false);
+
+            Assert.Equal(0, inlined);
+            Assert.Equal(OpCodes.Ldsfld, ldsfld.OpCode);
+            Assert.Equal(OpCodes.Callvirt, callInvoke.OpCode);
+        }
     }
 }
