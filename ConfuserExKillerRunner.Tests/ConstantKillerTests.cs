@@ -818,5 +818,154 @@ namespace ConfuserExKillerRunner.Tests
                 }
             }
         }
+
+        [Fact]
+        public void TryGetConstantInstruction_U4_EnumUIntMaxValue_PreservesBitsWithoutOverflow()
+        {
+            object val = TestUIntEnum.MaxValue;
+            bool ok = ConstantKillerImpl.TryGetConstantInstruction(ElementType.U4, val, out var op, out var operand);
+            Assert.True(ok);
+            Assert.Equal(OpCodes.Ldc_I4, op);
+            Assert.Equal(-1, operand);
+            Assert.Equal(0xFFFFFFFFu, unchecked((uint)(int)operand));
+        }
+
+        [Fact]
+        public void TryGetConstantInstruction_U4_EnumSignBitSet_PreservesBitsWithoutOverflow()
+        {
+            object val = TestUIntEnum.MidValue;
+            bool ok = ConstantKillerImpl.TryGetConstantInstruction(ElementType.U4, val, out var op, out var operand);
+            Assert.True(ok);
+            Assert.Equal(OpCodes.Ldc_I4, op);
+            Assert.Equal(int.MinValue, operand);
+            Assert.Equal(0x80000000u, unchecked((uint)(int)operand));
+        }
+
+        [Fact]
+        public void TryGetConstantInstruction_U8_EnumULongMaxValue_PreservesBitsWithoutOverflow()
+        {
+            object val = TestULongEnum.MaxValue;
+            bool ok = ConstantKillerImpl.TryGetConstantInstruction(ElementType.U8, val, out var op, out var operand);
+            Assert.True(ok);
+            Assert.Equal(OpCodes.Ldc_I8, op);
+            Assert.Equal(-1L, operand);
+            Assert.Equal(0xFFFFFFFFFFFFFFFFul, unchecked((ulong)(long)operand));
+        }
+
+        [Fact]
+        public void TryGetConstantInstruction_U8_EnumSignBitSet_PreservesBitsWithoutOverflow()
+        {
+            object val = TestULongEnum.MidValue;
+            bool ok = ConstantKillerImpl.TryGetConstantInstruction(ElementType.U8, val, out var op, out var operand);
+            Assert.True(ok);
+            Assert.Equal(OpCodes.Ldc_I8, op);
+            Assert.Equal(long.MinValue, operand);
+            Assert.Equal(0x8000000000000000ul, unchecked((ulong)(long)operand));
+        }
+
+        [Fact]
+        public void TryGetConstantInstruction_I4_EnumNegative_PreservesBits()
+        {
+            object val = TestIntEnum.Negative;
+            bool ok = ConstantKillerImpl.TryGetConstantInstruction(ElementType.I4, val, out var op, out var operand);
+            Assert.True(ok);
+            Assert.Equal(OpCodes.Ldc_I4, op);
+            Assert.Equal(-42, operand);
+        }
+
+        [Fact]
+        public void ConstantKiller_Execute_NeighboringConstants_OneFails_OtherSucceedsWithoutRollback()
+        {
+            var module = new ModuleDefUser("TestNeighboringMod");
+            var asm = new AssemblyDefUser("TestNeighboringAsm");
+            asm.Modules.Add(module);
+
+            // Decrypter<T>(uint key): returns int 999
+            var decrypterDef = new MethodDefUser(
+                "Decrypter",
+                MethodSig.CreateStaticGeneric(1, new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            decrypterDef.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 999));
+            decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            module.GlobalType.Methods.Add(decrypterDef);
+
+            var userType = new TypeDefUser("UserType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+
+            var callerMethod = new MethodDefUser("Run", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32))
+            {
+                Body = new CilBody()
+            };
+            userType.Methods.Add(callerMethod);
+
+            var intSpec = new MethodSpecUser(decrypterDef, new GenericInstMethodSig(module.CorLibTypes.Int32));
+
+            // Call 1: valid constant key -> succeeds and inlined!
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 123));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, intSpec));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            // Call 2: non-constant key (ldarg.0) -> evaluation fails, preserved!
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, intSpec));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            using (var ms = new System.IO.MemoryStream())
+            {
+                module.Write(ms);
+                byte[] rawAsm = ms.ToArray();
+
+                var reflAsm = System.Reflection.Assembly.Load(rawAsm);
+                using (var modMD = ModuleDefMD.Load(rawAsm))
+                {
+                    var result = ConstantKillerImpl.Execute(modMD, reflAsm.ManifestModule);
+
+                    Assert.NotNull(result);
+                    Assert.Equal(2, result.TotalReferencesCount);
+                    Assert.Equal(1, result.ResolvedReferencesCount);
+                    Assert.Equal(1, result.DecryptedConstantsCount);
+                    Assert.False(result.AllReferencesResolved);
+
+                    // Call 1 in Run was replaced with ldc.i4 999
+                    var loadedCaller = modMD.Find("UserType", false).FindMethod("Run");
+                    Assert.NotNull(loadedCaller);
+                    Assert.Equal(OpCodes.Ldc_I4, loadedCaller.Body.Instructions[1].OpCode);
+                    Assert.Equal(999, loadedCaller.Body.Instructions[1].Operand);
+
+                    // Call 2 in Run remains Call to Decrypter
+                    Assert.Equal(OpCodes.Call, loadedCaller.Body.Instructions[4].OpCode);
+
+                    // Decrypter must be retained in module
+                    var loadedDecrypter = modMD.GlobalType.FindMethod("Decrypter");
+                    Assert.NotNull(loadedDecrypter);
+                }
+            }
+        }
+    }
+
+    public enum TestUIntEnum : uint
+    {
+        MinValue = 0u,
+        MidValue = 0x80000000u,
+        MaxValue = 0xFFFFFFFFu
+    }
+
+    public enum TestULongEnum : ulong
+    {
+        MinValue = 0ul,
+        MidValue = 0x8000000000000000ul,
+        MaxValue = 0xFFFFFFFFFFFFFFFFul
+    }
+
+    public enum TestIntEnum : int
+    {
+        Negative = -42
     }
 }

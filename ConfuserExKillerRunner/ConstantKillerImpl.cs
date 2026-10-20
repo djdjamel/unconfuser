@@ -406,6 +406,10 @@ namespace ConfuserExTools.ConstantKiller {
 			if (value == null) return false;
 
 			try {
+				if (value.GetType().IsEnum) {
+					value = Convert.ChangeType(value, Enum.GetUnderlyingType(value.GetType()));
+				}
+
 				switch (elementType) {
 				case ElementType.Boolean:
 					opCode = OpCodes.Ldc_I4;
@@ -421,26 +425,56 @@ namespace ConfuserExTools.ConstantKiller {
 					opCode = OpCodes.Ldc_I4;
 					if (value is sbyte sb) operand = (int)sb;
 					else if (value is byte b) operand = (int)(sbyte)b;
-					else operand = unchecked((int)Convert.ToSByte(value));
+					else if (value is IConvertible ic1) {
+						var tc1 = ic1.GetTypeCode();
+						if (tc1 == TypeCode.Byte || tc1 == TypeCode.UInt16 || tc1 == TypeCode.UInt32 || tc1 == TypeCode.UInt64)
+							operand = (int)(sbyte)(byte)ic1.ToUInt64(null);
+						else
+							operand = (int)(sbyte)ic1.ToInt64(null);
+					}
+					else return false;
 					return true;
 
 				case ElementType.U1:
 					opCode = OpCodes.Ldc_I4;
 					if (value is byte b2) operand = (int)b2;
-					else operand = (int)Convert.ToByte(value);
+					else if (value is sbyte sb2) operand = (int)(byte)sb2;
+					else if (value is IConvertible icU1) {
+						var tcU1 = icU1.GetTypeCode();
+						if (tcU1 == TypeCode.Byte || tcU1 == TypeCode.UInt16 || tcU1 == TypeCode.UInt32 || tcU1 == TypeCode.UInt64)
+							operand = (int)(byte)icU1.ToUInt64(null);
+						else
+							operand = (int)(byte)icU1.ToInt64(null);
+					}
+					else return false;
 					return true;
 
 				case ElementType.I2:
 					opCode = OpCodes.Ldc_I4;
 					if (value is short s) operand = (int)s;
 					else if (value is ushort us) operand = (int)(short)us;
-					else operand = unchecked((int)Convert.ToInt16(value));
+					else if (value is IConvertible icI2) {
+						var tcI2 = icI2.GetTypeCode();
+						if (tcI2 == TypeCode.Byte || tcI2 == TypeCode.UInt16 || tcI2 == TypeCode.UInt32 || tcI2 == TypeCode.UInt64)
+							operand = (int)(short)(ushort)icI2.ToUInt64(null);
+						else
+							operand = (int)(short)icI2.ToInt64(null);
+					}
+					else return false;
 					return true;
 
 				case ElementType.U2:
 					opCode = OpCodes.Ldc_I4;
 					if (value is ushort us2) operand = (int)us2;
-					else operand = (int)Convert.ToUInt16(value);
+					else if (value is short s2) operand = (int)(ushort)s2;
+					else if (value is IConvertible icU2) {
+						var tcU2 = icU2.GetTypeCode();
+						if (tcU2 == TypeCode.Byte || tcU2 == TypeCode.UInt16 || tcU2 == TypeCode.UInt32 || tcU2 == TypeCode.UInt64)
+							operand = (int)(ushort)icU2.ToUInt64(null);
+						else
+							operand = (int)(ushort)icU2.ToInt64(null);
+					}
+					else return false;
 					return true;
 
 				case ElementType.I4:
@@ -450,11 +484,25 @@ namespace ConfuserExTools.ConstantKiller {
 					else if (value is uint u) operand = unchecked((int)u);
 					else if (value is long l) operand = unchecked((int)l);
 					else if (value is ulong ul) operand = unchecked((int)ul);
-					else if (value is short s2) operand = (int)s2;
+					else if (value is short s3) operand = (int)s3;
 					else if (value is ushort us3) operand = (int)us3;
 					else if (value is byte b3) operand = (int)b3;
-					else if (value is sbyte sb2) operand = (int)sb2;
-					else if (value is IConvertible ic) operand = unchecked((int)ic.ToInt64(null));
+					else if (value is sbyte sb3) operand = (int)sb3;
+					else if (value is IConvertible ic4) {
+						var tc4 = ic4.GetTypeCode();
+						if (tc4 == TypeCode.Byte || tc4 == TypeCode.UInt16 || tc4 == TypeCode.UInt32 || tc4 == TypeCode.UInt64)
+							operand = unchecked((int)ic4.ToUInt64(null));
+						else if (tc4 == TypeCode.SByte || tc4 == TypeCode.Int16 || tc4 == TypeCode.Int32 || tc4 == TypeCode.Int64)
+							operand = unchecked((int)ic4.ToInt64(null));
+						else if (tc4 == TypeCode.Single)
+							operand = unchecked((int)ic4.ToSingle(null));
+						else if (tc4 == TypeCode.Double)
+							operand = unchecked((int)ic4.ToDouble(null));
+						else if (tc4 == TypeCode.Decimal)
+							operand = unchecked((int)ic4.ToDecimal(null));
+						else
+							return false;
+					}
 					else return false;
 					return true;
 
@@ -465,9 +513,24 @@ namespace ConfuserExTools.ConstantKiller {
 					else if (value is ulong ul2) operand = unchecked((long)ul2);
 					else if (value is int i2) operand = (long)i2;
 					else if (value is uint u2) operand = (long)u2;
-					else if (value is IConvertible ic2) {
-						if (value is ulong ulongVal) operand = unchecked((long)ulongVal);
-						else operand = ic2.ToInt64(null);
+					else if (value is short s4) operand = (long)s4;
+					else if (value is ushort us4) operand = (long)us4;
+					else if (value is byte b4) operand = (long)b4;
+					else if (value is sbyte sb4) operand = (long)sb4;
+					else if (value is IConvertible ic8) {
+						var tc8 = ic8.GetTypeCode();
+						if (tc8 == TypeCode.Byte || tc8 == TypeCode.UInt16 || tc8 == TypeCode.UInt32 || tc8 == TypeCode.UInt64)
+							operand = unchecked((long)ic8.ToUInt64(null));
+						else if (tc8 == TypeCode.SByte || tc8 == TypeCode.Int16 || tc8 == TypeCode.Int32 || tc8 == TypeCode.Int64)
+							operand = ic8.ToInt64(null);
+						else if (tc8 == TypeCode.Single)
+							operand = unchecked((long)ic8.ToSingle(null));
+						else if (tc8 == TypeCode.Double)
+							operand = unchecked((long)ic8.ToDouble(null));
+						else if (tc8 == TypeCode.Decimal)
+							operand = unchecked((long)ic8.ToDecimal(null));
+						else
+							return false;
 					}
 					else return false;
 					return true;
@@ -476,7 +539,7 @@ namespace ConfuserExTools.ConstantKiller {
 					opCode = OpCodes.Ldc_R4;
 					if (value is float f) operand = f;
 					else if (value is double d) operand = (float)d;
-					else if (value is IConvertible ic3) operand = ic3.ToSingle(null);
+					else if (value is IConvertible icR4) operand = icR4.ToSingle(null);
 					else return false;
 					return true;
 
@@ -484,7 +547,7 @@ namespace ConfuserExTools.ConstantKiller {
 					opCode = OpCodes.Ldc_R8;
 					if (value is double d2) operand = d2;
 					else if (value is float f2) operand = (double)f2;
-					else if (value is IConvertible ic4) operand = ic4.ToDouble(null);
+					else if (value is IConvertible icR8) operand = icR8.ToDouble(null);
 					else return false;
 					return true;
 

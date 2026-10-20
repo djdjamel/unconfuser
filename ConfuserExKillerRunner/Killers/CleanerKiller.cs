@@ -352,7 +352,7 @@ namespace ConfuserExKillerRunner.Killers
             }
 
             // 6. Resource Resolver
-            if (hasResourceResolve && resourcesDecrypted)
+            if (hasResourceResolve && resourcesDecrypted && IsConfuserResourceResolver(method))
                 return "Resource-Resolver";
 
             // 7. Constant Buffer Initializer
@@ -514,8 +514,66 @@ namespace ConfuserExKillerRunner.Killers
             return false;
         }
 
+        private static bool IsConfuserResourceResolver(MethodDef method)
+        {
+            if (method == null || !method.HasBody || method.Body.Instructions == null)
+                return false;
+
+            if (method.DeclaringType != null && !method.DeclaringType.IsGlobalModuleType)
+                return false;
+
+            if (method.Parameters.Count > 1)
+                return false;
+
+            if (method.Parameters.Count == 1 && method.Parameters[0].Type != null &&
+                method.Parameters[0].Type.TypeName != "Module")
+                return false;
+
+            if (method.ReturnType != null && method.ReturnType.ElementType != ElementType.Void)
+                return false;
+
+            // Reject if the method references or calls user application types/methods
+            foreach (var inst in method.Body.Instructions)
+            {
+                if (inst.OpCode == OpCodes.Ldftn && inst.Operand is IMethod handler)
+                {
+                    var hDef = handler.ResolveMethodDef() ?? (handler as MethodDef);
+                    if (hDef != null && hDef.DeclaringType != null && !hDef.DeclaringType.IsGlobalModuleType)
+                    {
+                        // Handler belongs to a user class -> legitimate user resolver
+                        return false;
+                    }
+                }
+                else if (inst.Operand is IMethod called)
+                {
+                    var decl = called.DeclaringType;
+                    bool isGlobal = decl != null && ((decl is TypeDef td && td.IsGlobalModuleType) || string.Equals(decl.TypeName, "<Module>", StringComparison.Ordinal));
+                    if (decl != null && !isGlobal && method.Module != null &&
+                        decl.DefinitionAssembly == method.Module.Assembly)
+                    {
+                        // Calls a method on an application type in current assembly
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
         private static bool IsConfuserConstantBufferInitializer(MethodDef method)
         {
+            if (method == null || !method.HasBody || method.Body.Instructions == null)
+                return false;
+
+            if (method.DeclaringType != null && !method.DeclaringType.IsGlobalModuleType)
+                return false;
+
+            if (method.Parameters.Count > 0)
+                return false;
+
+            if (method.ReturnType != null && method.ReturnType.ElementType != ElementType.Void)
+                return false;
+
             // Verify method initializes a static byte/int array from a private implementation field in <Module>
             bool loadsFieldToken = false;
             foreach (var inst in method.Body.Instructions)
@@ -525,6 +583,17 @@ namespace ConfuserExKillerRunner.Killers
                     var fd = field.ResolveFieldDef();
                     if (fd != null && fd.DeclaringType != null && fd.DeclaringType.IsGlobalModuleType && fd.HasFieldRVA)
                         loadsFieldToken = true;
+                }
+                else if (inst.Operand is IMethod called)
+                {
+                    var decl = called.DeclaringType;
+                    bool isGlobal = decl != null && ((decl is TypeDef td && td.IsGlobalModuleType) || string.Equals(decl.TypeName, "<Module>", StringComparison.Ordinal));
+                    if (decl != null && !isGlobal && method.Module != null &&
+                        decl.DefinitionAssembly == method.Module.Assembly)
+                    {
+                        // Calls application logic
+                        return false;
+                    }
                 }
             }
             return loadsFieldToken;

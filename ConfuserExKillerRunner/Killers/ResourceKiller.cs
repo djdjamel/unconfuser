@@ -24,14 +24,18 @@ namespace ConfuserExKillerRunner.Killers
 
     public static class ResourceKiller
     {
-        public static ResourceKillerResult Execute(ModuleDefMD module, Module reflModule = null)
+        public static ResourceKillerResult Execute(ModuleDefMD module, Module reflModule = null, bool resourcesAlreadyDecrypted = false)
         {
             if (module == null) throw new ArgumentNullException(nameof(module));
 
             var result = new ResourceKillerResult();
+            if (resourcesAlreadyDecrypted)
+            {
+                result.ResourcesDecrypted = true;
+            }
 
             // Stage 1: Try in-memory method-rewrite resource decryption (NoFuserEx technique)
-            if (reflModule != null)
+            if (reflModule != null && !result.ResourcesDecrypted)
             {
                 try
                 {
@@ -42,7 +46,7 @@ namespace ConfuserExKillerRunner.Killers
                     Logger.LogWarning($"[ResourceKiller] Dynamic resource decryption warning: {ex.Message}");
                 }
             }
-            else
+            else if (!result.ResourcesDecrypted)
             {
                 Logger.LogInfo("[ResourceKiller] Dynamic execution disabled; skipping resource decryption & re-embedding.");
             }
@@ -50,41 +54,7 @@ namespace ConfuserExKillerRunner.Killers
             // Stage 2: Strip resource / assembly resolution hooks in <Module>.cctor ONLY if resources were decrypted
             if (result.ResourcesDecrypted)
             {
-                var cctor = module.GlobalType?.FindStaticConstructor();
-                if (cctor != null && cctor.HasBody)
-                {
-                    var instrs = cctor.Body.Instructions;
-                    for (int i = 0; i < instrs.Count; i++)
-                    {
-                        var inst = instrs[i];
-                        if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
-                        {
-                            if (inst.Operand is IMethod called)
-                            {
-                                string fullName = called.FullName;
-                                if (fullName.IndexOf("add_ResourceResolve", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                    fullName.IndexOf("add_AssemblyResolve", StringComparison.OrdinalIgnoreCase) >= 0)
-                                {
-                                    inst.OpCode = OpCodes.Nop;
-                                    inst.Operand = null;
-                                    for (int j = i - 1; j >= 0 && j >= i - 5; j--)
-                                    {
-                                        if (instrs[j].OpCode == OpCodes.Newobj ||
-                                            instrs[j].OpCode == OpCodes.Ldftn ||
-                                            instrs[j].OpCode == OpCodes.Ldnull ||
-                                            instrs[j].OpCode == OpCodes.Call)
-                                        {
-                                            instrs[j].OpCode = OpCodes.Nop;
-                                            instrs[j].Operand = null;
-                                        }
-                                    }
-                                    result.HandlerStripped = true;
-                                    Logger.LogInfo($"[ResourceKiller] Stripped resource resolver hook ({called.Name}) from <Module>.cctor");
-                                }
-                            }
-                        }
-                    }
-                }
+                StripResourceHooksFromCctor(module, result);
             }
 
             // Stage 3: Audit current resources
@@ -279,9 +249,11 @@ namespace ConfuserExKillerRunner.Killers
                     Instructions = { Instruction.Create(OpCodes.Ret) }
                 };
 
-                // Nop out calls to decrypterMethod in <Module>.cctor
+                // Nop out calls to decrypterMethod in <Module>.cctor with atomic audit
                 if (cctor != null && cctor.HasBody)
                 {
+                    var cctorOriginal = ConfuserExKillerRunner.Core.MethodBodyCloner.Clone(cctor.Body);
+                    bool modifiedCctor = false;
                     foreach (var inst in cctor.Body.Instructions)
                     {
                         if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
@@ -290,8 +262,14 @@ namespace ConfuserExKillerRunner.Killers
                             {
                                 inst.OpCode = OpCodes.Nop;
                                 inst.Operand = null;
+                                modifiedCctor = true;
                             }
                         }
+                    }
+                    if (modifiedCctor && !ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(cctor, out var cctorErrors))
+                    {
+                        cctor.Body = cctorOriginal;
+                        Logger.LogWarning($"[ResourceKiller] Neutralizing call to {decrypterMethod.Name} in <Module>.cctor failed structural audit: {string.Join("; ", cctorErrors)}. Restored cctor.");
                     }
                 }
             }
@@ -303,6 +281,182 @@ namespace ConfuserExKillerRunner.Killers
             }
         }
 
+        private static void StripResourceHooksFromCctor(ModuleDefMD module, ResourceKillerResult result)
+        {
+            var cctor = module.GlobalType?.FindStaticConstructor();
+            if (cctor == null || !cctor.HasBody || cctor.Body.Instructions == null)
+                return;
+
+            var instructions = cctor.Body.Instructions;
+
+            // Collect branch targets within <Module>..cctor
+            var branchTargets = new HashSet<Instruction>();
+            foreach (var ins in instructions)
+            {
+                if (ins == null) continue;
+                if (ins.Operand is Instruction singleTarget)
+                {
+                    if (singleTarget != null) branchTargets.Add(singleTarget);
+                }
+                else if (ins.Operand is IList<Instruction> switchTargets)
+                {
+                    foreach (var st in switchTargets)
+                        if (st != null) branchTargets.Add(st);
+                }
+                else if (ins.Operand is Instruction[] switchArray)
+                {
+                    foreach (var st in switchArray)
+                        if (st != null) branchTargets.Add(st);
+                }
+            }
+
+            // Collect exception handler boundaries
+            var ehBoundaries = new HashSet<Instruction>();
+            if (cctor.Body.HasExceptionHandlers)
+            {
+                foreach (var eh in cctor.Body.ExceptionHandlers)
+                {
+                    if (eh.TryStart != null) ehBoundaries.Add(eh.TryStart);
+                    if (eh.TryEnd != null) ehBoundaries.Add(eh.TryEnd);
+                    if (eh.HandlerStart != null) ehBoundaries.Add(eh.HandlerStart);
+                    if (eh.HandlerEnd != null) ehBoundaries.Add(eh.HandlerEnd);
+                    if (eh.FilterStart != null) ehBoundaries.Add(eh.FilterStart);
+                }
+            }
+
+            for (int i = 0; i < instructions.Count; i++)
+            {
+                var inst = instructions[i];
+                if (inst.OpCode != OpCodes.Call && inst.OpCode != OpCodes.Callvirt)
+                    continue;
+
+                if (!(inst.Operand is IMethod called))
+                    continue;
+
+                string fullName = called.FullName;
+                bool isResourceResolve = fullName.IndexOf("add_ResourceResolve", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool isAssemblyResolve = fullName.IndexOf("add_AssemblyResolve", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                if (!isResourceResolve && !isAssemblyResolve)
+                    continue;
+
+                if (!TryIdentifyResourceHookInstructions(instructions, i, branchTargets, ehBoundaries, out var toNeutralize, out var handlerMethod))
+                {
+                    Logger.LogWarning($"[ResourceKiller] Retaining {called.Name} hook in <Module>.cctor: argument sequence is ambiguous, non-standard, or intersects branches/EH boundaries.");
+                    continue;
+                }
+
+                if (handlerMethod != null && handlerMethod.DeclaringType != null && !handlerMethod.DeclaringType.IsGlobalModuleType)
+                {
+                    Logger.LogWarning($"[ResourceKiller] Retaining {called.Name} hook in <Module>.cctor: handler {handlerMethod.FullName} belongs to a user class, not protector module.");
+                    continue;
+                }
+
+                // In-place snapshot for atomic rollback
+                var originalStates = toNeutralize.Select(n => (Instruction: n, OpCode: n.OpCode, Operand: n.Operand)).ToList();
+
+                foreach (var n in toNeutralize)
+                {
+                    n.OpCode = OpCodes.Nop;
+                    n.Operand = null;
+                }
+
+                if (!ConfuserExKillerRunner.Analysis.QualityAuditor.IsMethodStructurallyValid(cctor, out var errors))
+                {
+                    foreach (var s in originalStates)
+                    {
+                        s.Instruction.OpCode = s.OpCode;
+                        s.Instruction.Operand = s.Operand;
+                    }
+                    Logger.LogWarning($"[ResourceKiller] Rollback in <Module>.cctor: stripping {called.Name} failed structural audit: {string.Join("; ", errors)}.");
+                    continue;
+                }
+
+                result.HandlerStripped = true;
+                Logger.LogInfo($"[ResourceKiller] Safely stripped resource resolver hook ({called.Name}) and {toNeutralize.Count - 1} setup instruction(s) from <Module>.cctor");
+            }
+        }
+
+        private static bool TryIdentifyResourceHookInstructions(
+            IList<Instruction> instructions,
+            int callIndex,
+            HashSet<Instruction> branchTargets,
+            HashSet<Instruction> ehBoundaries,
+            out List<Instruction> instructionsToNeutralize,
+            out MethodDef handlerMethod)
+        {
+            instructionsToNeutralize = new List<Instruction>();
+            handlerMethod = null;
+
+            var callInst = instructions[callIndex];
+            if (branchTargets.Contains(callInst) || ehBoundaries.Contains(callInst))
+                return false;
+
+            instructionsToNeutralize.Add(callInst);
+
+            int curr = callIndex - 1;
+            while (curr >= 0 && instructions[curr].OpCode == OpCodes.Nop)
+                curr--;
+
+            if (curr < 0) return false;
+            var newobjInst = instructions[curr];
+            if (newobjInst.OpCode != OpCodes.Newobj || branchTargets.Contains(newobjInst) || ehBoundaries.Contains(newobjInst))
+                return false;
+            instructionsToNeutralize.Add(newobjInst);
+
+            curr--;
+            while (curr >= 0 && instructions[curr].OpCode == OpCodes.Nop)
+                curr--;
+
+            if (curr < 0) return false;
+            var ldftnInst = instructions[curr];
+            if (ldftnInst.OpCode != OpCodes.Ldftn || branchTargets.Contains(ldftnInst) || ehBoundaries.Contains(ldftnInst))
+                return false;
+
+            if (ldftnInst.Operand is MethodDef md)
+                handlerMethod = md;
+            else if (ldftnInst.Operand is MemberRef mr)
+                handlerMethod = mr.ResolveMethodDef();
+            instructionsToNeutralize.Add(ldftnInst);
+
+            curr--;
+            while (curr >= 0 && instructions[curr].OpCode == OpCodes.Nop)
+                curr--;
+
+            if (curr < 0) return false;
+            var targetObjInst = instructions[curr];
+            if (branchTargets.Contains(targetObjInst) || ehBoundaries.Contains(targetObjInst))
+                return false;
+            if (targetObjInst.OpCode != OpCodes.Ldnull && targetObjInst.OpCode != OpCodes.Ldsfld)
+                return false;
+            instructionsToNeutralize.Add(targetObjInst);
+
+            curr--;
+            while (curr >= 0 && instructions[curr].OpCode == OpCodes.Nop)
+                curr--;
+
+            if (curr < 0) return false;
+            var domainInst = instructions[curr];
+            if (branchTargets.Contains(domainInst) || ehBoundaries.Contains(domainInst))
+                return false;
+
+            if (domainInst.OpCode == OpCodes.Call || domainInst.OpCode == OpCodes.Callvirt)
+            {
+                if (domainInst.Operand is IMethod m && m.Name.Contains("get_CurrentDomain"))
+                {
+                    instructionsToNeutralize.Add(domainInst);
+                    return true;
+                }
+            }
+            else if (domainInst.OpCode == OpCodes.Ldnull)
+            {
+                instructionsToNeutralize.Add(domainInst);
+                return true;
+            }
+
+            return false;
+        }
+
         private static MethodDef FindResourceDecrypterMethod(ModuleDefMD module)
         {
             var cctor = module.GlobalType?.FindStaticConstructor();
@@ -311,10 +465,18 @@ namespace ConfuserExKillerRunner.Killers
 
             foreach (var inst in cctor.Body.Instructions)
             {
-                if (inst.OpCode != OpCodes.Call || !(inst.Operand is MethodDef md))
+                if (inst.OpCode != OpCodes.Call && inst.OpCode != OpCodes.Callvirt)
                     continue;
 
-                if (!md.DeclaringType.IsGlobalModuleType || !md.IsStatic || !md.HasBody)
+                MethodDef md = null;
+                if (inst.Operand is MethodDef def)
+                    md = def;
+                else if (inst.Operand is MemberRef mr)
+                    md = mr.ResolveMethodDef();
+                else if (inst.Operand is MethodSpec ms)
+                    md = ms.Method.ResolveMethodDef() ?? (ms.Method as MethodDef);
+
+                if (md == null || md.DeclaringType == null || !md.DeclaringType.IsGlobalModuleType || !md.IsStatic || !md.HasBody)
                     continue;
 
                 if (md.Parameters.Count > 0)
@@ -324,11 +486,17 @@ namespace ConfuserExKillerRunner.Killers
                 bool hasAssemblyLoad = false;
                 foreach (var mInst in md.Body.Instructions)
                 {
-                    if (mInst.OpCode == OpCodes.Call && mInst.Operand != null)
+                    if (mInst.OpCode == OpCodes.Call || mInst.OpCode == OpCodes.Callvirt)
                     {
-                        string opStr = mInst.Operand.ToString();
-                        if (opStr.Contains("InitializeArray")) hasInitArray = true;
-                        if (opStr.Contains("Assembly::Load")) hasAssemblyLoad = true;
+                        if (mInst.Operand is IMethod called)
+                        {
+                            string fullName = called.FullName;
+                            if (fullName.IndexOf("InitializeArray", StringComparison.OrdinalIgnoreCase) >= 0)
+                                hasInitArray = true;
+                            if (fullName.IndexOf("Assembly::Load", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                (called.DeclaringType?.FullName == "System.Reflection.Assembly" && called.Name == "Load"))
+                                hasAssemblyLoad = true;
+                        }
                     }
                 }
 

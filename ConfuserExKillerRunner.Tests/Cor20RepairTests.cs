@@ -116,6 +116,7 @@ namespace ConfuserExKillerRunner.Tests
             var result = Cor20Repair.Repair(peBytes, originalBytes: null);
 
             // Cb was 72 so not repaired, MetaDataRva was not repairable
+            Assert.False(result.Success);
             Assert.False(result.MetaDataRvaRepaired);
 
             // ModuleDefMD.Load must still fail

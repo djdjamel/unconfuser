@@ -415,9 +415,7 @@ namespace ConfuserExKillerRunner
                         }
                     }
 
-                    var resResult = ResourceKiller.Execute(module, reflModule: null);
-                    if (resourcesDecrypted)
-                        resResult.ResourcesDecrypted = true;
+                    var resResult = ResourceKiller.Execute(module, reflModule: null, resourcesAlreadyDecrypted: resourcesDecrypted);
                     if (resResult.HandlerStripped)
                         Console.WriteLine("[+] ResourceKiller: Stripped runtime ResourceResolve hook");
 

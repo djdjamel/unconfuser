@@ -99,6 +99,13 @@ namespace ConfuserExKillerRunner.Killers
                 }
             }
 
+            if (metaRva == 0)
+            {
+                result.Success = false;
+                result.Message = "COR20 MetaData RVA is 0 and could not be recovered.";
+                return result;
+            }
+
             result.Success = true;
             result.Message = $"Repaired: Cb={result.CbRepaired}, MetaDataRva={result.MetaDataRvaRepaired}";
             return result;
