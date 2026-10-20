@@ -62,7 +62,7 @@ namespace ConfuserExKillerRunner.Core
 
                 if (!exited)
                 {
-                    try { proc.Kill(); } catch { }
+                    KillProcessTree(proc);
                     return new ProcessResult
                     {
                         ExitCode = -1,
@@ -85,6 +85,49 @@ namespace ConfuserExKillerRunner.Core
                     TimedOut = false
                 };
             }
+        }
+
+        public static void KillProcessTree(Process proc)
+        {
+            if (proc == null) return;
+            try
+            {
+                if (proc.HasExited) return;
+            }
+            catch { return; }
+
+#if NET6_0_OR_GREATER || NETCOREAPP
+            try
+            {
+                proc.Kill(entireProcessTree: true);
+                return;
+            }
+            catch { }
+#endif
+
+            try
+            {
+                if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+                {
+                    var psi = new ProcessStartInfo("taskkill", $"/F /T /PID {proc.Id}")
+                    {
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    };
+                    using (var killProc = Process.Start(psi))
+                    {
+                        killProc?.WaitForExit(3000);
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (!proc.HasExited)
+                    proc.Kill();
+            }
+            catch { }
         }
 
         public static string ResolveDe4dotPath(string explicitPath = null)

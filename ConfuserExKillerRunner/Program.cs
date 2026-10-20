@@ -19,7 +19,12 @@ namespace ConfuserExKillerRunner
     {
         static int Main(string[] args)
         {
-            if (args.Length == 0 || args.Contains("-h") || args.Contains("--help"))
+            if (args != null && args.Length > 0 && args[0] == "--internal-worker")
+            {
+                return WorkerHost.Run(args);
+            }
+
+            if (args == null || args.Length == 0 || args.Contains("-h") || args.Contains("--help"))
             {
                 PrintUsage();
                 return 0;
@@ -27,6 +32,9 @@ namespace ConfuserExKillerRunner
 
             string assemblyPath = null;
             bool allowExecution = false;
+            int workerTimeoutMs = 30000;
+            bool allowTargetDeps = false;
+            var allowedDepDirs = new System.Collections.Generic.List<string>();
             string explicitDe4dotPath = null;
             bool skipDe4dot = false;
             bool skipNetDetect = false;
@@ -39,6 +47,19 @@ namespace ConfuserExKillerRunner
                 if (arg == "--allow-execution")
                 {
                     allowExecution = true;
+                }
+                else if (arg == "--worker-timeout" && i + 1 < args.Length && int.TryParse(args[i + 1], out int parsedTimeout))
+                {
+                    workerTimeoutMs = parsedTimeout;
+                    i++;
+                }
+                else if (arg == "--allow-target-deps")
+                {
+                    allowTargetDeps = true;
+                }
+                else if (arg == "--dep-dir" && i + 1 < args.Length)
+                {
+                    allowedDepDirs.Add(args[++i]);
                 }
                 else if (arg == "--no-de4dot")
                 {
@@ -85,6 +106,7 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("          ConfuserExKillerRunner - Deobfuscation Engine        ");
             Console.WriteLine("===============================================================");
             string originalInputPath = Path.GetFullPath(assemblyPath);
+            string targetDir = Path.GetDirectoryName(originalInputPath);
             Console.WriteLine($"[*] Target: {assemblyPath}");
             Console.WriteLine($"[*] Process Bitness: {(Environment.Is64BitProcess ? "64-bit" : "32-bit")}");
 
@@ -96,7 +118,7 @@ namespace ConfuserExKillerRunner
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine($"[!] WARNING: Target architecture ({archInfo.Architecture}) may be incompatible with current {(Environment.Is64BitProcess ? "64-bit" : "32-bit")} process.");
-                Console.WriteLine("[!] If dynamic execution is enabled, BadImageFormatException may occur.");
+                Console.WriteLine("[!] If dynamic execution is enabled, an architecture-adapted worker process will be resolved.");
                 Console.ResetColor();
             }
 
@@ -104,44 +126,10 @@ namespace ConfuserExKillerRunner
             string executionTempDir = Path.Combine(Path.GetTempPath(), "unconfuser_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(executionTempDir);
 
-            // Target dependency resolver (only active when dynamic execution is explicitly permitted)
-            string targetDir = Path.GetDirectoryName(originalInputPath);
-            AppDomain.CurrentDomain.AssemblyResolve += (sender, resolveArgs) =>
-            {
-                if (!allowExecution)
-                    return null;
-
-                try
-                {
-                    string simpleName = new AssemblyName(resolveArgs.Name).Name;
-                    if (string.IsNullOrEmpty(simpleName)) return null;
-
-                    // Do not load core or framework assemblies from target folder
-                    if (simpleName.Equals("mscorlib", StringComparison.OrdinalIgnoreCase) ||
-                        simpleName.StartsWith("System.", StringComparison.OrdinalIgnoreCase) ||
-                        simpleName.StartsWith("Microsoft.", StringComparison.OrdinalIgnoreCase) ||
-                        simpleName.Equals("dnlib", StringComparison.OrdinalIgnoreCase) ||
-                        simpleName.Equals("de4dot.blocks", StringComparison.OrdinalIgnoreCase))
-                    {
-                        return null;
-                    }
-
-                    string candidate = Path.Combine(targetDir, simpleName + ".dll");
-                    if (File.Exists(candidate))
-                        return Assembly.LoadFrom(candidate);
-                    candidate = Path.Combine(targetDir, simpleName + ".exe");
-                    if (File.Exists(candidate))
-                        return Assembly.LoadFrom(candidate);
-                }
-                catch { }
-                return null;
-            };
-
             try
             {
                 byte[] peImageOld = File.ReadAllBytes(assemblyPath);
                 byte[] peImage = (byte[])peImageOld.Clone();
-                Module reflModule = null;
 
                 NetDetectScanResult preScan = null;
                 if (!skipNetDetect)
@@ -190,22 +178,30 @@ namespace ConfuserExKillerRunner
                 }
                 else
                 {
-                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.ForegroundColor = ConsoleColor.Yellow;
                     Console.WriteLine();
-                    Console.WriteLine("[!] ==================== SECURITY WARNING: DYNAMIC EXECUTION ====================");
+                    Console.WriteLine("[!] ==================== SECURITY NOTICE: DYNAMIC EXECUTION ====================");
                     Console.WriteLine("[!] Dynamic execution mode (--allow-execution) is ACTIVE.");
-                    Console.WriteLine("[!] Target module code (<Module>.cctor and initializers) will be EXECUTED in this process.");
-                    Console.WriteLine("[!] THIS MODE DOES NOT PROVIDE AN OS SECURITY SANDBOX.");
-                    Console.WriteLine("[!] UNTRUSTED OR MALICIOUS SAMPLES MUST BE RUN IN AN ISOLATED VM WITHOUT NETWORK ACCESS.");
-                    Console.WriteLine("[!] ==============================================================================");
+                    Console.WriteLine("[!] Target code will be executed inside an ISOLATED WORKER SUBPROCESS.");
+                    Console.WriteLine("[!] A subprocess provides crash, fault, and timeout isolation, but is NOT an OS security sandbox.");
+                    Console.WriteLine("[!] Untrusted malware could still affect OS state within worker process rights.");
+                    Console.WriteLine("[!] For untrusted samples, run in a dedicated VM with network access disabled.");
+                    Console.WriteLine("[!] ===========================================================================");
                     Console.WriteLine();
                     Console.ResetColor();
 
-                    Console.WriteLine("[*] Step 1: Running AntiTamperKiller (Dynamic Execution Enabled)...");
+                    Console.WriteLine($"[*] Step 1: Running AntiTamperKiller (Isolated Worker Process, Timeout: {workerTimeoutMs}ms)...");
+                    var workerOpts = new WorkerOptions
+                    {
+                        TimeoutMs = workerTimeoutMs,
+                        AllowTargetDirectoryDependencies = allowTargetDeps,
+                        AllowedDependencyDirectories = allowedDepDirs,
+                        TempDirectory = executionTempDir
+                    };
+
                     try
                     {
-                        reflModule = Assembly.LoadFile(assemblyPath).ManifestModule;
-                        var atResult = AntiTamperKiller.Execute(reflModule, peImageOld);
+                        var atResult = WorkerClient.ExecuteAntiTamper(assemblyPath, peImageOld, workerOpts);
                         var processed = ProcessAntiTamperResult(atResult, peImageOld);
                         antiTamperDecrypted = processed.antiTamperDecrypted;
                         peImage = processed.effectivePeImage;
@@ -317,42 +313,126 @@ namespace ConfuserExKillerRunner
                 bool resourcesDecrypted = false;
                 bool constantsDecrypted = false;
 
-            // Step 2: Proxy + Constants via dnlib
-            Console.WriteLine("[*] Step 2: Running FieldRvaKiller, ProxyKiller, and ConstantKiller...");
-            using (var module = ModuleDefMD.Load(bytesToLoad))
-            {
-                if (AntiTamperKiller.DetectJitMode(module))
+                // Step 2: Dynamic passes via isolated worker (FieldRVA, Constants)
+                Console.WriteLine("[*] Step 2: Running FieldRvaKiller, ProxyKiller, and ConstantKiller...");
+                if (allowExecution)
                 {
-                    Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine("[!] WARNING: ConfuserEx JIT mode artifacts detected in module.");
-                    Console.ResetColor();
+                    var workerOpts = new WorkerOptions
+                    {
+                        TimeoutMs = workerTimeoutMs,
+                        AllowTargetDirectoryDependencies = allowTargetDeps,
+                        AllowedDependencyDirectories = allowedDepDirs,
+                        TempDirectory = executionTempDir
+                    };
+
+                    // Step 2.0a: FieldRVA Restoration
+                    var rvaResult = WorkerClient.ExecuteFieldRva(bytesToLoad, workerOpts);
+                    if (rvaResult.success && rvaResult.restoredCount > 0)
+                    {
+                        bytesToLoad = rvaResult.outputPe;
+                        Console.WriteLine($"[+] FieldRvaKiller: Restored {rvaResult.restoredCount} static field initializers via isolated worker");
+                    }
+
+                    // Step 2.0b: Constant Decryption via isolated worker
+                    var dynamicConst = WorkerClient.ExecuteConstants(bytesToLoad, workerOpts);
+                    if (dynamicConst.success && dynamicConst.decryptedCount > 0)
+                    {
+                        bytesToLoad = dynamicConst.outputPe;
+                        constantsDecrypted = dynamicConst.allResolved;
+                        Console.WriteLine($"[+] ConstantKiller: {dynamicConst.decryptedCount} constants decrypted (with stack evaluation)");
+                        if (!dynamicConst.allResolved)
+                            Console.WriteLine("[!] ConstantKiller: Partial decryption. Decrypter and buffer preserved.");
+                    }
                 }
 
-                if (reflModule != null)
+                using (var module = ModuleDefMD.Load(bytesToLoad))
                 {
-                    var rvaResult = FieldRvaKiller.Execute(module, reflModule, bytesToLoad);
-                    if (rvaResult.RestoredFieldsCount > 0)
-                        Console.WriteLine($"[+] FieldRvaKiller: Restored {rvaResult.RestoredFieldsCount} static field initializers ({string.Join(", ", rvaResult.RestoredFields)})");
-                }
+                    if (AntiTamperKiller.DetectJitMode(module))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine("[!] WARNING: ConfuserEx JIT mode artifacts detected in module.");
+                        Console.ResetColor();
+                    }
 
-                // Step 2.1: In-memory Resource Extraction & Re-Embedding (runs before method AST deletions)
-                Console.WriteLine("[*] Step 2.1: Running ResourceKiller (Extracting decrypted resources)...");
-                var resResult = ResourceKiller.Execute(module, reflModule);
-                resourcesDecrypted = resResult.ResourcesDecrypted;
-                if (resResult.HandlerStripped)
-                    Console.WriteLine("[+] ResourceKiller: Stripped runtime ResourceResolve hook");
-                if (resResult.ResourcesDecrypted)
-                    Console.WriteLine($"[+] ResourceKiller: Extracted & re-embedded {resResult.DecryptedResourcesCount} decrypted resources ({resResult.TotalManifestResourcesCount} total in manifest)");
+                    // Step 2.1: In-memory Resource Extraction & Re-Embedding (runs before method AST deletions)
+                    Console.WriteLine("[*] Step 2.1: Running ResourceKiller (Extracting decrypted resources)...");
+                    if (allowExecution)
+                    {
+                        var workerOpts = new WorkerOptions
+                        {
+                            TimeoutMs = workerTimeoutMs,
+                            AllowTargetDirectoryDependencies = allowTargetDeps,
+                            AllowedDependencyDirectories = allowedDepDirs,
+                            TempDirectory = executionTempDir
+                        };
 
-                // Step 2.2: ProxyKiller + ConstantKiller
-                int proxyCount = ProxyKillerImpl.Execute(module, false, true);
-                Console.WriteLine($"[+] ProxyKiller: {proxyCount} proxy methods/delegates inlined");
+                        string resInputPath = assemblyPath;
+                        if (antiTamperDecrypted)
+                        {
+                            resInputPath = Path.Combine(executionTempDir, $"worker_at_decrypted_{Guid.NewGuid():N}.dll");
+                            File.WriteAllBytes(resInputPath, bytesToLoad);
+                        }
 
-                var constResult = ConstantKillerImpl.Execute(module, reflModule);
-                constantsDecrypted = constResult.AllReferencesResolved;
-                Console.WriteLine($"[+] ConstantKiller: {constResult.DecryptedConstantsCount} constants decrypted (with stack evaluation)");
-                if (constResult.TotalReferencesCount > 0 && !constResult.AllReferencesResolved)
-                    Console.WriteLine($"[!] ConstantKiller: Partial decryption ({constResult.ResolvedReferencesCount}/{constResult.TotalReferencesCount} references rewritten). Decrypter and buffer preserved.");
+                        try
+                        {
+                            var dynamicRes = WorkerClient.ExecuteResourceExtraction(resInputPath, workerOpts);
+                            if (dynamicRes.Success && dynamicRes.DecryptedResourceContainer != null && dynamicRes.DecryptedResourceContainer.Length > 0)
+                            {
+                                using (var resMod = ModuleDefMD.Load(dynamicRes.DecryptedResourceContainer))
+                                {
+                                    int reEmbeddedCount = 0;
+                                    foreach (var r in resMod.Resources)
+                                    {
+                                        var existing = module.Resources.Find(r.Name);
+                                        if (existing != null) module.Resources.Remove(existing);
+
+                                        if (r is EmbeddedResource er)
+                                        {
+                                            module.Resources.Add(new EmbeddedResource(er.Name, er.GetResourceData(), er.Attributes));
+                                        }
+                                        else
+                                        {
+                                            module.Resources.Add(r);
+                                        }
+                                        reEmbeddedCount++;
+                                    }
+
+                                    resourcesDecrypted = true;
+                                    Console.WriteLine($"[+] ResourceKiller: Extracted & re-embedded {reEmbeddedCount} decrypted resources via isolated worker ({module.Resources.Count} total in manifest)");
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Tool.Logger.LogWarning($"[ResourceKiller] Re-embedding decrypted resources from worker failed: {ex.Message}");
+                        }
+                        finally
+                        {
+                            if (antiTamperDecrypted && resInputPath != assemblyPath)
+                            {
+                                try { File.Delete(resInputPath); } catch { }
+                            }
+                        }
+                    }
+
+                    var resResult = ResourceKiller.Execute(module, reflModule: null);
+                    if (resourcesDecrypted)
+                        resResult.ResourcesDecrypted = true;
+                    if (resResult.HandlerStripped)
+                        Console.WriteLine("[+] ResourceKiller: Stripped runtime ResourceResolve hook");
+
+                    // Step 2.2: ProxyKiller + ConstantKiller
+                    int proxyCount = ProxyKillerImpl.Execute(module, false, true);
+                    Console.WriteLine($"[+] ProxyKiller: {proxyCount} proxy methods/delegates inlined");
+
+                    if (!constantsDecrypted)
+                    {
+                        var constResult = ConstantKillerImpl.Execute(module, reflModule: null);
+                        constantsDecrypted = constResult.AllReferencesResolved;
+                        Console.WriteLine($"[+] ConstantKiller: {constResult.DecryptedConstantsCount} constants decrypted (with stack evaluation)");
+                        if (constResult.TotalReferencesCount > 0 && !constResult.AllReferencesResolved)
+                            Console.WriteLine($"[!] ConstantKiller: Partial decryption ({constResult.ResolvedReferencesCount}/{constResult.TotalReferencesCount} references rewritten). Decrypter and buffer preserved.");
+                    }
 
                 // Step 3: Protector hook stripping
                 Console.WriteLine("[*] Step 3: Cleaning Protector Hooks...");
@@ -583,8 +663,12 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("Usage: ConfuserExKillerRunner.exe <path_to_assembly> [options]");
             Console.WriteLine();
             Console.WriteLine("Options:");
-            Console.WriteLine("  --allow-execution       Allow target module reflection execution (AntiTamper / Constants)");
-            Console.WriteLine("                          CAUTION: Runs untrusted <Module>.cctor in host context!");
+            Console.WriteLine("  --allow-execution       Allow target module execution via isolated worker process (AntiTamper / Resources)");
+            Console.WriteLine("                          Spawns an isolated worker process with strict timeout and process tree termination.");
+            Console.WriteLine("                          NOTE: Subprocess isolation is NOT an OS security sandbox. Run untrusted samples in a VM.");
+            Console.WriteLine("  --worker-timeout <ms>   Timeout in milliseconds for isolated worker process (default: 30000)");
+            Console.WriteLine("  --allow-target-deps     Permit worker to resolve dependencies from target assembly directory");
+            Console.WriteLine("  --dep-dir <path>        Add explicitly authorized directory for dependency resolution");
             Console.WriteLine("  -o, --output <path>     Specify custom destination path for final cleaned assembly");
             Console.WriteLine("  -d, --de4dot <path>     Specify explicit path to de4dot-cex executable");
             Console.WriteLine("  --no-de4dot             Skip de4dot external process pass");
