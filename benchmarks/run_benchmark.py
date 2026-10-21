@@ -206,7 +206,7 @@ def parse_runner_metrics(stdout: str) -> Dict[str, Any]:
             parts = line_clean.split("Extracted & re-embedded")[-1].strip().split()
             if parts and parts[0].isdigit():
                 metrics["resources_extracted"] = int(parts[0])
-        elif "[+] CompressorUnpacker: Successfully unpacked" in line_clean:
+        elif "[+] CompressorUnpacker" in line_clean and "Successfully unpacked" in line_clean:
             metrics["compressor_unpacked"] = True
         elif "[+] CleanerKiller: Stripped" in line_clean:
             parts = line_clean.split("Stripped")[-1].strip().split()

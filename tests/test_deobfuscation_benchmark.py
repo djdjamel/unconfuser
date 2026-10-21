@@ -213,6 +213,12 @@ def test_real_protector_integration_and_skip_logic(runner_path, expected_baselin
         assert real_case["audit_status"] == "CLEAN"
         v_data = real_case.get("structural_verification", {})
         assert v_data.get("verified") is True, f"Real ConfuserEx structural verification failed: {v_data}"
+        verified_ts = v_data.get("verified_transformations", [])
+        assert "assembly_identity_preserved" in verified_ts
+        assert "types_intact" in verified_ts
+        assert "constants_decrypted" in verified_ts
+        assert "resources_extracted" in verified_ts
+        assert "module_initializer_clean" in verified_ts
     else:
         pytest.fail(f"Real ConfuserEx protector integration failed with verdict {real_case['verdict']}: {real_case.get('error')}")
 

@@ -354,15 +354,36 @@ namespace ConfuserExKillerRunner.Core
                     return res;
                 }
 
+                if (File.Exists(tempMetaOut))
+                {
+                    try
+                    {
+                        string metaContent = File.ReadAllText(tempMetaOut);
+                        var msgMatch = System.Text.RegularExpressions.Regex.Match(metaContent, "\"Message\"\\s*:\\s*\"([^\"]+)\"");
+                        if (msgMatch.Success && !string.IsNullOrWhiteSpace(msgMatch.Groups[1].Value))
+                        {
+                            res.Message = msgMatch.Groups[1].Value;
+                        }
+                        var epMatch = System.Text.RegularExpressions.Regex.Match(metaContent, "\"EntryPointToken\"\\s*:\\s*\"0x([0-9a-fA-F]+)\"");
+                        if (epMatch.Success && uint.TryParse(epMatch.Groups[1].Value, System.Globalization.NumberStyles.HexNumber, null, out uint epToken))
+                        {
+                            res.RecoveredEntryPointToken = epToken;
+                        }
+                    }
+                    catch { }
+                }
+
                 if (File.Exists(tempPeOut) && new FileInfo(tempPeOut).Length > 0)
                 {
                     res.UnpackedAssemblyBytes = File.ReadAllBytes(tempPeOut);
                     res.Success = true;
-                    res.Message = "Compressor unpacked via isolated worker.";
+                    if (string.IsNullOrEmpty(res.Message))
+                        res.Message = "Compressor unpacked via isolated worker.";
                 }
                 else
                 {
-                    res.Message = $"Compressor worker finished without output: {procResult.StandardError.Trim()}";
+                    if (string.IsNullOrEmpty(res.Message))
+                        res.Message = $"Compressor worker finished without output: {procResult.StandardError.Trim()}";
                 }
             }
             catch (Exception ex)

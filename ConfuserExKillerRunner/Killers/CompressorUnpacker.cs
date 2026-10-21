@@ -183,7 +183,7 @@ namespace ConfuserExKillerRunner.Killers
             }
 
             // Stage 2: Dynamic method-rewrite unpacking fallback if static extraction didn't yield a PE
-            if (unpackedBytes == null && isPackedByFileTable && module.EntryPoint != null && module.EntryPoint.HasBody)
+            if (unpackedBytes == null && isConfuserExStub && module.EntryPoint != null && module.EntryPoint.HasBody)
             {
                 if (!allowExecution)
                 {
@@ -266,7 +266,7 @@ namespace ConfuserExKillerRunner.Killers
 
             // Return "Detected but not unpacked" state safely
             result.SuccessfullyUnpacked = false;
-            result.CompressorType = isPackedByFileTable ? "ConfuserEx Compressor (FileTable)" : "ConfuserEx Compressor (Signature)";
+            result.CompressorType = isPackedByFileTable ? "ConfuserEx Compressor (FileTable)" : (entryPointToken != 0 ? "ConfuserEx Compressor (Signature)" : "ConfuserEx Compressor (Resource Payload)");
             result.Message = "ConfuserEx Compressor stub detected, but payload could not be unpacked safely (requires unsupported cipher, LZMA format, or dynamic execution). Target assembly preserved.";
             Logger.LogWarning($"[CompressorUnpacker] {result.Message}");
             return result;

@@ -34,7 +34,7 @@
 | Anti-Tamper & Cleaner Hooks | `aba42f14` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: cctor_hook_removed, protector_method_pruned | **`SYNTHETIC_PASS`** |
 | Combined Multi-Protection | `d8f0de14` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: proxies_inlined, cflow_deadcode_stripped, cctor_antitamper_hook_stripped<br>Unverified: constants_decrypted_and_inlined | **`SYNTHETIC_PARTIAL`** |
 | Generics & Exception Edges | `a919c594` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: generic_method_signature_intact, local_variables_structure_preserved, exception_handlers_try_and_handler_ranges_verified, baseline_exception_handlers_matched | **`SYNTHETIC_PASS`** |
-| ConfuserEx yck1509/ConfuserEx v1.0.0 (commit 3c9c29d9daf2f1259edf69054c5693d5d225a980) (Constants, Ctrl Flow, Ref Proxy, Resources) | `fd8f0c53` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: assembly_identity_preserved, types_intact, constants_decrypted, resources_extracted, module_initializer_clean | **`REAL_PROTECTOR_PASS`** |
+| ConfuserEx yck1509/ConfuserEx v1.0.0 (commit 3c9c29d9daf2f1259edf69054c5693d5d225a980) (Constants, Ctrl Flow, Ref Proxy, Resources) | `4fdd2cbc` | Yes | 0 | 0 | CLEAN | Exact Match | Passed: assembly_identity_preserved, types_intact, constants_decrypted, resources_extracted, module_initializer_clean | **`REAL_PROTECTOR_PASS`** |
 
 ## Detailed Structural Assertions & Findings
 

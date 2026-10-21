@@ -170,18 +170,65 @@ namespace ConfuserExKillerRunner
                 bool compressorWasUnpacked = false;
                 try
                 {
+                    bool isCompressorStub = false;
                     using (var probeMod = ModuleDefMD.Load(peImage))
                     {
-                        var unpackResult = CompressorUnpacker.TryUnpack(probeMod, peImage, allowExecution);
-                        if (unpackResult.SuccessfullyUnpacked)
+                        var staticResult = CompressorUnpacker.TryUnpack(probeMod, peImage, allowExecution: false);
+                        if (staticResult.SuccessfullyUnpacked && staticResult.UnpackedAssemblyBytes != null)
                         {
                             compressorWasUnpacked = true;
-                            Console.WriteLine($"[+] CompressorUnpacker: {unpackResult.Message}");
-                            peImage = unpackResult.UnpackedAssemblyBytes;
+                            Console.WriteLine($"[+] CompressorUnpacker: {staticResult.Message}");
+                            peImage = staticResult.UnpackedAssemblyBytes;
                             peImageOld = (byte[])peImage.Clone();
                             string unwrappedPath = Path.Combine(executionTempDir, Path.GetFileNameWithoutExtension(assemblyPath) + ".unwrapped" + Path.GetExtension(assemblyPath));
                             File.WriteAllBytes(unwrappedPath, peImage);
                             assemblyPath = unwrappedPath;
+                        }
+                        else if (staticResult.Classification == PackerClassification.ConfuserExCompressorStub || staticResult.IsCompressed)
+                        {
+                            isCompressorStub = true;
+                        }
+                    }
+
+                    if (!compressorWasUnpacked && isCompressorStub)
+                    {
+                        if (!allowExecution)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Yellow;
+                            Console.WriteLine("[!] ConfuserEx Compressor stub detected, but static unpacking failed.");
+                            Console.WriteLine("[!] Dynamic compressor unpacking requires '--allow-execution'. Target assembly preserved.");
+                            Console.ResetColor();
+                        }
+                        else
+                        {
+                            Console.WriteLine($"[*] Stage 0: ConfuserEx Compressor stub detected. Spawning isolated worker for dynamic unpacking (Timeout: {workerTimeoutMs}ms)...");
+                            var workerOpts = new WorkerOptions
+                            {
+                                TimeoutMs = workerTimeoutMs,
+                                AllowTargetDirectoryDependencies = allowTargetDeps,
+                                AllowedDependencyDirectories = allowedDepDirs,
+                                TempDirectory = executionTempDir
+                            };
+
+                            var dynamicResult = WorkerClient.ExecuteCompressorUnpack(assemblyPath, workerOpts);
+                            if (dynamicResult != null && dynamicResult.Success && dynamicResult.UnpackedAssemblyBytes != null)
+                            {
+                                compressorWasUnpacked = true;
+                                Console.WriteLine($"[+] CompressorUnpacker: {dynamicResult.Message}");
+                                peImage = dynamicResult.UnpackedAssemblyBytes;
+                                peImageOld = (byte[])peImage.Clone();
+                                string unwrappedPath = Path.Combine(executionTempDir, Path.GetFileNameWithoutExtension(assemblyPath) + ".unwrapped" + Path.GetExtension(assemblyPath));
+                                File.WriteAllBytes(unwrappedPath, peImage);
+                                assemblyPath = unwrappedPath;
+                            }
+                            else
+                            {
+                                string msg = dynamicResult?.Message ?? "Dynamic compressor unpacking returned no payload";
+                                Console.ForegroundColor = ConsoleColor.Yellow;
+                                Console.WriteLine($"[!] CompressorUnpacker (Worker): {msg}. Target assembly preserved.");
+                                Console.ResetColor();
+                                exceptionsAndRollbacks.Add($"Compressor dynamic unpack failed: {msg}");
+                            }
                         }
                     }
                 }

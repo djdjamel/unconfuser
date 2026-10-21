@@ -21,6 +21,7 @@ from benchmarks.prepare_real_fixture import (
     prepare_real_confuserex_fixture,
     get_manifest_path,
     compute_file_sha256,
+    compute_source_code_hash,
     EXPECTED_CLI_SHA256,
 )
 
@@ -274,4 +275,61 @@ def test_provenance_fails_when_source_code_modified(mock_fixture_env, monkeypatc
     )
     assert not is_valid
     assert "source code modified" in reason.lower()
+
+
+def test_provenance_fails_when_source_code_cannot_be_computed(mock_fixture_env, monkeypatch):
+    """Provenance check must strictly fail if source_code is tracked in manifest but source files/csproj are missing."""
+    env = mock_fixture_env
+    mock_cli_sha = compute_file_sha256(env["cli_file"])
+    monkeypatch.setattr("benchmarks.prepare_real_fixture.EXPECTED_CLI_SHA256", mock_cli_sha)
+
+    # Create mock project files
+    proj_file = env["work_dir"] / "BenignSample.csproj"
+    proj_file.write_text("<Project></Project>", encoding="utf-8")
+    cs_file = env["work_dir"] / "Program.cs"
+    cs_file.write_text("class Program {}", encoding="utf-8")
+
+    manifest_data = create_fixture_manifest(
+        target_output_file=env["fixture_file"],
+        source_module=env["source_file"],
+        cli_path=env["cli_file"],
+        profile_path=env["profile_file"],
+    )
+    save_fixture_manifest(env["manifest_file"], manifest_data)
+    assert "source_code" in manifest_data
+
+    # Now delete the .csproj so compute_source_code_hash returns None
+    proj_file.unlink()
+    cs_file.unlink()
+
+    is_valid, reason = verify_fixture_provenance(
+        env["fixture_file"], env["manifest_file"], env["source_file"], env["cli_file"], env["profile_file"]
+    )
+    assert not is_valid
+    assert "cannot verify source code provenance" in reason.lower()
+
+
+def test_source_code_hash_recursive_and_subdirectory_files(mock_fixture_env):
+    """Verifies that compute_source_code_hash recursively scans subdirectories and is sensitive to changes therein."""
+    env = mock_fixture_env
+    proj_file = env["work_dir"] / "BenignSample.csproj"
+    proj_file.write_text("<Project></Project>", encoding="utf-8")
+    sub_dir = env["work_dir"] / "Services" / "Helpers"
+    sub_dir.mkdir(parents=True)
+    sub_cs = sub_dir / "MathHelper.cs"
+    sub_cs.write_text("class MathHelper {}", encoding="utf-8")
+
+    res = compute_source_code_hash(env["source_file"])
+    assert res is not None
+    hash1, files1 = res
+    assert "Services/Helpers/MathHelper.cs" in files1
+    assert "BenignSample.csproj" in files1
+
+    # Modifying the subdirectory file changes the hash
+    sub_cs.write_text("class MathHelper { public int Add(int a, int b) => a + b; }", encoding="utf-8")
+    res2 = compute_source_code_hash(env["source_file"])
+    assert res2 is not None
+    hash2, files2 = res2
+    assert hash1 != hash2
+
 

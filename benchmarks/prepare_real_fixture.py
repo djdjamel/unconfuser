@@ -43,7 +43,7 @@ def get_confuser_cli_path() -> Path:
 
 
 def compute_source_code_hash(source_module: Path) -> Optional[Tuple[str, List[str]]]:
-    """Computes a deterministic composite hash of all C# source files for the module project."""
+    """Computes a deterministic composite hash of all C# source and project files for the module project."""
     curr = source_module.parent
     proj_dir = None
     for _ in range(4):
@@ -57,20 +57,26 @@ def compute_source_code_hash(source_module: Path) -> Optional[Tuple[str, List[st
 
     sources = []
     for ext in ("*.cs", "*.csproj", "*.txt"):
-        for f in proj_dir.glob(ext):
+        for f in proj_dir.rglob(ext):
             if f.is_file():
+                parts = f.relative_to(proj_dir).parts
+                if "bin" in parts or "obj" in parts:
+                    continue
                 sources.append(f)
 
     if not sources:
         return None
 
-    sources.sort(key=lambda p: p.name)
+    sources.sort(key=lambda p: p.relative_to(proj_dir).as_posix())
     hasher = hashlib.sha256()
+    relative_names = []
     for s in sources:
-        hasher.update(s.name.encode("utf-8"))
+        rel_posix = s.relative_to(proj_dir).as_posix()
+        relative_names.append(rel_posix)
+        hasher.update(rel_posix.encode("utf-8"))
         hasher.update(s.read_bytes())
 
-    return hasher.hexdigest(), [s.name for s in sources]
+    return hasher.hexdigest(), relative_names
 
 
 def ensure_benign_sample(force_rebuild: bool = False) -> Path:
@@ -84,10 +90,16 @@ def ensure_benign_sample(force_rebuild: bool = False) -> Path:
     needs_build = force_rebuild or not target_bin.exists()
     if not needs_build and target_bin.exists():
         bin_mtime = target_bin.stat().st_mtime
-        for s in benign_dir.glob("*.cs"):
-            if s.stat().st_mtime > bin_mtime:
-                print(f"[*] Source file {s.name} is newer than binary {target_bin.name}. Rebuilding...")
-                needs_build = True
+        for ext in ("*.cs", "*.csproj", "*.txt"):
+            for s in benign_dir.rglob(ext):
+                parts = s.relative_to(benign_dir).parts
+                if "bin" in parts or "obj" in parts:
+                    continue
+                if s.stat().st_mtime > bin_mtime:
+                    print(f"[*] Source file {s.name} is newer than binary {target_bin.name}. Rebuilding...")
+                    needs_build = True
+                    break
+            if needs_build:
                 break
 
     if needs_build:
@@ -221,11 +233,12 @@ def verify_fixture_provenance(
     # 3.5 Validate source code hash if tracked in manifest
     if "source_code" in manifest:
         src_code_info = compute_source_code_hash(source_module)
-        if src_code_info:
-            current_sources_sha, _ = src_code_info
-            manifest_sources_sha = str(manifest["source_code"].get("sources_sha256", "")).lower()
-            if current_sources_sha != manifest_sources_sha:
-                return False, f"Source code modified (current: {current_sources_sha}, manifest: {manifest_sources_sha})"
+        if not src_code_info:
+            return False, "Cannot verify source code provenance: project directory or sources missing"
+        current_sources_sha, _ = src_code_info
+        manifest_sources_sha = str(manifest["source_code"].get("sources_sha256", "")).lower()
+        if current_sources_sha != manifest_sources_sha:
+            return False, f"Source code modified (current: {current_sources_sha}, manifest: {manifest_sources_sha})"
 
     # 4. Validate protection profile hash
     if not profile_path.exists():
