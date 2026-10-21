@@ -60,7 +60,7 @@ namespace ConfuserExKillerRunner
                 {
                     allowTargetDeps = true;
                 }
-                else if (arg == "--dep-dir" && i + 1 < args.Length)
+                else if ((arg == "--dep-dir" || arg == "--allowed-dep-dir") && i + 1 < args.Length)
                 {
                     allowedDepDirs.Add(args[++i]);
                 }
@@ -423,6 +423,29 @@ namespace ConfuserExKillerRunner
                     }
                 }
                 stepTimings["Stage1_AntiTamper_HeaderRepair"] = swStage1.ElapsedMilliseconds;
+
+                // If Anti-Tamper decrypted methods in a custom PE section, normalize the PE layout through dnlib
+                // so all method bodies are placed in standard .text section before passing to isolated worker processes.
+                if (antiTamperDecrypted)
+                {
+                    try
+                    {
+                        using (var normMod = ModuleDefMD.Load(bytesToLoad))
+                        using (var ms = new MemoryStream())
+                        {
+                            var writerOpts = new ModuleWriterOptions(normMod)
+                            {
+                                Logger = DummyLogger.NoThrowInstance
+                            };
+                            normMod.Write(ms, writerOpts);
+                            bytesToLoad = ms.ToArray();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Tool.Logger.LogWarning($"[AntiTamper] Pre-worker PE normalization failed: {ex.Message}");
+                    }
+                }
 
                 string fileExt = Path.GetExtension(assemblyPath);
                 string baseName = Path.GetFileNameWithoutExtension(assemblyPath);

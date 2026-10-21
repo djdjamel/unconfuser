@@ -138,10 +138,11 @@ namespace ConfuserExTools.ConstantKiller {
 							if (!(instruction.Operand is MethodSpec operandMethod))
 								continue;
 
-							if (!(operandMethod.Method is MethodDef operandMethodDef))
-								continue;
+							MethodDef operandMethodDef = operandMethod.Method as MethodDef;
+							if (operandMethodDef == null && operandMethod.Method is MemberRef mr)
+								operandMethodDef = mr.ResolveMethodDef();
 
-							if (!decrypters.Contains(operandMethodDef))
+							if (operandMethodDef == null || !decrypters.Contains(operandMethodDef))
 								continue;
 
 							if (!TryEvaluateKey(instructions, i, out int key, out int exprStart)) {
@@ -172,7 +173,18 @@ namespace ConfuserExTools.ConstantKiller {
 
 							object value;
 							try {
-								var reflMethod = reflModule.ResolveMethod(operandMethod.MDToken.ToInt32());
+								MethodBase reflMethod = null;
+								if (operandMethod.MDToken.Raw != 0) {
+									try { reflMethod = reflModule.ResolveMethod(operandMethod.MDToken.ToInt32()); } catch { }
+								}
+								if (reflMethod == null && operandMethodDef != null && operandMethodDef.MDToken.Raw != 0) {
+									try { reflMethod = reflModule.ResolveMethod(operandMethodDef.MDToken.ToInt32()); } catch { }
+								}
+								if (reflMethod == null) {
+									Logger.LogError($"[0x{method.MDToken.Raw:X8}] Unable to resolve reflection method for constant decrypter");
+									continue;
+								}
+
 								if (reflMethod is MethodInfo mi && mi.IsGenericMethodDefinition) {
 									Type genericType = (elementType == ElementType.SZArray) ? reflType.MakeArrayType() : reflType;
 									mi = mi.MakeGenericMethod(genericType);

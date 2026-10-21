@@ -266,12 +266,24 @@ namespace ConfuserExKillerRunner.Killers
                 if (inst.Operand is IMethod called)
                 {
                     string fullName = called.FullName;
+                    string pinvokeName = null;
+                    var calledDef = called.ResolveMethodDef() ?? (called as MethodDef);
+                    if (calledDef != null && calledDef.IsPinvokeImpl && calledDef.ImplMap != null)
+                    {
+                        pinvokeName = calledDef.ImplMap.Name?.String ?? calledDef.Name?.String;
+                    }
+
                     if (fullName.IndexOf("IsAttached", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         fullName.IndexOf("CheckRemoteDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         fullName.IndexOf("IsDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        fullName.IndexOf("OutputDebugString", StringComparison.OrdinalIgnoreCase) >= 0)
+                        fullName.IndexOf("OutputDebugString", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        string.Equals(pinvokeName, "IsDebuggerPresent", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(pinvokeName, "CheckRemoteDebuggerPresent", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(pinvokeName, "OutputDebugStringA", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(pinvokeName, "OutputDebugStringW", StringComparison.OrdinalIgnoreCase))
                         hasDebuggerCheck = true;
-                    if (fullName.IndexOf("VirtualProtect", StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (fullName.IndexOf("VirtualProtect", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        string.Equals(pinvokeName, "VirtualProtect", StringComparison.OrdinalIgnoreCase))
                         hasVirtualProtect = true;
                     if (fullName.IndexOf("add_ResourceResolve", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         fullName.IndexOf("add_AssemblyResolve", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -279,7 +291,10 @@ namespace ConfuserExKillerRunner.Killers
                     if (fullName.IndexOf("InitializeArray", StringComparison.OrdinalIgnoreCase) >= 0)
                         hasInitializeArray = true;
                     if (fullName.IndexOf("ZeroMemory", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        fullName.IndexOf("memset", StringComparison.OrdinalIgnoreCase) >= 0)
+                        fullName.IndexOf("memset", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        string.Equals(pinvokeName, "RtlZeroMemory", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(pinvokeName, "ZeroMemory", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(pinvokeName, "memset", StringComparison.OrdinalIgnoreCase))
                     {
                         hasPointerWrite = true;
                     }

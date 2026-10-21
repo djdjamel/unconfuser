@@ -282,7 +282,6 @@ namespace ConfuserExKillerRunner.Core
                 Assembly loadedAsm = Assembly.LoadFile(inputPath);
                 using (var module = ModuleDefMD.Load(inputPath))
                 {
-                    ProxyKillerImpl.Execute(module, true, false);
                     var constResult = ConstantKillerImpl.Execute(module, loadedAsm.ManifestModule);
 
                     using (var ms = new MemoryStream())
