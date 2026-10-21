@@ -106,6 +106,8 @@ namespace ConfuserExKillerRunner.Tests
             using (var mod = new ModuleDefUser("ResourceSample", Guid.NewGuid()))
             {
                 mod.Kind = ModuleKind.Dll;
+                var asm = new AssemblyDefUser("ResourceSample", new Version(1, 0, 0, 0));
+                asm.Modules.Add(mod);
                 var type = new TypeDefUser("ResourceSample", "ConfigHolder", mod.CorLibTypes.Object.TypeDefOrRef);
                 mod.Types.Add(type);
 
@@ -263,6 +265,8 @@ namespace ConfuserExKillerRunner.Tests
             using (var mod = new ModuleDefUser("ForeignSample", Guid.NewGuid()))
             {
                 mod.Kind = ModuleKind.Dll;
+                var asm = new AssemblyDefUser("ForeignSample", new Version(1, 0, 0, 0));
+                asm.Modules.Add(mod);
                 var type = new TypeDefUser("Sample", "BusinessLogic", mod.CorLibTypes.Object.TypeDefOrRef);
                 mod.Types.Add(type);
 

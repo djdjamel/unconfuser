@@ -102,5 +102,84 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal("None", result.PrimaryDetector);
             Assert.Equal(0, result.VerdictScore);
         }
+
+        [Fact]
+        public void Compare_ScoreIncrease_CorrectInterpretationAndExposedSignatures()
+        {
+            var preScan = new NetDetectScanResult
+            {
+                Available = true,
+                VerdictScore = 9,
+                PrimaryDetector = "ConfuserEx",
+                Confidence = "HIGH",
+                GenericTechniques = new System.Collections.Generic.List<string> { "Anti-Tamper", "Compressor" }
+            };
+
+            var postScan = new NetDetectScanResult
+            {
+                Available = true,
+                VerdictScore = 14,
+                PrimaryDetector = "ConfuserEx",
+                Confidence = "HIGH",
+                GenericTechniques = new System.Collections.Generic.List<string> { "Anti-Tamper", "Constants Protection", "Control Flow Switch" }
+            };
+
+            var comp = NetDetectIntegration.Compare(preScan, postScan);
+
+            Assert.True(comp.Available);
+            Assert.Equal(9, comp.PreScanScore);
+            Assert.Equal(14, comp.PostScanScore);
+            Assert.Equal(5, comp.ScoreDelta);
+            Assert.True(comp.ScoreDeltaPercent > 55.0 && comp.ScoreDeltaPercent < 56.0);
+            Assert.Contains("Compressor", comp.ResolvedSignatures);
+            Assert.Contains("Constants Protection", comp.ExposedSignatures);
+            Assert.Contains("Control Flow Switch", comp.ExposedSignatures);
+            Assert.Contains("Anti-Tamper", comp.PreservedSignatures);
+            Assert.Contains("internal signatures newly exposed after unpacking outer protection layers", comp.IndicatorInterpretation);
+        }
+
+        [Fact]
+        public void Compare_ScoreReduction_CorrectInterpretationAndResolvedSignatures()
+        {
+            var preScan = new NetDetectScanResult
+            {
+                Available = true,
+                VerdictScore = 85,
+                PrimaryDetector = "ConfuserEx",
+                Confidence = "HIGH",
+                GenericTechniques = new System.Collections.Generic.List<string> { "Anti-Tamper", "Constants Protection", "Control Flow Switch" }
+            };
+
+            var postScan = new NetDetectScanResult
+            {
+                Available = true,
+                VerdictScore = 0,
+                PrimaryDetector = "None",
+                Confidence = "LOW",
+                GenericTechniques = new System.Collections.Generic.List<string>()
+            };
+
+            var comp = NetDetectIntegration.Compare(preScan, postScan);
+
+            Assert.True(comp.Available);
+            Assert.Equal(85, comp.PreScanScore);
+            Assert.Equal(0, comp.PostScanScore);
+            Assert.Equal(-85, comp.ScoreDelta);
+            Assert.Equal(-100.0, comp.ScoreDeltaPercent);
+            Assert.Equal(3, comp.ResolvedSignatures.Count);
+            Assert.Empty(comp.ExposedSignatures);
+            Assert.Empty(comp.PreservedSignatures);
+            Assert.Contains("reflects successful stripping", comp.IndicatorInterpretation);
+        }
+
+        [Fact]
+        public void Compare_UnavailableScan_ReturnsAvailableFalse()
+        {
+            var preScan = new NetDetectScanResult { Available = false };
+            var postScan = new NetDetectScanResult { Available = true, VerdictScore = 10 };
+
+            var comp = NetDetectIntegration.Compare(preScan, postScan);
+            Assert.False(comp.Available);
+        }
     }
 }

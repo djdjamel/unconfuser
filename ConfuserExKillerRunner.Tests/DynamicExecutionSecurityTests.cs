@@ -176,6 +176,119 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Null(result.UnpackedAssemblyBytes);
         }
 
+        [Fact]
+        public void WorkerClient_ExecuteConstants_WithBenignAssembly_ReturnsSuccessAndMessageWithoutException()
+        {
+            string asmPath = Path.Combine(_testDir, "BenignConstantsTarget.dll");
+            CreateSimpleAssembly(asmPath);
+
+            byte[] bytes = File.ReadAllBytes(asmPath);
+            var opts = new WorkerOptions
+            {
+                TimeoutMs = 10000,
+                TempDirectory = _testDir
+            };
+
+            var result = WorkerClient.ExecuteConstants(bytes, opts);
+
+            Assert.True(result.success);
+            Assert.Equal(0, result.decryptedCount);
+            Assert.False(string.IsNullOrWhiteSpace(result.message));
+            Assert.NotNull(result.outputPe);
+        }
+
+        [Fact]
+        public void WorkerClient_ExecuteConstants_WhenWorkerTimesOut_ReturnsFailureAndTimeoutMessage()
+        {
+            string asmPath = Path.Combine(_testDir, "HangingConstantsTarget.dll");
+            CreateConstantDecrypterAssembly(asmPath, hanging: true);
+
+            byte[] bytes = File.ReadAllBytes(asmPath);
+            var opts = new WorkerOptions
+            {
+                TimeoutMs = 1500,
+                TempDirectory = _testDir
+            };
+
+            var result = WorkerClient.ExecuteConstants(bytes, opts);
+
+            Assert.False(result.success);
+            Assert.Equal(0, result.decryptedCount);
+            Assert.Contains("timed out", result.message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public void WorkerClient_ExecuteConstants_WhenTargetCrashes_ReturnsFailureAndErrorMessage()
+        {
+            string asmPath = Path.Combine(_testDir, "CrashingConstantsTarget.dll");
+            CreateConstantDecrypterAssembly(asmPath, exitCode: 42);
+
+            byte[] bytes = File.ReadAllBytes(asmPath);
+            var opts = new WorkerOptions
+            {
+                TimeoutMs = 5000,
+                TempDirectory = _testDir
+            };
+
+            var result = WorkerClient.ExecuteConstants(bytes, opts);
+
+            Assert.False(result.success);
+            Assert.False(string.IsNullOrWhiteSpace(result.message));
+        }
+
+        private static void CreateConstantDecrypterAssembly(string path, bool hanging = false, int? exitCode = null)
+        {
+            var asm = new AssemblyDefUser("ConstTargetAsm", new Version(1, 0, 0, 0));
+            var mod = new ModuleDefUser("ConstTarget.dll");
+            asm.Modules.Add(mod);
+            mod.Kind = ModuleKind.Dll;
+
+            var decrypterSig = MethodSig.CreateStaticGeneric(1, new GenericMVar(0), mod.CorLibTypes.UInt32);
+            var decrypterDef = new MethodDefUser("Decrypter", decrypterSig,
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static);
+            decrypterDef.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+            decrypterDef.Body = new CilBody();
+
+            if (hanging)
+            {
+                var loopTarget = Instruction.Create(OpCodes.Nop);
+                decrypterDef.Body.Instructions.Add(loopTarget);
+                decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Br, loopTarget));
+                decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+                decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            }
+            else if (exitCode.HasValue)
+            {
+                var exitMethod = mod.Import(typeof(Environment).GetMethod("Exit", new[] { typeof(int) }));
+                decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, exitCode.Value));
+                decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Call, exitMethod));
+                decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+                decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            }
+            else
+            {
+                decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_4));
+                decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Newarr, mod.CorLibTypes.Byte.TypeDefOrRef));
+                decrypterDef.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            }
+            mod.GlobalType.Methods.Add(decrypterDef);
+
+            var userType = new TypeDefUser("UserType", mod.CorLibTypes.Object.TypeDefOrRef);
+            mod.Types.Add(userType);
+            var caller = new MethodDefUser("Run", MethodSig.CreateStatic(mod.CorLibTypes.Void));
+            caller.Body = new CilBody();
+            var genMethodSig = new GenericInstMethodSig(new SZArraySig(mod.CorLibTypes.Byte));
+            var methodSpec = new MethodSpecUser(decrypterDef, genMethodSig);
+            caller.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 12345));
+            caller.Body.Instructions.Add(Instruction.Create(OpCodes.Call, methodSpec));
+            caller.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            caller.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            userType.Methods.Add(caller);
+
+            mod.Write(path);
+        }
+
         private static void CreateHangingExe(string path)
         {
             var asm = new AssemblyDefUser("HangingExeAsm", new Version(1, 0, 0, 0));

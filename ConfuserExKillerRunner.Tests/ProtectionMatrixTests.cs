@@ -418,5 +418,101 @@ namespace ConfuserExKillerRunner.Tests
             Assert.True(matrix.HasUnsupported);
             Assert.Contains("Unsupported Modes Detected", matrix.OverallVerdict);
         }
+
+        [Fact]
+        public void Evaluate_ConstantsNormalDynamic_CanBeUnevaluated()
+        {
+            var module = CreateEmptyModule();
+            var matrix = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: true,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 0,
+                allConstantsResolved: true,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0,
+                compressorUnpacked: false,
+                unevaluatedProtections: new[] { "Constants (Normal / Dynamic)" });
+
+            Assert.False(matrix.IsComplete);
+            Assert.True(matrix.HasNotEvaluated);
+            Assert.Equal("DEOBFUSCATION UNCONFIRMED (Unevaluated Protections)", matrix.OverallVerdict);
+
+            var item = matrix.Items.First(i => i.Name == "Constants" && i.Mode == "Normal / Dynamic");
+            Assert.Equal(ProtectionSupportStatus.NotEvaluated, item.Status);
+            Assert.Equal("Not Evaluated", item.ResultSummary);
+            Assert.False(item.Detected);
+        }
+
+        [Fact]
+        public void Evaluate_MultipleIncompleteStatusesSimultaneous_UnsupportedWithUnevaluated_MaintainsIncompleteAndMentionsBoth()
+        {
+            var module = CreateEmptyModule();
+            var matrix = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: true,
+                antiTamperDecrypted: false,
+                jitModeDetected: true, // Unsupported
+                cor20Repaired: false,
+                constantsDecryptedCount: 0,
+                allConstantsResolved: true,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0,
+                compressorUnpacked: false,
+                unevaluatedProtections: new[] { "Constants (Normal / Dynamic)" }); // NotEvaluated
+
+            Assert.False(matrix.IsComplete);
+            Assert.True(matrix.HasUnsupported);
+            Assert.True(matrix.HasNotEvaluated);
+            Assert.Contains("Unsupported Modes Detected", matrix.OverallVerdict);
+            Assert.Contains("conclusively evaluated", matrix.SummaryNotes);
+        }
+
+        [Fact]
+        public void Evaluate_HasCodeProtectionsPartiallyProcessed_DistinguishesFromRenamingOnly()
+        {
+            var module = CreateEmptyModule();
+            // Benign module: renaming is not detected
+            var matrixBenign = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: true,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 0,
+                allConstantsResolved: true,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0);
+
+            Assert.False(matrixBenign.HasCodeProtectionsPartiallyProcessed);
+
+            // With partial constants:
+            var matrixPartialConst = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: true,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 3,
+                allConstantsResolved: false,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0);
+
+            Assert.True(matrixPartialConst.HasCodeProtectionsPartiallyProcessed);
+        }
     }
 }

@@ -399,7 +399,7 @@ namespace ConfuserExKillerRunner.Core
             return res;
         }
 
-        public static (bool success, byte[] outputPe, int decryptedCount, bool allResolved) ExecuteConstants(byte[] peBytes, WorkerOptions options)
+        public static (bool success, byte[] outputPe, int decryptedCount, bool allResolved, string message) ExecuteConstants(byte[] peBytes, WorkerOptions options)
         {
             if (peBytes == null) throw new ArgumentNullException(nameof(peBytes));
 
@@ -408,7 +408,7 @@ namespace ConfuserExKillerRunner.Core
 
             if (string.IsNullOrEmpty(workerExe) || !File.Exists(workerExe))
             {
-                return (false, peBytes, 0, false);
+                return (false, peBytes, 0, false, $"Worker executable not found for architecture '{archInfo.Architecture}'");
             }
 
             string tempDir = !string.IsNullOrEmpty(options?.TempDirectory) && Directory.Exists(options.TempDirectory)
@@ -447,33 +447,54 @@ namespace ConfuserExKillerRunner.Core
 
                 var procResult = ProcessRunner.Run(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
 
-                if (procResult.TimedOut || !File.Exists(tempPeOut))
+                if (procResult.TimedOut)
                 {
-                    return (false, peBytes, 0, false);
+                    return (false, peBytes, 0, false, $"Constant worker timed out after {timeoutMs}ms. Worker tree killed.");
                 }
 
-                byte[] resultPe = File.ReadAllBytes(tempPeOut);
+                string metaMessage = null;
                 int decryptedCount = 0;
                 bool allResolved = false;
 
                 if (File.Exists(tempMetaOut))
                 {
-                    string meta = File.ReadAllText(tempMetaOut);
-                    var countMatch = System.Text.RegularExpressions.Regex.Match(meta, "\"DecryptedCount\"\\s*:\\s*(\\d+)");
-                    if (countMatch.Success && int.TryParse(countMatch.Groups[1].Value, out int parsed))
-                        decryptedCount = parsed;
+                    try
+                    {
+                        string meta = File.ReadAllText(tempMetaOut);
+                        var countMatch = System.Text.RegularExpressions.Regex.Match(meta, "\"DecryptedCount\"\\s*:\\s*(\\d+)");
+                        if (countMatch.Success && int.TryParse(countMatch.Groups[1].Value, out int parsed))
+                            decryptedCount = parsed;
 
-                    var allMatch = System.Text.RegularExpressions.Regex.Match(meta, "\"AllResolved\"\\s*:\\s*(true|false)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                    if (allMatch.Success && bool.TryParse(allMatch.Groups[1].Value, out bool parsedAll))
-                        allResolved = parsedAll;
+                        var allMatch = System.Text.RegularExpressions.Regex.Match(meta, "\"AllResolved\"\\s*:\\s*(true|false)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                        if (allMatch.Success && bool.TryParse(allMatch.Groups[1].Value, out bool parsedAll))
+                            allResolved = parsedAll;
+
+                        var msgMatch = System.Text.RegularExpressions.Regex.Match(meta, "\"Message\"\\s*:\\s*\"([^\"]+)\"");
+                        if (msgMatch.Success && !string.IsNullOrWhiteSpace(msgMatch.Groups[1].Value))
+                            metaMessage = msgMatch.Groups[1].Value;
+                    }
+                    catch { }
                 }
 
-                return (true, resultPe, decryptedCount, allResolved);
+                if (!File.Exists(tempPeOut))
+                {
+                    string err = !string.IsNullOrEmpty(metaMessage)
+                        ? metaMessage
+                        : (!string.IsNullOrEmpty(procResult.StandardError) ? procResult.StandardError.Trim() : $"Worker process exited with code {procResult.ExitCode}");
+                    return (false, peBytes, 0, false, $"Constant worker failed without output PE: {err}");
+                }
+
+                byte[] resultPe = File.ReadAllBytes(tempPeOut);
+                string finalMsg = !string.IsNullOrEmpty(metaMessage)
+                    ? metaMessage
+                    : (decryptedCount > 0 ? $"Decrypted {decryptedCount} constants via isolated worker" : "No dynamic constants decrypted");
+
+                return (true, resultPe, decryptedCount, allResolved, finalMsg);
             }
             catch (Exception ex)
             {
                 Logger.LogWarning($"[WorkerClient] Dynamic constant decryption exception: {ex.Message}");
-                return (false, peBytes, 0, false);
+                return (false, peBytes, 0, false, $"Constant worker exception: {ex.Message}");
             }
             finally
             {

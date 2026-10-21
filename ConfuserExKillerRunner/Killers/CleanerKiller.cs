@@ -16,6 +16,7 @@ namespace ConfuserExKillerRunner.Killers
         public int StrippedHooksCount { get; set; }
         public int RemovedMethodsCount { get; set; }
         public List<string> StrippedDetails { get; set; } = new List<string>();
+        public List<string> RetainedHooksDetails { get; set; } = new List<string>();
     }
 
     public static class CleanerKiller
@@ -81,7 +82,7 @@ namespace ConfuserExKillerRunner.Killers
                     continue;
 
                 // Check if target method is a known ConfuserEx protector initializer
-                string hookType = ClassifyProtectorMethod(methodDef, resourcesDecrypted, constantsDecrypted, antiTamperDecrypted);
+                string hookType = ClassifyProtectorMethod(methodDef, resourcesDecrypted, constantsDecrypted, antiTamperDecrypted, result);
                 if (hookType != null)
                 {
                     int paramsCount = methodDef.Parameters?.Count ?? 0;
@@ -92,7 +93,9 @@ namespace ConfuserExKillerRunner.Killers
                     // do not conflict with branch targets or EH boundaries, and do not involve complex multi-instruction sequences.
                     if (!TryIdentifyArgumentProducers(cctor, i, paramsCount, branchTargets, ehBoundaries, out var toNeutralize))
                     {
-                        Logger.LogWarning($"[CleanerKiller] Retaining {hookType} hook {methodDef.Name} in <Module>.cctor: argument producers cannot be safely or unambiguously identified.");
+                        string msg = $"Retaining {hookType} hook {methodDef.Name} in <Module>.cctor: argument producers cannot be safely or unambiguously identified.";
+                        Logger.LogWarning($"[CleanerKiller] {msg}");
+                        result.RetainedHooksDetails.Add(msg);
                         continue;
                     }
 
@@ -102,7 +105,9 @@ namespace ConfuserExKillerRunner.Killers
                     {
                         if (!TryIdentifyReturnConsumer(cctor, i, branchTargets, ehBoundaries, out var consumerPop))
                         {
-                            Logger.LogWarning($"[CleanerKiller] Retaining {hookType} hook {methodDef.Name} in <Module>.cctor: non-void return value consumer cannot be safely or unambiguously identified.");
+                            string msg = $"Retaining {hookType} hook {methodDef.Name} in <Module>.cctor: non-void return value consumer cannot be safely or unambiguously identified.";
+                            Logger.LogWarning($"[CleanerKiller] {msg}");
+                            result.RetainedHooksDetails.Add(msg);
                             continue;
                         }
                         toNeutralize.Add(consumerPop);
@@ -157,7 +162,9 @@ namespace ConfuserExKillerRunner.Killers
                         }
                         else
                         {
-                            Logger.LogWarning($"[CleanerKiller] Retaining protector method {m.Name} in {declType.Name}: live references remain in module.");
+                            string msg = $"Retaining protector method {m.Name} in {declType.Name}: live references remain in module.";
+                            Logger.LogWarning($"[CleanerKiller] {msg}");
+                            result.RetainedHooksDetails.Add(msg);
                         }
                     }
                 }
@@ -189,7 +196,7 @@ namespace ConfuserExKillerRunner.Killers
             return result;
         }
 
-        private static string ClassifyProtectorMethod(MethodDef method, bool resourcesDecrypted, bool constantsDecrypted, bool antiTamperDecrypted)
+        private static string ClassifyProtectorMethod(MethodDef method, bool resourcesDecrypted, bool constantsDecrypted, bool antiTamperDecrypted, CleanerResult result = null)
         {
             if (method.DeclaringType != null && !method.DeclaringType.IsGlobalModuleType)
                 return null;
@@ -308,7 +315,9 @@ namespace ConfuserExKillerRunner.Killers
                 if (antiTamperDecrypted)
                     return "Anti-Tamper";
 
-                Logger.LogWarning($"[CleanerKiller] Retaining Anti-Tamper hook in <Module>.cctor: Anti-Tamper sections have not been confirmed as decrypted (execution disabled or decryption unconfirmed).");
+                string msg = "Retaining Anti-Tamper hook in <Module>.cctor: Anti-Tamper sections have not been confirmed as decrypted (execution disabled or decryption unconfirmed).";
+                Logger.LogWarning($"[CleanerKiller] {msg}");
+                result?.RetainedHooksDetails.Add(msg);
                 return null;
             }
 
@@ -336,7 +345,9 @@ namespace ConfuserExKillerRunner.Killers
             // never strip it via fallback! Retain it to safeguard against undetected Anti-Tamper or runtime requirements.
             if (hasVirtualProtect)
             {
-                Logger.LogWarning($"[CleanerKiller] Retaining hook {method.Name} in <Module>.cctor: ambiguous classification (calls VirtualProtect but does not match pure Anti-Dump with verified PE header zeroing).");
+                string msg = $"Retaining hook {method.Name} in <Module>.cctor: ambiguous classification (calls VirtualProtect but does not match pure Anti-Dump with verified PE header zeroing).";
+                Logger.LogWarning($"[CleanerKiller] {msg}");
+                result?.RetainedHooksDetails.Add(msg);
                 return null;
             }
 
@@ -345,7 +356,9 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (hasPointerWrite || hasCipherArithmetic)
                 {
-                    Logger.LogWarning($"[CleanerKiller] Retaining hook {method.Name} in <Module>.cctor: ambiguous Anti-Debug hook containing memory writes or cipher operations.");
+                    string msg = $"Retaining hook {method.Name} in <Module>.cctor: ambiguous Anti-Debug hook containing memory writes or cipher operations.";
+                    Logger.LogWarning($"[CleanerKiller] {msg}");
+                    result?.RetainedHooksDetails.Add(msg);
                     return null;
                 }
                 return "Anti-Debug";

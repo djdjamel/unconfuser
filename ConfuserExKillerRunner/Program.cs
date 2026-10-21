@@ -359,6 +359,7 @@ namespace ConfuserExKillerRunner
                 int totalSwitchesResolved = 0;
                 int totalJunkStripped = 0;
                 int totalCleanerHooks = 0;
+                var preservedHooks = new List<string>();
 
                 if (!initialLoadOk)
                 {
@@ -450,15 +451,27 @@ namespace ConfuserExKillerRunner
 
                     // Step 2.0b: Constant Decryption via isolated worker
                     var dynamicConst = WorkerClient.ExecuteConstants(bytesToLoad, workerOpts);
-                    if (dynamicConst.success && dynamicConst.decryptedCount > 0)
+                    if (dynamicConst.success)
                     {
-                        bytesToLoad = dynamicConst.outputPe;
-                        constantsDecrypted = dynamicConst.allResolved;
-                        totalConstantsDecrypted = dynamicConst.decryptedCount;
-                        allConstantsResolved = dynamicConst.allResolved;
-                        Console.WriteLine($"[+] ConstantKiller: {dynamicConst.decryptedCount} constants decrypted (with stack evaluation)");
-                        if (!dynamicConst.allResolved)
-                            Console.WriteLine("[!] ConstantKiller: Partial decryption. Decrypter and buffer preserved.");
+                        if (dynamicConst.decryptedCount > 0)
+                        {
+                            bytesToLoad = dynamicConst.outputPe;
+                            constantsDecrypted = dynamicConst.allResolved;
+                            totalConstantsDecrypted = dynamicConst.decryptedCount;
+                            allConstantsResolved = dynamicConst.allResolved;
+                            Console.WriteLine($"[+] ConstantKiller: {dynamicConst.decryptedCount} constants decrypted (with stack evaluation)");
+                            if (!dynamicConst.allResolved)
+                                Console.WriteLine("[!] ConstantKiller: Partial decryption. Decrypter and buffer preserved.");
+                        }
+                        else
+                        {
+                            constantsDecrypted = dynamicConst.allResolved;
+                            Console.WriteLine($"[*] ConstantKiller: Isolated worker executed ({dynamicConst.message}).");
+                        }
+                    }
+                    else
+                    {
+                        Tool.Logger.LogWarning($"[ConstantKiller] Isolated worker constant decryption failed: {dynamicConst.message}");
                     }
                 }
 
@@ -542,6 +555,8 @@ namespace ConfuserExKillerRunner
                             totalCleanerHooks++;
                             Console.WriteLine("[+] ResourceKiller: Stripped runtime ResourceResolve hook");
                         }
+                        if (resResult.RetainedHooksDetails != null && resResult.RetainedHooksDetails.Count > 0)
+                            preservedHooks.AddRange(resResult.RetainedHooksDetails);
 
                         // Step 2.2: ProxyKiller + ConstantKiller
                         int proxyCount = ProxyKillerImpl.Execute(module, false, true);
@@ -550,13 +565,24 @@ namespace ConfuserExKillerRunner
 
                         if (!constantsDecrypted)
                         {
-                            var constResult = ConstantKillerImpl.Execute(module, reflModule: null);
-                            constantsDecrypted = constResult.AllReferencesResolved;
-                            totalConstantsDecrypted += constResult.DecryptedConstantsCount;
-                            allConstantsResolved = constResult.AllReferencesResolved;
-                            Console.WriteLine($"[+] ConstantKiller: {constResult.DecryptedConstantsCount} constants decrypted (with stack evaluation)");
-                            if (constResult.TotalReferencesCount > 0 && !constResult.AllReferencesResolved)
-                                Console.WriteLine($"[!] ConstantKiller: Partial decryption ({constResult.ResolvedReferencesCount}/{constResult.TotalReferencesCount} references rewritten). Decrypter and buffer preserved.");
+                            if (!allowExecution)
+                            {
+                                var constResult = ConstantKillerImpl.Execute(module, reflModule: null);
+                                constantsDecrypted = constResult.AllReferencesResolved;
+                                totalConstantsDecrypted += constResult.DecryptedConstantsCount;
+                                allConstantsResolved = constResult.AllReferencesResolved;
+                                if (constResult.DecryptedConstantsCount > 0)
+                                {
+                                    Console.WriteLine($"[+] ConstantKiller: {constResult.DecryptedConstantsCount} constants decrypted (with stack evaluation)");
+                                    if (constResult.TotalReferencesCount > 0 && !constResult.AllReferencesResolved)
+                                        Console.WriteLine($"[!] ConstantKiller: Partial decryption ({constResult.ResolvedReferencesCount}/{constResult.TotalReferencesCount} references rewritten). Decrypter and buffer preserved.");
+                                }
+                            }
+                            else
+                            {
+                                // Dynamic execution was already performed by isolated worker.
+                                // In the orchestrator host, reflModule is null; do not trigger false fallback warning.
+                            }
                         }
                         stepTimings["Stage2_Constants_Resources_Proxies"] = swStage2.ElapsedMilliseconds;
 
@@ -567,6 +593,8 @@ namespace ConfuserExKillerRunner
                         totalCleanerHooks += cleanResult.StrippedHooksCount + cleanResult.RemovedMethodsCount;
                         if (cleanResult.StrippedHooksCount > 0)
                             Console.WriteLine($"[+] CleanerKiller: Stripped {cleanResult.StrippedHooksCount} protector initializers from <Module>.cctor");
+                        if (cleanResult.RetainedHooksDetails != null && cleanResult.RetainedHooksDetails.Count > 0)
+                            preservedHooks.AddRange(cleanResult.RetainedHooksDetails);
                         stepTimings["Stage3_CleanerHooks"] = swStage3.ElapsedMilliseconds;
 
                         // Step 3.5: DeadCodeStripper & PredicateKiller pre-switch
@@ -684,6 +712,8 @@ namespace ConfuserExKillerRunner
                 {
                     var cleanFinal = CleanerKiller.StripProtectorHooks(module2, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
                     totalCleanerHooks += cleanFinal.StrippedHooksCount + cleanFinal.RemovedMethodsCount;
+                    if (cleanFinal.RetainedHooksDetails != null && cleanFinal.RetainedHooksDetails.Count > 0)
+                        preservedHooks.AddRange(cleanFinal.RetainedHooksDetails);
                     PredicateKiller.Execute(module2);
                     var dcsFinal1 = DeadCodeStripper.Execute(module2);
                     totalJunkStripped += dcsFinal1.JunkPairsStripped + dcsFinal1.TrampolinesFlattened;
@@ -699,6 +729,16 @@ namespace ConfuserExKillerRunner
                 module2.Write(candidatePath, writerOpts2);
             }
             stepTimings["Stage6_FinalCleanup"] = swStage6.ElapsedMilliseconds;
+
+            var distinctPreservedHooks = preservedHooks.Distinct().ToList();
+            if (distinctPreservedHooks.Count > 0)
+            {
+                Console.WriteLine($"[*] Preserved Hooks in <Module>.cctor ({distinctPreservedHooks.Count}):");
+                foreach (var hook in distinctPreservedHooks)
+                {
+                    Console.WriteLine($"  [i] {hook}");
+                }
+            }
 
             // Quality Audit: Validate candidate before promotion
             Console.WriteLine();
@@ -719,7 +759,10 @@ namespace ConfuserExKillerRunner
                 }
                 Console.ResetColor();
             }
-            stepTimings["Step7_QualityAudit"] = swAudit.ElapsedMilliseconds;
+            foreach (var hook in distinctPreservedHooks)
+            {
+                auditReport.Warnings.Add($"Preserved Hook: {hook}");
+            }
 
             Console.WriteLine($"[*] Status:                 [{auditReport.Status}]");
             Console.WriteLine($"[*] Loadable (dnlib):       [{(auditReport.CanLoad ? "YES" : "NO")}]");
@@ -804,63 +847,107 @@ namespace ConfuserExKillerRunner
                 return 1;
             }
 
-            // Audit passed: Promote candidate to final output path without deleting existing output before replacement succeeds
-            try
+            bool isIndeterminate = auditReport.Status == "INDETERMINATE";
+            string activeReportOutputPath = finalOutputPath;
+
+            if (isIndeterminate)
             {
+                string dir = Path.GetDirectoryName(finalOutputPath);
+                if (string.IsNullOrEmpty(dir)) dir = Directory.GetCurrentDirectory();
+                string nameWithoutExt = Path.GetFileNameWithoutExtension(finalOutputPath);
+                string ext = Path.GetExtension(finalOutputPath);
+                string unverifiedCandidatePath = Path.Combine(dir, $"{nameWithoutExt}.unverified_candidate{ext}");
+
+                try
+                {
+                    File.Copy(candidatePath, unverifiedCandidatePath, overwrite: true);
+                    try { File.Delete(candidatePath); } catch { }
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[!] Failed to save unverified candidate: {ex.Message}");
+                    Console.ResetColor();
+                }
+
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"[!] Candidate assembly IL verification is INDETERMINATE: {auditReport.ILVerificationNotes}");
+                Console.WriteLine($"[!] Candidate NOT promoted to final output path ({finalOutputPath}). Preserved as unverified candidate at: {unverifiedCandidatePath}");
                 if (File.Exists(finalOutputPath))
                 {
-                    string backupPath = finalOutputPath + ".bak." + Guid.NewGuid().ToString("N").Substring(0, 8);
-                    try
+                    Console.WriteLine($"[*] Previously verified output preserved and NOT overwritten: {finalOutputPath}");
+                }
+                Console.ResetColor();
+
+                activeReportOutputPath = unverifiedCandidatePath;
+            }
+            else
+            {
+                // Audit passed: Promote candidate to final output path without deleting existing output before replacement succeeds
+                try
+                {
+                    if (File.Exists(finalOutputPath))
                     {
-                        File.Replace(candidatePath, finalOutputPath, backupPath, ignoreMetadataErrors: true);
-                        try { File.Delete(backupPath); } catch { }
+                        string backupPath = finalOutputPath + ".bak." + Guid.NewGuid().ToString("N").Substring(0, 8);
+                        try
+                        {
+                            File.Replace(candidatePath, finalOutputPath, backupPath, ignoreMetadataErrors: true);
+                            try { File.Delete(backupPath); } catch { }
+                        }
+                        catch
+                        {
+                            File.Copy(candidatePath, finalOutputPath, overwrite: true);
+                            try { File.Delete(candidatePath); } catch { }
+                        }
                     }
-                    catch
+                    else
                     {
                         File.Copy(candidatePath, finalOutputPath, overwrite: true);
                         try { File.Delete(candidatePath); } catch { }
                     }
                 }
+                catch (Exception ex)
+                {
+                    try { if (File.Exists(candidatePath)) File.Delete(candidatePath); } catch { }
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[!] Failed to promote candidate to final output path: {ex.Message}");
+                    Console.ResetColor();
+                    return 1;
+                }
+
+                if (auditReport.Status == "CLEAN")
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    if (auditReport.ILVerificationStatus == "PASSED")
+                        Console.WriteLine($"[+] Quality audit passed (Structural + External IL verification PASSED). Output saved to: {finalOutputPath}");
+                    else
+                        Console.WriteLine($"[+] Structural integrity audit passed (no structural defects detected; External IL: {auditReport.ILVerificationStatus}). Output saved to: {finalOutputPath}");
+                    Console.ResetColor();
+                }
                 else
                 {
-                    File.Copy(candidatePath, finalOutputPath, overwrite: true);
-                    try { File.Delete(candidatePath); } catch { }
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"[!] Structural integrity audit completed with {auditReport.Warnings.Count} warning(s) (Candidate Promoted; External IL: {auditReport.ILVerificationStatus}). Output saved to: {finalOutputPath}");
+                    Console.ResetColor();
                 }
-            }
-            catch (Exception ex)
-            {
-                try { if (File.Exists(candidatePath)) File.Delete(candidatePath); } catch { }
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"[!] Failed to promote candidate to final output path: {ex.Message}");
-                Console.ResetColor();
-                return 1;
-            }
-
-            if (auditReport.Status == "CLEAN")
-            {
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"[+] Structural integrity audit passed (no structural defects detected). Output saved to: {finalOutputPath}");
-                Console.ResetColor();
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($"[!] Structural integrity audit completed with {auditReport.Warnings.Count} warning(s) (Candidate Promoted). Output saved to: {finalOutputPath}");
-                Console.ResetColor();
             }
 
             // NetDetect Post-Scan Reduction Audit
+            NetDetectComparisonResult netDetectComp = null;
             if (!skipNetDetect && preScan != null && preScan.Available)
             {
-                var postScan = NetDetectIntegration.RunScan(finalOutputPath);
+                var swPostScan = Stopwatch.StartNew();
+                var postScan = NetDetectIntegration.RunScan(activeReportOutputPath);
+                stepTimings["PostScan_NetDetect"] = swPostScan.ElapsedMilliseconds;
                 NetDetectIntegration.PrintComparisonReport(preScan, postScan);
+                netDetectComp = NetDetectIntegration.Compare(preScan, postScan);
             }
 
             // Protection Coverage & Support Matrix
             ProtectionMatrixResult matrix = null;
             try
             {
-                using (var finalModule = ModuleDefMD.Load(finalOutputPath))
+                using (var finalModule = ModuleDefMD.Load(activeReportOutputPath))
                 {
                     matrix = ProtectionMatrix.Evaluate(
                         finalModule,
@@ -899,7 +986,12 @@ namespace ConfuserExKillerRunner
 
             int exitCode = 0;
             string finalStatus = "SUCCESS";
-            if (matrix != null && (matrix.HasRequiresDynamicSkipped || matrix.HasUnsupported || matrix.HasNotEvaluated || (strictExitCodes && matrix.HasPartiallyProcessed)))
+            if (isIndeterminate)
+            {
+                exitCode = 2;
+                finalStatus = "INDETERMINATE";
+            }
+            else if (matrix != null && (matrix.HasRequiresDynamicSkipped || matrix.HasUnsupported || matrix.HasNotEvaluated || matrix.HasCodeProtectionsPartiallyProcessed || (strictExitCodes && matrix.HasPartiallyProcessed)))
             {
                 exitCode = 2;
                 finalStatus = "PARTIAL_SUCCESS";
@@ -926,9 +1018,9 @@ namespace ConfuserExKillerRunner
                         },
                         Output = new FileReportInfo
                         {
-                            Path = finalOutputPath,
-                            Sha256 = DeobfuscationReport.ComputeSha256(finalOutputPath),
-                            SizeBytes = File.Exists(finalOutputPath) ? new FileInfo(finalOutputPath).Length : 0
+                            Path = activeReportOutputPath,
+                            Sha256 = File.Exists(activeReportOutputPath) ? DeobfuscationReport.ComputeSha256(activeReportOutputPath) : string.Empty,
+                            SizeBytes = File.Exists(activeReportOutputPath) ? new FileInfo(activeReportOutputPath).Length : 0
                         },
                         Protections = matrix?.Items ?? new List<ProtectionItem>(),
                         Transformations = new TransformationReportMetrics
@@ -965,11 +1057,35 @@ namespace ConfuserExKillerRunner
                         PeakWorkingSetBytes = Process.GetCurrentProcess().PeakWorkingSet64,
                         ExceptionsAndRollbacks = exceptionsAndRollbacks,
                         FinalStatus = finalStatus,
-                        OverallVerdict = matrix?.OverallVerdict ?? finalStatus,
+                        OverallVerdict = isIndeterminate ? "INDETERMINATE (IL Verification Inconclusive - Candidate Not Promoted)" : (matrix?.OverallVerdict ?? finalStatus),
                         ExitCode = exitCode,
-                        SummaryNotes = matrix?.SummaryNotes ?? string.Empty
+                        SummaryNotes = isIndeterminate 
+                            ? (string.IsNullOrEmpty(matrix?.SummaryNotes) ? "Candidate assembly was preserved as unverified candidate because IL verification was indeterminate. Existing final output (if any) was not overwritten." : matrix.SummaryNotes + " | IL verification was indeterminate; candidate not promoted.")
+                            : (matrix?.SummaryNotes ?? string.Empty)
                     };
 
+                    if (netDetectComp != null && netDetectComp.Available)
+                    {
+                        report.NetDetect = new NetDetectReportInfo
+                        {
+                            Available = true,
+                            PreScanScore = netDetectComp.PreScanScore,
+                            PostScanScore = netDetectComp.PostScanScore,
+                            ScoreDelta = netDetectComp.ScoreDelta,
+                            ScoreDeltaPercent = netDetectComp.ScoreDeltaPercent,
+                            PrimaryDetector = netDetectComp.PrimaryDetector,
+                            Confidence = netDetectComp.Confidence,
+                            ResolvedSignatures = netDetectComp.ResolvedSignatures,
+                            ExposedSignatures = netDetectComp.ExposedSignatures,
+                            PreservedSignatures = netDetectComp.PreservedSignatures,
+                            IndicatorInterpretation = netDetectComp.IndicatorInterpretation
+                        };
+                    }
+
+                    if (isIndeterminate)
+                    {
+                        report.KnownLimitations.Add("External IL verification was indeterminate (e.g. tool crash or internal error). Candidate not promoted to final output.");
+                    }
                     if (matrix != null)
                     {
                         if (matrix.HasRequiresDynamicSkipped)
@@ -978,6 +1094,10 @@ namespace ConfuserExKillerRunner
                             report.KnownLimitations.Add("Unsupported native x86 machine-code or JIT hooks preserved.");
                         if (matrix.HasPartiallyProcessed)
                             report.KnownLimitations.Add("Some constants or proxies could not be resolved and were preserved.");
+                    }
+                    foreach (var hook in distinctPreservedHooks)
+                    {
+                        report.KnownLimitations.Add($"Preserved Hook: {hook}");
                     }
 
                     report.Save(jsonReportPath);

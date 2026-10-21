@@ -29,6 +29,21 @@ namespace ConfuserExKillerRunner.Analysis
         public bool HasControlFlow => GenericTechniques.Any(t => t.IndexOf("Control Flow", StringComparison.OrdinalIgnoreCase) >= 0);
     }
 
+    public sealed class NetDetectComparisonResult
+    {
+        public bool Available { get; set; }
+        public int PreScanScore { get; set; }
+        public int PostScanScore { get; set; }
+        public int ScoreDelta { get; set; }
+        public double ScoreDeltaPercent { get; set; }
+        public string PrimaryDetector { get; set; } = "None";
+        public string Confidence { get; set; } = "None";
+        public List<string> ResolvedSignatures { get; set; } = new List<string>();
+        public List<string> ExposedSignatures { get; set; } = new List<string>();
+        public List<string> PreservedSignatures { get; set; } = new List<string>();
+        public string IndicatorInterpretation { get; set; } = string.Empty;
+    }
+
     public static class NetDetectIntegration
     {
         public static string ResolveScriptPath()
@@ -189,22 +204,92 @@ namespace ConfuserExKillerRunner.Analysis
             Console.WriteLine();
         }
 
+        public static NetDetectComparisonResult Compare(NetDetectScanResult preScan, NetDetectScanResult postScan)
+        {
+            if (preScan == null || postScan == null || !preScan.Available || !postScan.Available)
+                return new NetDetectComparisonResult { Available = false };
+
+            int delta = postScan.VerdictScore - preScan.VerdictScore;
+            double pct = preScan.VerdictScore > 0 ? (delta * 100.0 / preScan.VerdictScore) : 0;
+
+            var preSet = new HashSet<string>(preScan.GenericTechniques, StringComparer.OrdinalIgnoreCase);
+            var postSet = new HashSet<string>(postScan.GenericTechniques, StringComparer.OrdinalIgnoreCase);
+
+            var resolved = preScan.GenericTechniques.Where(t => !postSet.Contains(t)).ToList();
+            var exposed = postScan.GenericTechniques.Where(t => !preSet.Contains(t)).ToList();
+            var preserved = postScan.GenericTechniques.Where(t => preSet.Contains(t)).ToList();
+
+            string interpretation;
+            if (delta > 0)
+            {
+                interpretation = $"Heuristic score increase (+{delta}) reflects internal signatures newly exposed after unpacking outer protection layers (e.g. Anti-Tamper/Compressor), not an engine regression.";
+            }
+            else if (delta < 0)
+            {
+                interpretation = $"Heuristic score reduction (-{Math.Abs(delta)}) reflects successful stripping of protector hooks and control flow cleanup.";
+            }
+            else
+            {
+                interpretation = "Heuristic indicator score unchanged between pre- and post-deobfuscation triage scans.";
+            }
+
+            return new NetDetectComparisonResult
+            {
+                Available = true,
+                PreScanScore = preScan.VerdictScore,
+                PostScanScore = postScan.VerdictScore,
+                ScoreDelta = delta,
+                ScoreDeltaPercent = pct,
+                PrimaryDetector = postScan.PrimaryDetector,
+                Confidence = postScan.Confidence,
+                ResolvedSignatures = resolved,
+                ExposedSignatures = exposed,
+                PreservedSignatures = preserved,
+                IndicatorInterpretation = interpretation
+            };
+        }
+
         public static void PrintComparisonReport(NetDetectScanResult preScan, NetDetectScanResult postScan)
         {
-            if (!preScan.Available || !postScan.Available)
+            var comp = Compare(preScan, postScan);
+            if (!comp.Available)
                 return;
 
             Console.WriteLine();
             Console.WriteLine("===============================================================");
-            Console.WriteLine("             NetDetect Obfuscation Reduction Audit             ");
+            Console.WriteLine("        NetDetect Structural Indicator Triage Comparison       ");
             Console.WriteLine("===============================================================");
-            Console.WriteLine($"[*] Pre-Scan Obfuscation Score:   {preScan.VerdictScore} ({preScan.PrimaryDetector})");
-            Console.WriteLine($"[*] Post-Scan Obfuscation Score:  {postScan.VerdictScore} ({postScan.PrimaryDetector})");
+            Console.WriteLine($"[*] Pre-Scan Heuristic Score:     {comp.PreScanScore} ({preScan.PrimaryDetector}, Confidence: {preScan.Confidence})");
+            Console.WriteLine($"[*] Post-Scan Heuristic Score:    {comp.PostScanScore} ({comp.PrimaryDetector}, Confidence: {comp.Confidence})");
 
-            int reduction = preScan.VerdictScore - postScan.VerdictScore;
-            double pct = preScan.VerdictScore > 0 ? (reduction * 100.0 / preScan.VerdictScore) : 0;
-            Console.WriteLine($"[*] Score Delta:                  {(reduction <= 0 ? "+" : "-")}{Math.Abs(reduction)} ({(reduction >= 0 ? "-" : "+")}{Math.Abs(pct):F1}%)");
-            Console.WriteLine($"[*] Final Verdict:                {(postScan.VerdictScore == 0 ? "[ CLEAN / UNOBFUSCATED ]" : postScan.Confidence + " " + postScan.PrimaryDetector)}");
+            string sign = comp.ScoreDelta > 0 ? "+" : (comp.ScoreDelta < 0 ? "-" : " ");
+            Console.WriteLine($"[*] Indicator Score Delta:        {sign}{Math.Abs(comp.ScoreDelta)} ({sign}{Math.Abs(comp.ScoreDeltaPercent):F1}%)");
+
+            if (comp.ResolvedSignatures.Count > 0)
+                Console.WriteLine($"[-] Signatures Resolved:          {string.Join(", ", comp.ResolvedSignatures)}");
+            if (comp.ExposedSignatures.Count > 0)
+                Console.WriteLine($"[+] Signatures Exposed/Revealed:  {string.Join(", ", comp.ExposedSignatures)}");
+            if (comp.PreservedSignatures.Count > 0)
+                Console.WriteLine($"[*] Signatures Preserved:         {string.Join(", ", comp.PreservedSignatures)}");
+
+            if (comp.ScoreDelta > 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine($"[i] Indicator Interpretation:     {comp.IndicatorInterpretation}");
+                Console.ResetColor();
+            }
+            else if (comp.ScoreDelta < 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"[+] Indicator Interpretation:     {comp.IndicatorInterpretation}");
+                Console.ResetColor();
+            }
+            else
+            {
+                Console.WriteLine($"[*] Indicator Interpretation:     {comp.IndicatorInterpretation}");
+            }
+
+            Console.WriteLine($"[*] Post-Scan Triage Verdict:     {(comp.PostScanScore == 0 ? "[ CLEAN / UNOBFUSCATED ]" : comp.Confidence + " " + comp.PrimaryDetector)}");
             Console.WriteLine("===============================================================");
         }
     }

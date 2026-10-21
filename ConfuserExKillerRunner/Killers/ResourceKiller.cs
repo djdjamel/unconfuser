@@ -19,6 +19,7 @@ namespace ConfuserExKillerRunner.Killers
         public bool HandlerStripped { get; set; }
         public bool ResourcesDecrypted { get; set; }
         public List<string> ResourceNames { get; set; } = new List<string>();
+        public List<string> RetainedHooksDetails { get; set; } = new List<string>();
         public string Message { get; set; }
     }
 
@@ -342,13 +343,17 @@ namespace ConfuserExKillerRunner.Killers
 
                 if (!TryIdentifyResourceHookInstructions(instructions, i, branchTargets, ehBoundaries, out var toNeutralize, out var handlerMethod))
                 {
-                    Logger.LogWarning($"[ResourceKiller] Retaining {called.Name} hook in <Module>.cctor: argument sequence is ambiguous, non-standard, or intersects branches/EH boundaries.");
+                    string msg = $"Retaining {called.Name} hook in <Module>.cctor: argument sequence is ambiguous, non-standard, or intersects branches/EH boundaries.";
+                    Logger.LogWarning($"[ResourceKiller] {msg}");
+                    result?.RetainedHooksDetails.Add(msg);
                     continue;
                 }
 
                 if (handlerMethod != null && handlerMethod.DeclaringType != null && !handlerMethod.DeclaringType.IsGlobalModuleType)
                 {
-                    Logger.LogWarning($"[ResourceKiller] Retaining {called.Name} hook in <Module>.cctor: handler {handlerMethod.FullName} belongs to a user class, not protector module.");
+                    string msg = $"Retaining {called.Name} hook in <Module>.cctor: handler {handlerMethod.FullName} belongs to a user class, not protector module.";
+                    Logger.LogWarning($"[ResourceKiller] {msg}");
+                    result?.RetainedHooksDetails.Add(msg);
                     continue;
                 }
 
@@ -368,7 +373,9 @@ namespace ConfuserExKillerRunner.Killers
                         s.Instruction.OpCode = s.OpCode;
                         s.Instruction.Operand = s.Operand;
                     }
-                    Logger.LogWarning($"[ResourceKiller] Rollback in <Module>.cctor: stripping {called.Name} failed structural audit: {string.Join("; ", errors)}.");
+                    string msg = $"Rollback in <Module>.cctor: stripping {called.Name} failed structural audit: {string.Join("; ", errors)}.";
+                    Logger.LogWarning($"[ResourceKiller] {msg}");
+                    result?.RetainedHooksDetails.Add(msg);
                     continue;
                 }
 

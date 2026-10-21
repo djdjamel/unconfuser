@@ -34,6 +34,7 @@ namespace ConfuserExKillerRunner.Analysis
         public List<ProtectionItem> Items { get; set; } = new List<ProtectionItem>();
         public bool IsComplete { get; set; }
         public bool HasPartiallyProcessed { get; set; }
+        public bool HasCodeProtectionsPartiallyProcessed => Items.Any(i => i.Detected && i.Status == ProtectionSupportStatus.PartiallyProcessed && i.Name != "Name Protection");
         public bool HasUnsupported { get; set; }
         public bool HasRequiresDynamicSkipped { get; set; }
         public bool HasNotEvaluated { get; set; }
@@ -271,7 +272,14 @@ namespace ConfuserExKillerRunner.Analysis
                 Mode = "Normal / Dynamic",
                 Detected = constantsDetected
             };
-            if (!constantsDetected)
+            if (isUnevaluated("Constants", "Normal / Dynamic"))
+            {
+                constItem.Detected = false;
+                constItem.Status = ProtectionSupportStatus.NotEvaluated;
+                constItem.ResultSummary = "Not Evaluated";
+                constItem.Details = "Encrypted constant detection was not evaluated.";
+            }
+            else if (!constantsDetected)
             {
                 constItem.Status = ProtectionSupportStatus.NotDetected;
                 constItem.ResultSummary = "N/A";
@@ -588,18 +596,24 @@ namespace ConfuserExKillerRunner.Analysis
                 result.IsComplete = false;
                 result.OverallVerdict = "PARTIALLY DEOBFUSCATED (Unsupported Modes Detected)";
                 result.SummaryNotes = "One or more detected protections (e.g. JIT hooks or x86 variants) are not supported and were preserved intact to avoid corruption.";
+                if (result.HasNotEvaluated)
+                    result.SummaryNotes += " Additionally, one or more protections could not be conclusively evaluated.";
             }
             else if (result.HasRequiresDynamicSkipped)
             {
                 result.IsComplete = false;
                 result.OverallVerdict = "PARTIALLY DEOBFUSCATED (Dynamic Execution Required)";
                 result.SummaryNotes = "One or more detected protections require dynamic execution (--allow-execution). Re-run with execution enabled for full deobfuscation.";
+                if (result.HasNotEvaluated)
+                    result.SummaryNotes += " Additionally, one or more protections could not be conclusively evaluated.";
             }
             else if (result.HasPartiallyProcessed)
             {
                 result.IsComplete = false;
                 result.OverallVerdict = "PARTIALLY DEOBFUSCATED (Incomplete Transformations)";
                 result.SummaryNotes = "Some protections were only partially resolved; unverified transformations were safely rolled back.";
+                if (result.HasNotEvaluated)
+                    result.SummaryNotes += " Additionally, one or more protections could not be conclusively evaluated.";
             }
             else if (result.HasNotEvaluated)
             {

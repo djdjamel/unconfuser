@@ -41,9 +41,19 @@ namespace ConfuserExKillerRunner.Analysis
         /// </summary>
         public bool ExecutionConfirmed { get; set; } = false;
 
-        public string Status => (!CanLoad || InvalidInstructionsCount > 0 || InvalidBranchesCount > 0 || InvalidEHCount > 0 || StackUnderflowCount > 0 || Errors.Count > 0)
-            ? "FAILED"
-            : (Warnings.Count > 0 || ILVerificationStatus == "FAILED" ? "WARNINGS" : "CLEAN");
+        public string Status
+        {
+            get
+            {
+                if (!CanLoad || InvalidInstructionsCount > 0 || InvalidBranchesCount > 0 || InvalidEHCount > 0 || StackUnderflowCount > 0 || Errors.Count > 0 || ILVerificationStatus == "FAILED")
+                    return "FAILED";
+                if (ILVerificationStatus == "INDETERMINATE")
+                    return "INDETERMINATE";
+                if (Warnings.Count > 0)
+                    return "WARNINGS";
+                return "CLEAN";
+            }
+        }
     }
 
     public static class QualityAuditor
@@ -206,19 +216,7 @@ namespace ConfuserExKillerRunner.Analysis
                     try
                     {
                         var proc = ProcessRunner.Run(peverify, $"\"{filePath}\" /IL /MD", workingDir, timeoutMs: 30000);
-                        if (proc.ExitCode == 0)
-                        {
-                            report.ILVerificationStatus = "PASSED";
-                            report.ILVerificationNotes = "PEVerify: All classes and methods verified.";
-                        }
-                        else
-                        {
-                            report.ILVerificationStatus = "FAILED";
-                            string outSnippet = proc.StandardOutput.Trim();
-                            if (outSnippet.Length > 200) outSnippet = outSnippet.Substring(0, 200) + "...";
-                            report.ILVerificationNotes = $"PEVerify reported errors (ExitCode {proc.ExitCode}): {outSnippet}";
-                            report.Warnings.Add($"PEVerify reported errors: {outSnippet}");
-                        }
+                        InterpretPEVerifyResult(proc.ExitCode, proc.StandardOutput, proc.StandardError, proc.TimedOut, report);
                     }
                     catch (Exception ex)
                     {
@@ -240,19 +238,7 @@ namespace ConfuserExKillerRunner.Analysis
                     try
                     {
                         var proc = ProcessRunner.Run(ilverify, $"\"{filePath}\"", workingDir, timeoutMs: 30000);
-                        if (proc.ExitCode == 0)
-                        {
-                            report.ILVerificationStatus = "PASSED";
-                            report.ILVerificationNotes = "dotnet-ilverify: All classes and methods verified.";
-                        }
-                        else
-                        {
-                            report.ILVerificationStatus = "FAILED";
-                            string outSnippet = proc.StandardOutput.Trim();
-                            if (outSnippet.Length > 200) outSnippet = outSnippet.Substring(0, 200) + "...";
-                            report.ILVerificationNotes = $"dotnet-ilverify reported errors (ExitCode {proc.ExitCode}): {outSnippet}";
-                            report.Warnings.Add($"dotnet-ilverify reported errors: {outSnippet}");
-                        }
+                        InterpretILVerifyResult(proc.ExitCode, proc.StandardOutput, proc.StandardError, proc.TimedOut, report);
                     }
                     catch (Exception ex)
                     {
@@ -264,6 +250,94 @@ namespace ConfuserExKillerRunner.Analysis
                 {
                     report.ILVerificationStatus = "UNVERIFIED";
                     report.ILVerificationNotes = "dotnet-ilverify tool not installed on system; external verification skipped for .NET Core target.";
+                }
+            }
+        }
+
+        internal static void InterpretPEVerifyResult(int exitCode, string stdOut, string stdErr, bool timedOut, AuditReport report)
+        {
+            if (timedOut)
+            {
+                report.ILVerificationStatus = "INDETERMINATE";
+                report.ILVerificationNotes = "PEVerify timed out after 30000ms; external IL verification is indeterminate.";
+                report.Warnings.Add("PEVerify timed out; external IL verification is indeterminate.");
+            }
+            else if (exitCode == 0)
+            {
+                report.ILVerificationStatus = "PASSED";
+                report.ILVerificationNotes = "PEVerify: All classes and methods verified.";
+            }
+            else
+            {
+                string combinedOutput = ((stdOut ?? "") + "\n" + (stdErr ?? "")).Trim();
+                bool isInternalError = exitCode == -2146231907 // 0x8013129D
+                    || combinedOutput.IndexOf("0x8013129d", StringComparison.OrdinalIgnoreCase) >= 0
+                    || combinedOutput.IndexOf("Internal error", StringComparison.OrdinalIgnoreCase) >= 0
+                    || combinedOutput.IndexOf("Erreur interne", StringComparison.OrdinalIgnoreCase) >= 0
+                    || combinedOutput.IndexOf("Fatal error", StringComparison.OrdinalIgnoreCase) >= 0
+                    || combinedOutput.IndexOf("Erreur fatale", StringComparison.OrdinalIgnoreCase) >= 0
+                    || (string.IsNullOrWhiteSpace(combinedOutput) && exitCode != 0);
+
+                string[] lines = combinedOutput.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                var nonBanner = lines.Where(l => !l.StartsWith("Outil de", StringComparison.OrdinalIgnoreCase)
+                                              && !l.StartsWith("Microsoft (R)", StringComparison.OrdinalIgnoreCase)
+                                              && !l.StartsWith("Copyright (c)", StringComparison.OrdinalIgnoreCase)).ToList();
+                string outSnippet = nonBanner.Count > 0 ? string.Join(" ", nonBanner) : combinedOutput.Trim();
+                if (outSnippet.Length > 200) outSnippet = outSnippet.Substring(0, 200) + "...";
+
+                if (isInternalError)
+                {
+                    report.ILVerificationStatus = "INDETERMINATE";
+                    report.ILVerificationNotes = $"PEVerify encountered an internal engine error (ExitCode 0x{exitCode:X8}): {outSnippet}";
+                    report.Warnings.Add($"PEVerify internal error: {outSnippet}");
+                }
+                else
+                {
+                    report.ILVerificationStatus = "FAILED";
+                    report.ILVerificationNotes = $"PEVerify reported verification errors (ExitCode {exitCode}): {outSnippet}";
+                    report.Errors.Add($"PEVerify reported errors: {outSnippet}");
+                    report.Warnings.Add($"PEVerify reported errors: {outSnippet}");
+                }
+            }
+        }
+
+        internal static void InterpretILVerifyResult(int exitCode, string stdOut, string stdErr, bool timedOut, AuditReport report)
+        {
+            if (timedOut)
+            {
+                report.ILVerificationStatus = "INDETERMINATE";
+                report.ILVerificationNotes = "dotnet-ilverify timed out after 30000ms; external IL verification is indeterminate.";
+                report.Warnings.Add("dotnet-ilverify timed out; external IL verification is indeterminate.");
+            }
+            else if (exitCode == 0)
+            {
+                report.ILVerificationStatus = "PASSED";
+                report.ILVerificationNotes = "dotnet-ilverify: All classes and methods verified.";
+            }
+            else
+            {
+                string combinedOutput = ((stdOut ?? "") + "\n" + (stdErr ?? "")).Trim();
+                bool isInternalError = combinedOutput.IndexOf("Internal error", StringComparison.OrdinalIgnoreCase) >= 0
+                    || combinedOutput.IndexOf("Fatal error", StringComparison.OrdinalIgnoreCase) >= 0
+                    || combinedOutput.IndexOf("Crash", StringComparison.OrdinalIgnoreCase) >= 0
+                    || (string.IsNullOrWhiteSpace(combinedOutput) && exitCode != 0);
+
+                string outSnippet = (stdOut ?? "").Trim();
+                if (string.IsNullOrWhiteSpace(outSnippet)) outSnippet = (stdErr ?? "").Trim();
+                if (outSnippet.Length > 200) outSnippet = outSnippet.Substring(0, 200) + "...";
+
+                if (isInternalError)
+                {
+                    report.ILVerificationStatus = "INDETERMINATE";
+                    report.ILVerificationNotes = $"dotnet-ilverify encountered an internal engine error: {outSnippet}";
+                    report.Warnings.Add($"dotnet-ilverify internal error: {outSnippet}");
+                }
+                else
+                {
+                    report.ILVerificationStatus = "FAILED";
+                    report.ILVerificationNotes = $"dotnet-ilverify reported errors (ExitCode {exitCode}): {outSnippet}";
+                    report.Errors.Add($"dotnet-ilverify reported errors: {outSnippet}");
+                    report.Warnings.Add($"dotnet-ilverify reported errors: {outSnippet}");
                 }
             }
         }

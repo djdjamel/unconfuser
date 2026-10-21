@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using ConfuserExKillerRunner.Analysis;
+using ConfuserExKillerRunner.Core;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
 using Xunit;
@@ -356,6 +357,144 @@ namespace ConfuserExKillerRunner.Tests
             Assert.False(report.StructuralAuditPassed);
             Assert.True(report.StackUnderflowCount > 0);
             Assert.Contains(report.Errors, e => e.Contains("Stack height mismatch at CFG merge point"));
+        }
+
+        [Fact]
+        public void InterpretPEVerifyResult_Success_StatusIsPassedAndClean()
+        {
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.InterpretPEVerifyResult(0, "All Classes and Methods in test.dll Verified.", "", false, report);
+
+            Assert.Equal("PASSED", report.ILVerificationStatus);
+            Assert.Equal("CLEAN", report.Status);
+            Assert.Empty(report.Errors);
+        }
+
+        [Fact]
+        public void InterpretPEVerifyResult_RealILError_StatusIsFailed()
+        {
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.InterpretPEVerifyResult(1, "[IL]: Error: [test.dll : TestType::TestMethod][offset 0x00000001] Stack underflow.", "", false, report);
+
+            Assert.Equal("FAILED", report.ILVerificationStatus);
+            Assert.Equal("FAILED", report.Status);
+            Assert.Contains(report.Errors, e => e.Contains("PEVerify reported errors"));
+        }
+
+        [Fact]
+        public void InterpretPEVerifyResult_InternalError0x8013129d_StatusIsIndeterminate()
+        {
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.InterpretPEVerifyResult(-2146231907, ".NET Framework Internal error: 0x8013129d", "", false, report);
+
+            Assert.Equal("INDETERMINATE", report.ILVerificationStatus);
+            Assert.Equal("INDETERMINATE", report.Status);
+            Assert.Empty(report.Errors);
+            Assert.Contains(report.Warnings, w => w.Contains("PEVerify internal error") && w.Contains("0x8013129d"));
+        }
+
+        [Fact]
+        public void InterpretPEVerifyResult_InternalErrorKeywords_StatusIsIndeterminate()
+        {
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.InterpretPEVerifyResult(-1, "Internal error in CLR engine", "", false, report);
+
+            Assert.Equal("INDETERMINATE", report.ILVerificationStatus);
+            Assert.Equal("INDETERMINATE", report.Status);
+            Assert.Empty(report.Errors);
+        }
+
+        [Fact]
+        public void InterpretPEVerifyResult_TimedOut_StatusIsIndeterminate()
+        {
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.InterpretPEVerifyResult(-1, "", "", true, report);
+
+            Assert.Equal("INDETERMINATE", report.ILVerificationStatus);
+            Assert.Equal("INDETERMINATE", report.Status);
+            Assert.Empty(report.Errors);
+            Assert.Contains(report.Warnings, w => w.Contains("timed out"));
+        }
+
+        [Fact]
+        public void InterpretPEVerifyResult_EmptyOutputNonZeroExit_StatusIsIndeterminate()
+        {
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.InterpretPEVerifyResult(-1073741819, "", "", false, report);
+
+            Assert.Equal("INDETERMINATE", report.ILVerificationStatus);
+            Assert.Equal("INDETERMINATE", report.Status);
+            Assert.Empty(report.Errors);
+        }
+
+        [Fact]
+        public void InterpretILVerifyResult_Success_StatusIsPassed()
+        {
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.InterpretILVerifyResult(0, "All classes and methods verified.", "", false, report);
+
+            Assert.Equal("PASSED", report.ILVerificationStatus);
+            Assert.Equal("CLEAN", report.Status);
+        }
+
+        [Fact]
+        public void InterpretILVerifyResult_InternalError_StatusIsIndeterminate()
+        {
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.InterpretILVerifyResult(1, "Fatal error: unexpected failure", "", false, report);
+
+            Assert.Equal("INDETERMINATE", report.ILVerificationStatus);
+            Assert.Equal("INDETERMINATE", report.Status);
+            Assert.Empty(report.Errors);
+        }
+
+        [Fact]
+        public void AuditReport_Status_Precedence_StructuralFailureOverridesIndeterminate()
+        {
+            var report = new AuditReport
+            {
+                CanLoad = true,
+                InvalidInstructionsCount = 1,
+                ILVerificationStatus = "INDETERMINATE"
+            };
+
+            Assert.Equal("FAILED", report.Status);
+        }
+
+        [Fact]
+        public void AuditReport_Status_Precedence_IndeterminateOverridesWarnings()
+        {
+            var report = new AuditReport
+            {
+                CanLoad = true,
+                ILVerificationStatus = "INDETERMINATE"
+            };
+            report.Warnings.Add("Some non-fatal warning");
+
+            Assert.Equal("INDETERMINATE", report.Status);
+        }
+
+        [Fact]
+        public void InterpretPEVerifyResult_FrenchInternalError_StatusIsIndeterminate()
+        {
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.InterpretPEVerifyResult(1, "Outil de vérification PE\nErreur interne dans le moteur CLR", "", false, report);
+
+            Assert.Equal("INDETERMINATE", report.ILVerificationStatus);
+            Assert.Equal("INDETERMINATE", report.Status);
+            Assert.Empty(report.Errors);
+            Assert.Contains(report.Warnings, w => w.Contains("PEVerify internal error"));
+        }
+
+        [Fact]
+        public void InterpretPEVerifyResult_FrenchFatalError_StatusIsIndeterminate()
+        {
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.InterpretPEVerifyResult(1, "Outil de vérification PE\nErreur fatale lors de l'exécution", "", false, report);
+
+            Assert.Equal("INDETERMINATE", report.ILVerificationStatus);
+            Assert.Equal("INDETERMINATE", report.Status);
+            Assert.Empty(report.Errors);
         }
     }
 }

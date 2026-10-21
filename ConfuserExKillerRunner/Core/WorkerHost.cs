@@ -298,7 +298,7 @@ namespace ConfuserExKillerRunner.Core
                     if (!string.IsNullOrEmpty(outputMetaPath))
                     {
                         File.WriteAllText(outputMetaPath,
-                            $"{{\"Success\": true, \"DecryptedCount\": {constResult.DecryptedConstantsCount}, \"ResolvedReferences\": {constResult.ResolvedReferencesCount}, \"TotalReferences\": {constResult.TotalReferencesCount}, \"AllResolved\": {(constResult.AllReferencesResolved ? "true" : "false")}}}");
+                            $"{{\"Success\": true, \"DecryptedCount\": {constResult.DecryptedConstantsCount}, \"ResolvedReferences\": {constResult.ResolvedReferencesCount}, \"TotalReferences\": {constResult.TotalReferencesCount}, \"AllResolved\": {(constResult.AllReferencesResolved ? "true" : "false")}, \"Message\": \"Completed: {constResult.DecryptedConstantsCount} constants decrypted\"}}");
                     }
                     return 0;
                 }

@@ -46,6 +46,21 @@ namespace ConfuserExKillerRunner.Analysis
         public List<string> Regressions { get; set; } = new List<string>();
     }
 
+    public sealed class NetDetectReportInfo
+    {
+        public bool Available { get; set; }
+        public int PreScanScore { get; set; }
+        public int PostScanScore { get; set; }
+        public int ScoreDelta { get; set; }
+        public double ScoreDeltaPercent { get; set; }
+        public string PrimaryDetector { get; set; } = "None";
+        public string Confidence { get; set; } = "None";
+        public List<string> ResolvedSignatures { get; set; } = new List<string>();
+        public List<string> ExposedSignatures { get; set; } = new List<string>();
+        public List<string> PreservedSignatures { get; set; } = new List<string>();
+        public string IndicatorInterpretation { get; set; } = string.Empty;
+    }
+
     public sealed class DeobfuscationReport
     {
         public string ReportVersion { get; set; } = "1.0.0";
@@ -57,6 +72,7 @@ namespace ConfuserExKillerRunner.Analysis
         public List<ProtectionItem> Protections { get; set; } = new List<ProtectionItem>();
         public TransformationReportMetrics Transformations { get; set; } = new TransformationReportMetrics();
         public QualityAuditReportInfo QualityAudit { get; set; } = new QualityAuditReportInfo();
+        public NetDetectReportInfo NetDetect { get; set; }
 
         public Dictionary<string, long> PassTimingsMs { get; set; } = new Dictionary<string, long>(StringComparer.Ordinal);
         public long TotalElapsedMs { get; set; }
@@ -174,6 +190,34 @@ namespace ConfuserExKillerRunner.Analysis
             qaObj["regressions"] = regArr;
 
             root["qualityAudit"] = qaObj;
+
+            // NetDetect Triage Comparison
+            if (NetDetect != null && NetDetect.Available)
+            {
+                var ndObj = JsonValue.NewObject();
+                ndObj["available"] = JsonValue.From(true);
+                ndObj["preScanScore"] = JsonValue.From(NetDetect.PreScanScore);
+                ndObj["postScanScore"] = JsonValue.From(NetDetect.PostScanScore);
+                ndObj["scoreDelta"] = JsonValue.From(NetDetect.ScoreDelta);
+                ndObj["scoreDeltaPercent"] = JsonValue.From(NetDetect.ScoreDeltaPercent);
+                ndObj["primaryDetector"] = JsonValue.From(NetDetect.PrimaryDetector ?? "None");
+                ndObj["confidence"] = JsonValue.From(NetDetect.Confidence ?? "None");
+
+                var resArr = JsonValue.NewArray();
+                foreach (var s in NetDetect.ResolvedSignatures) resArr.Add(JsonValue.From(s));
+                ndObj["resolvedSignatures"] = resArr;
+
+                var expArr = JsonValue.NewArray();
+                foreach (var s in NetDetect.ExposedSignatures) expArr.Add(JsonValue.From(s));
+                ndObj["exposedSignatures"] = expArr;
+
+                var presArr = JsonValue.NewArray();
+                foreach (var s in NetDetect.PreservedSignatures) presArr.Add(JsonValue.From(s));
+                ndObj["preservedSignatures"] = presArr;
+
+                ndObj["indicatorInterpretation"] = JsonValue.From(NetDetect.IndicatorInterpretation ?? string.Empty);
+                root["netDetect"] = ndObj;
+            }
 
             // Timings
             var timingsObj = JsonValue.NewObject();
