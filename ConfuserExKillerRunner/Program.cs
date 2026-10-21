@@ -145,7 +145,7 @@ namespace ConfuserExKillerRunner
             try
             {
                 var swBaseline = Stopwatch.StartNew();
-                baselineAudit = QualityAuditor.Audit(originalInputPath, runExternalVerifier: false);
+                baselineAudit = QualityAuditor.Audit(originalInputPath, runExternalVerifier: false, dependencyDirectories: allowedDepDirs);
                 stepTimings["Baseline_QualityAudit"] = swBaseline.ElapsedMilliseconds;
             }
             catch (Exception ex)
@@ -810,7 +810,7 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("    Assembly Structural & Control-Flow Integrity Audit Report  ");
             Console.WriteLine("===============================================================");
             var swAudit = Stopwatch.StartNew();
-            var auditReport = QualityAuditor.Audit(candidatePath, runExternalVerifier: true, workingDir: targetDir);
+            var auditReport = QualityAuditor.Audit(candidatePath, runExternalVerifier: true, workingDir: targetDir, dependencyDirectories: allowedDepDirs);
             var regressions = QualityAuditor.DetectRegressions(baselineAudit, auditReport);
             stepTimings["Stage7_QualityAudit"] = swAudit.ElapsedMilliseconds;
             if (regressions.Count > 0)

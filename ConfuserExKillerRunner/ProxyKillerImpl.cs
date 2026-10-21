@@ -22,9 +22,13 @@ namespace ConfuserExTools.ProxyKiller
 				{
 					proxyMethods[method] = realInstruction;
 				}
+				else if (TryAnalyzeInstanceProxy(method, ignoreAccess, out realInstruction, out failureReason))
+				{
+					proxyMethods[method] = realInstruction;
+				}
 				else if (method.IsPrivateScope && failureReason != null)
 				{
-					Logger.LogDebugInfo($"[0x{method.MDToken.Raw:X8}] Method {method.Name} not classified as classic proxy: {failureReason}");
+					Logger.LogDebugInfo($"[0x{method.MDToken.Raw:X8}] Method {method.Name} not classified as classic or instance proxy: {failureReason}");
 				}
 			}
 
@@ -101,7 +105,7 @@ namespace ConfuserExTools.ProxyKiller
 								continue;
 							if (instruction.Operand is IMethod operand)
 							{
-								var def = (operand as MethodDef) ?? operand.ResolveMethodDef();
+								var def = ResolveProxyMethodDef(operand, module);
 								if (def != null && proxyReferenceCounts.ContainsKey(def))
 									proxyReferenceCounts[def]++;
 							}
@@ -130,7 +134,7 @@ namespace ConfuserExTools.ProxyKiller
 
 								if (instruction.Operand is IMethod operandMethod)
 								{
-									var targetDef = (operandMethod as MethodDef) ?? operandMethod.ResolveMethodDef();
+									var targetDef = ResolveProxyMethodDef(operandMethod, module);
 									if (targetDef != null && proxyMethods.TryGetValue(targetDef, out var realCall))
 									{
 										instruction.OpCode = realCall.OpCode;
@@ -726,6 +730,164 @@ namespace ConfuserExTools.ProxyKiller
 			return true;
 		}
 
+		internal static bool TryAnalyzeInstanceProxy(MethodDef method, bool ignoreAccess, out Instruction callInstruction, out string failureReason)
+		{
+			callInstruction = null;
+			failureReason = null;
+
+			if (!method.HasBody)
+			{
+				failureReason = "No method body";
+				return false;
+			}
+
+			if (!(ignoreAccess || method.IsPrivateScope))
+			{
+				failureReason = "Method is not PrivateScope";
+				return false;
+			}
+
+			if (method.IsStatic)
+			{
+				failureReason = "Static method cannot be instance proxy";
+				return false;
+			}
+
+			if (method.IsConstructor)
+			{
+				failureReason = "Constructor cannot be instance proxy";
+				return false;
+			}
+
+			if (method.Body.HasExceptionHandlers)
+			{
+				failureReason = "Method contains exception handlers";
+				return false;
+			}
+
+			var nonNops = method.Body.Instructions.Where(i => i.OpCode != OpCodes.Nop).ToList();
+			int paramCount = method.Parameters.Count;
+			if (nonNops.Count != paramCount + 2)
+			{
+				failureReason = $"Instruction count mismatch: expected {paramCount + 2}, got {nonNops.Count}";
+				return false;
+			}
+
+			// Verify parameter loads in exact sequence: 0, 1, ..., paramCount - 1
+			for (int p = 0; p < paramCount; p++)
+			{
+				var inst = nonNops[p];
+				if (!IsExactParameterLoad(inst, p))
+				{
+					failureReason = $"Instruction at position {p} is not exact load of parameter {p} (order or opcode mismatch): {inst}";
+					return false;
+				}
+			}
+
+			var callInst = nonNops[paramCount];
+			if (callInst.OpCode != OpCodes.Call && callInst.OpCode != OpCodes.Callvirt)
+			{
+				failureReason = $"Expected Call or Callvirt at position {paramCount}, got {callInst.OpCode}";
+				return false;
+			}
+
+			if (nonNops[paramCount + 1].OpCode != OpCodes.Ret)
+			{
+				failureReason = $"Terminal instruction is not Ret: {nonNops[paramCount + 1].OpCode}";
+				return false;
+			}
+
+			if (!(callInst.Operand is IMethod targetMethod))
+			{
+				failureReason = "Call operand is not an IMethod";
+				return false;
+			}
+
+			var targetSig = targetMethod.MethodSig;
+			if (targetSig == null)
+			{
+				failureReason = "Cannot resolve target method signature";
+				return false;
+			}
+
+			// In instance proxies, ConfuserEx defines an instance method on an arbitrary type.
+			// The caller passes the target object as the 'this' argument (param 0).
+			// If target is an instance method, target requires 'this' + targetSig.Params.Count.
+			// Total arguments expected is targetSig.Params.Count + 1.
+			if (targetSig.HasThis)
+			{
+				if (paramCount != targetSig.Params.Count + 1)
+				{
+					failureReason = $"Instance call parameter count mismatch: target expects 1 + {targetSig.Params.Count}, proxy has {paramCount}";
+					return false;
+				}
+
+				for (int p = 1; p < paramCount; p++)
+				{
+					if (!TypesMatch(method.Parameters[p].Type, targetSig.Params[p - 1]))
+					{
+						failureReason = $"Parameter {p} type mismatch: proxy has {method.Parameters[p].Type}, target expects {targetSig.Params[p - 1]}";
+						return false;
+					}
+				}
+
+				if (!TypesMatch(method.ReturnType, targetSig.RetType))
+				{
+					failureReason = $"Return type mismatch: proxy returns {method.ReturnType}, target returns {targetSig.RetType}";
+					return false;
+				}
+			}
+			else
+			{
+				if (paramCount != targetSig.Params.Count)
+				{
+					failureReason = $"Static call parameter count mismatch: target expects {targetSig.Params.Count}, proxy has {paramCount}";
+					return false;
+				}
+
+				for (int p = 1; p < paramCount; p++)
+				{
+					if (!TypesMatch(method.Parameters[p].Type, targetSig.Params[p]))
+					{
+						failureReason = $"Parameter {p} type mismatch: proxy has {method.Parameters[p].Type}, target expects {targetSig.Params[p]}";
+						return false;
+					}
+				}
+
+				if (!TypesMatch(method.ReturnType, targetSig.RetType))
+				{
+					failureReason = $"Return type mismatch: proxy returns {method.ReturnType}, target returns {targetSig.RetType}";
+					return false;
+				}
+			}
+
+			// Determine call opcode: if target is virtual or call instruction is Callvirt, use Callvirt
+			var finalOpCode = callInst.OpCode;
+			if (targetSig.HasThis)
+			{
+				bool isVirtual = false;
+				var resolved = (targetMethod as MethodDef) ?? targetMethod.ResolveMethodDef();
+				if (resolved != null)
+				{
+					isVirtual = resolved.IsVirtual;
+				}
+				else
+				{
+					string mName = targetMethod.Name;
+					if (mName == "Equals" || mName == "ToString" || mName == "GetHashCode" || mName == "Dispose" || mName == "get_Message")
+						isVirtual = true;
+				}
+
+				if (isVirtual || callInst.OpCode == OpCodes.Callvirt)
+				{
+					finalOpCode = OpCodes.Callvirt;
+				}
+			}
+
+			callInstruction = Instruction.Create(finalOpCode, targetMethod);
+			return true;
+		}
+
 		private static bool IsExactParameterLoad(Instruction inst, int paramIndex)
 		{
 			if (paramIndex == 0 && inst.OpCode == OpCodes.Ldarg_0) return true;
@@ -740,6 +902,31 @@ namespace ConfuserExTools.ProxyKiller
 				if (inst.Operand is sbyte sb && sb == paramIndex) return true;
 			}
 			return false;
+		}
+
+		private static MethodDef ResolveProxyMethodDef(IMethod operand, ModuleDef module)
+		{
+			if (operand == null) return null;
+			if (operand is MethodDef md) return md;
+			if (operand is MemberRef mr)
+			{
+				var resolved = mr.ResolveMethodDef();
+				if (resolved != null) return resolved;
+
+				if (mr.Class is TypeSpec ts && ts.TypeSig is GenericInstSig gis)
+				{
+					var typeDef = gis.GenericType?.TypeDefOrRef?.ResolveTypeDef();
+					if (typeDef != null && (typeDef.Module == module || typeDef.Module == null))
+					{
+						foreach (var m in typeDef.Methods)
+						{
+							if (m.Name == mr.Name && m.MethodSig?.Params?.Count == mr.MethodSig?.Params?.Count)
+								return m;
+						}
+					}
+				}
+			}
+			return null;
 		}
 
 		private static bool TypesMatch(TypeSig a, TypeSig b)

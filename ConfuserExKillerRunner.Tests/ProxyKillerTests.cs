@@ -613,5 +613,186 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(OpCodes.Ldsfld, ldsfld.OpCode);
             Assert.Equal(OpCodes.Callvirt, callInvoke.OpCode);
         }
+
+        [Fact]
+        public void TryAnalyzeInstanceProxy_ValidInstanceProxy_RecognizedSuccessfully()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var hostType = new TypeDefUser("HostType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(hostType);
+
+            var targetType = new TypeDefUser("TargetType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(targetType);
+
+            // Target method: virtual instance method string TargetType.Compute(int)
+            var target = new MethodDefUser("Compute",
+                MethodSig.CreateInstance(module.CorLibTypes.String, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.HideBySig);
+            targetType.Methods.Add(target);
+
+            // ConfuserEx instance proxy: declared on HostType, takes (HostType this, int param), forwards to TargetType.Compute
+            var proxy = new MethodDefUser("Proxy_Compute",
+                MethodSig.CreateInstance(module.CorLibTypes.String, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            hostType.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeInstanceProxy(proxy, ignoreAccess: false, out var callInst, out var reason);
+            Assert.True(ok, reason);
+            Assert.NotNull(callInst);
+            Assert.Equal(OpCodes.Callvirt, callInst.OpCode);
+            Assert.Equal(target, callInst.Operand);
+        }
+
+        [Fact]
+        public void TryAnalyzeInstanceProxy_StaticMethod_Rejected()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            var target = new MethodDefUser("Target", MethodSig.CreateStatic(module.CorLibTypes.Void));
+            type.Methods.Add(target);
+
+            var proxy = new MethodDefUser("StaticProxy",
+                MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeInstanceProxy(proxy, ignoreAccess: false, out var callInst, out var reason);
+            Assert.False(ok);
+            Assert.Contains("Static method cannot be instance proxy", reason);
+        }
+
+        [Fact]
+        public void TryAnalyzeInstanceProxy_Constructor_Rejected()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            var target = new MethodDefUser("Target", MethodSig.CreateInstance(module.CorLibTypes.Void));
+            type.Methods.Add(target);
+
+            var ctor = new MethodDefUser(".ctor",
+                MethodSig.CreateInstance(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target));
+            ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(ctor);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeInstanceProxy(ctor, ignoreAccess: false, out var callInst, out var reason);
+            Assert.False(ok);
+            Assert.Contains("Constructor cannot be instance proxy", reason);
+        }
+
+        [Fact]
+        public void TryAnalyzeInstanceProxy_ArgumentPermutation_Rejected()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var hostType = new TypeDefUser("HostType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(hostType);
+
+            var targetType = new TypeDefUser("TargetType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(targetType);
+
+            var target = new MethodDefUser("Target",
+                MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.HideBySig);
+            targetType.Methods.Add(target);
+
+            // Loads arg 1 before arg 0
+            var proxy = new MethodDefUser("Proxy_Permuted",
+                MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            hostType.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeInstanceProxy(proxy, ignoreAccess: false, out var callInst, out var reason);
+            Assert.False(ok);
+            Assert.Contains("order or opcode mismatch", reason);
+        }
+
+        [Fact]
+        public void Execute_InlinesInstanceProxiesAndRemovesFromType()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var hostType = new TypeDefUser("HostType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(hostType);
+
+            var targetType = new TypeDefUser("TargetType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(targetType);
+
+            var target = new MethodDefUser("EqualsMethod",
+                MethodSig.CreateInstance(module.CorLibTypes.Boolean, module.CorLibTypes.String),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.HideBySig);
+            targetType.Methods.Add(target);
+
+            var proxy = new MethodDefUser("ConfuserInstanceProxy",
+                MethodSig.CreateInstance(module.CorLibTypes.Boolean, module.CorLibTypes.String),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            hostType.Methods.Add(proxy);
+
+            var userType = new TypeDefUser("UserType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+
+            var caller = new MethodDefUser("UserMethod",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            // Caller pushes string, string, calls proxy
+            caller.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "a"));
+            caller.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "b"));
+            var callProxyInst = Instruction.Create(OpCodes.Call, proxy);
+            caller.Body.Instructions.Add(callProxyInst);
+            caller.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            userType.Methods.Add(caller);
+
+            int restored = ProxyKillerImpl.Execute(module, ignoreAccess: false, removeProxyMethods: true);
+
+            Assert.Equal(1, restored);
+            Assert.Equal(OpCodes.Callvirt, callProxyInst.OpCode);
+            Assert.Equal(target, callProxyInst.Operand);
+            Assert.DoesNotContain(proxy, hostType.Methods);
+        }
     }
 }

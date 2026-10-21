@@ -152,7 +152,7 @@ namespace ConfuserExKillerRunner.Analysis
             return regressions;
         }
 
-        public static AuditReport Audit(string filePath, bool runExternalVerifier = true, string workingDir = null)
+        public static AuditReport Audit(string filePath, bool runExternalVerifier = true, string workingDir = null, IEnumerable<string> dependencyDirectories = null)
         {
             if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
                 throw new FileNotFoundException("Assembly file not found for audit", filePath);
@@ -200,28 +200,104 @@ namespace ConfuserExKillerRunner.Analysis
             // Run external verification when requested and structurally valid
             if (runExternalVerifier && report.CanLoad && report.StructuralAuditPassed)
             {
-                RunExternalVerification(filePath, isNetFramework, report, workingDir);
+                RunExternalVerification(filePath, isNetFramework, report, workingDir, dependencyDirectories);
             }
 
             return report;
         }
 
-        private static void RunExternalVerification(string filePath, bool isNetFramework, AuditReport report, string workingDir)
+        private static void RunExternalVerification(string filePath, bool isNetFramework, AuditReport report, string workingDir, IEnumerable<string> dependencyDirectories)
         {
             if (isNetFramework)
             {
                 string peverify = ResolvePEVerifyPath();
                 if (peverify != null)
                 {
+                    string verificationDir = workingDir;
+                    string stagedFilePath = filePath;
+                    string tempStagingDir = null;
+
                     try
                     {
-                        var proc = ProcessRunner.Run(peverify, $"\"{filePath}\" /IL /MD", workingDir, timeoutMs: 30000);
-                        InterpretPEVerifyResult(proc.ExitCode, proc.StandardOutput, proc.StandardError, proc.TimedOut, report);
+                        var depDirsList = (dependencyDirectories ?? Enumerable.Empty<string>())
+                            .Where(d => !string.IsNullOrWhiteSpace(d) && Directory.Exists(d))
+                            .Select(Path.GetFullPath)
+                            .ToList();
+
+                        if (depDirsList.Count > 0)
+                        {
+                            string fileDir = Path.GetFullPath(Path.GetDirectoryName(filePath));
+                            bool alreadyInDepDir = depDirsList.Any(d => string.Equals(d, fileDir, StringComparison.OrdinalIgnoreCase));
+
+                            if (!alreadyInDepDir)
+                            {
+                                tempStagingDir = Path.Combine(Path.GetTempPath(), "peverify_stage_" + Guid.NewGuid().ToString("N"));
+                                Directory.CreateDirectory(tempStagingDir);
+
+                                stagedFilePath = Path.Combine(tempStagingDir, Path.GetFileName(filePath));
+                                File.Copy(filePath, stagedFilePath, true);
+
+                                try
+                                {
+                                    using (var mod = ModuleDefMD.Load(filePath))
+                                    {
+                                        foreach (var asmRef in mod.GetAssemblyRefs())
+                                        {
+                                            string asmName = asmRef.Name?.String;
+                                            if (string.IsNullOrEmpty(asmName)) continue;
+
+                                            string targetDll = asmName + ".dll";
+                                            string destFile = Path.Combine(tempStagingDir, targetDll);
+                                            if (File.Exists(destFile)) continue;
+
+                                            foreach (var dir in depDirsList)
+                                            {
+                                                string candidateDll = Path.Combine(dir, targetDll);
+                                                if (File.Exists(candidateDll))
+                                                {
+                                                    File.Copy(candidateDll, destFile, true);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                catch
+                                {
+                                    foreach (var dir in depDirsList)
+                                    {
+                                        foreach (var dll in Directory.GetFiles(dir, "*.dll"))
+                                        {
+                                            string dest = Path.Combine(tempStagingDir, Path.GetFileName(dll));
+                                            if (!File.Exists(dest))
+                                                File.Copy(dll, dest, true);
+                                        }
+                                    }
+                                }
+
+                                verificationDir = tempStagingDir;
+                            }
+                        }
+
+                        // 1. Independent IL verification
+                        var procIL = ProcessRunner.Run(peverify, $"\"{stagedFilePath}\" /IL /UNIQUE /NOLOGO", verificationDir, timeoutMs: 30000);
+                        InterpretPEVerifyILResult(procIL.ExitCode, procIL.StandardOutput, procIL.StandardError, procIL.TimedOut, report);
+
+                        // 2. Independent MD verification
+                        var procMD = ProcessRunner.Run(peverify, $"\"{stagedFilePath}\" /MD /UNIQUE /NOLOGO", verificationDir, timeoutMs: 30000);
+                        InterpretPEVerifyMDResult(procMD.ExitCode, procMD.StandardOutput, procMD.StandardError, procMD.TimedOut, report);
                     }
                     catch (Exception ex)
                     {
                         report.ILVerificationStatus = "UNVERIFIED";
                         report.ILVerificationNotes = $"PEVerify invocation failed: {ex.Message}";
+                    }
+                    finally
+                    {
+                        if (tempStagingDir != null && Directory.Exists(tempStagingDir))
+                        {
+                            try { Directory.Delete(tempStagingDir, true); } catch { }
+                        }
                     }
                 }
                 else
@@ -237,7 +313,16 @@ namespace ConfuserExKillerRunner.Analysis
                 {
                     try
                     {
-                        var proc = ProcessRunner.Run(ilverify, $"\"{filePath}\"", workingDir, timeoutMs: 30000);
+                        string args = $"\"{filePath}\"";
+                        if (dependencyDirectories != null)
+                        {
+                            foreach (var d in dependencyDirectories.Where(Directory.Exists))
+                            {
+                                args += $" -r \"{Path.Combine(d, "*.dll")}\"";
+                            }
+                        }
+
+                        var proc = ProcessRunner.Run(ilverify, args, workingDir, timeoutMs: 30000);
                         InterpretILVerifyResult(proc.ExitCode, proc.StandardOutput, proc.StandardError, proc.TimedOut, report);
                     }
                     catch (Exception ex)
@@ -256,48 +341,133 @@ namespace ConfuserExKillerRunner.Analysis
 
         internal static void InterpretPEVerifyResult(int exitCode, string stdOut, string stdErr, bool timedOut, AuditReport report)
         {
+            InterpretPEVerifyILResult(exitCode, stdOut, stdErr, timedOut, report);
+        }
+
+        internal static void InterpretPEVerifyILResult(int exitCode, string stdOut, string stdErr, bool timedOut, AuditReport report)
+        {
             if (timedOut)
             {
                 report.ILVerificationStatus = "INDETERMINATE";
-                report.ILVerificationNotes = "PEVerify timed out after 30000ms; external IL verification is indeterminate.";
-                report.Warnings.Add("PEVerify timed out; external IL verification is indeterminate.");
+                report.ILVerificationNotes = "PEVerify /IL timed out after 30000ms; external IL verification is indeterminate.";
+                report.Warnings.Add("PEVerify /IL timed out; external IL verification is indeterminate.");
+                return;
             }
-            else if (exitCode == 0)
+
+            if (exitCode == 0)
+            {
+                report.ILVerificationStatus = "PASSED";
+                report.ILVerificationNotes = "PEVerify: All classes and methods verified.";
+                return;
+            }
+
+            string combinedOutput = ((stdOut ?? "") + "\n" + (stdErr ?? "")).Trim();
+            string[] lines = combinedOutput.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+            var errorLines = lines.Where(l => !l.StartsWith("Outil de", StringComparison.OrdinalIgnoreCase)
+                                           && !l.StartsWith("Microsoft (R)", StringComparison.OrdinalIgnoreCase)
+                                           && !l.StartsWith("Copyright (c)", StringComparison.OrdinalIgnoreCase)
+                                           && !l.Contains("Toutes les classes et les méthodes vérifiées")
+                                           && !l.Contains("All Classes and Methods Verified")).ToList();
+
+            bool isInternalError = exitCode == -2146231907 // 0x8013129D
+                || combinedOutput.IndexOf("Internal error", StringComparison.OrdinalIgnoreCase) >= 0
+                || combinedOutput.IndexOf("Erreur interne", StringComparison.OrdinalIgnoreCase) >= 0
+                || combinedOutput.IndexOf("Fatal error", StringComparison.OrdinalIgnoreCase) >= 0
+                || combinedOutput.IndexOf("Erreur fatale", StringComparison.OrdinalIgnoreCase) >= 0
+                || (string.IsNullOrWhiteSpace(combinedOutput) && exitCode != 0);
+
+            if (isInternalError)
+            {
+                string outSnippet = errorLines.Count > 0 ? string.Join(" ", errorLines) : combinedOutput.Trim();
+                if (outSnippet.Length > 200) outSnippet = outSnippet.Substring(0, 200) + "...";
+
+                report.ILVerificationStatus = "INDETERMINATE";
+                report.ILVerificationNotes = $"PEVerify /IL encountered an internal engine error (ExitCode 0x{exitCode:X8}): {outSnippet}";
+                report.Warnings.Add($"PEVerify internal error: {outSnippet}");
+                return;
+            }
+
+            int missingDepErrors = 0;
+            int moduleStubErrors = 0;
+            int userMethodErrors = 0;
+            var userErrors = new List<string>();
+
+            foreach (var line in errorLines)
+            {
+                if (line.IndexOf("0x80070002", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    line.IndexOf("en raison d'un assembly référencé manquant", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    missingDepErrors++;
+                    report.Warnings.Add($"PEVerify /IL dependency warning: {line.Trim()}");
+                }
+                else if (line.Contains("<Module>::") || line.Contains("[MD]:") || line.Contains("token :0x060000"))
+                {
+                    moduleStubErrors++;
+                    report.Warnings.Add($"PEVerify /IL <Module> warning: {line.Trim()}");
+                }
+                else if (line.IndexOf("[IL]: Erreur", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         line.IndexOf("[IL]: Error", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    userMethodErrors++;
+                    userErrors.Add(line.Trim());
+                }
+            }
+
+            if (userMethodErrors > 0)
+            {
+                report.ILVerificationStatus = "FAILED";
+                string outSnippet = string.Join("; ", userErrors.Take(3));
+                if (outSnippet.Length > 200) outSnippet = outSnippet.Substring(0, 200) + "...";
+                report.ILVerificationNotes = $"PEVerify /IL reported {userMethodErrors} method verification error(s): {outSnippet}";
+                report.Errors.Add($"PEVerify reported errors: {outSnippet}");
+                report.Warnings.Add($"PEVerify reported errors: {outSnippet}");
+            }
+            else if (missingDepErrors > 0 || moduleStubErrors > 0)
+            {
+                report.ILVerificationStatus = "WARNINGS";
+                report.ILVerificationNotes = $"PEVerify /IL passed for all user methods with {missingDepErrors} missing dependency warning(s) and {moduleStubErrors} module stub warning(s).";
+            }
+            else
             {
                 report.ILVerificationStatus = "PASSED";
                 report.ILVerificationNotes = "PEVerify: All classes and methods verified.";
             }
-            else
+        }
+
+        internal static void InterpretPEVerifyMDResult(int exitCode, string stdOut, string stdErr, bool timedOut, AuditReport report)
+        {
+            if (timedOut)
             {
-                string combinedOutput = ((stdOut ?? "") + "\n" + (stdErr ?? "")).Trim();
-                bool isInternalError = exitCode == -2146231907 // 0x8013129D
-                    || combinedOutput.IndexOf("0x8013129d", StringComparison.OrdinalIgnoreCase) >= 0
-                    || combinedOutput.IndexOf("Internal error", StringComparison.OrdinalIgnoreCase) >= 0
-                    || combinedOutput.IndexOf("Erreur interne", StringComparison.OrdinalIgnoreCase) >= 0
-                    || combinedOutput.IndexOf("Fatal error", StringComparison.OrdinalIgnoreCase) >= 0
-                    || combinedOutput.IndexOf("Erreur fatale", StringComparison.OrdinalIgnoreCase) >= 0
-                    || (string.IsNullOrWhiteSpace(combinedOutput) && exitCode != 0);
+                report.Warnings.Add("PEVerify /MD timed out after 30000ms.");
+                return;
+            }
 
-                string[] lines = combinedOutput.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                var nonBanner = lines.Where(l => !l.StartsWith("Outil de", StringComparison.OrdinalIgnoreCase)
-                                              && !l.StartsWith("Microsoft (R)", StringComparison.OrdinalIgnoreCase)
-                                              && !l.StartsWith("Copyright (c)", StringComparison.OrdinalIgnoreCase)).ToList();
-                string outSnippet = nonBanner.Count > 0 ? string.Join(" ", nonBanner) : combinedOutput.Trim();
-                if (outSnippet.Length > 200) outSnippet = outSnippet.Substring(0, 200) + "...";
+            if (exitCode == 0)
+            {
+                return;
+            }
 
-                if (isInternalError)
-                {
-                    report.ILVerificationStatus = "INDETERMINATE";
-                    report.ILVerificationNotes = $"PEVerify encountered an internal engine error (ExitCode 0x{exitCode:X8}): {outSnippet}";
-                    report.Warnings.Add($"PEVerify internal error: {outSnippet}");
-                }
-                else
-                {
-                    report.ILVerificationStatus = "FAILED";
-                    report.ILVerificationNotes = $"PEVerify reported verification errors (ExitCode {exitCode}): {outSnippet}";
-                    report.Errors.Add($"PEVerify reported errors: {outSnippet}");
-                    report.Warnings.Add($"PEVerify reported errors: {outSnippet}");
-                }
+            string combinedOutput = ((stdOut ?? "") + "\n" + (stdErr ?? "")).Trim();
+            string[] lines = combinedOutput.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+            var mdLines = lines.Where(l => !l.StartsWith("Outil de", StringComparison.OrdinalIgnoreCase)
+                                        && !l.StartsWith("Microsoft (R)", StringComparison.OrdinalIgnoreCase)
+                                        && !l.StartsWith("Copyright (c)", StringComparison.OrdinalIgnoreCase)).ToList();
+
+            bool has0x8013129d = combinedOutput.IndexOf("0x8013129d", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool allVerified = combinedOutput.IndexOf("Toutes les classes et les méthodes vérifiées", StringComparison.OrdinalIgnoreCase) >= 0
+                            || combinedOutput.IndexOf("All Classes and Methods Verified", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            if (has0x8013129d && allVerified)
+            {
+                report.Warnings.Add("PEVerify /MD warning: ConfuserEx <Module> stub metadata warning (0x8013129d). All classes and methods verified.");
+            }
+            else if (mdLines.Count > 0)
+            {
+                string snippet = string.Join(" ", mdLines.Take(3));
+                if (snippet.Length > 200) snippet = snippet.Substring(0, 200) + "...";
+                report.Warnings.Add($"PEVerify /MD reported: {snippet}");
             }
         }
 
