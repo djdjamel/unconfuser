@@ -42,7 +42,7 @@ This document specifies the standard operating procedure for re-evaluating the r
 To execute the complete deobfuscation pipeline with isolated dynamic execution and JSON audit generation:
 
 ```powershell
-dotnet run --project ConfuserExKillerRunner/ConfuserExKillerRunner.csproj -c Release -- `
+dotnet run --project ConfuserExKillerRunner/ConfuserExKillerRunner.csproj -c Release -f net8.0-windows -- `
   "H:\Xpert.Common.BLL.dll" `
   --allow-execution `
   --allow-target-deps `
@@ -54,7 +54,7 @@ dotnet run --project ConfuserExKillerRunner/ConfuserExKillerRunner.csproj -c Rel
 To perform pure static analysis, COR20 header repair, and triage inspection without executing target code:
 
 ```powershell
-dotnet run --project ConfuserExKillerRunner/ConfuserExKillerRunner.csproj -c Release -- `
+dotnet run --project ConfuserExKillerRunner/ConfuserExKillerRunner.csproj -c Release -f net8.0-windows -- `
   "H:\Xpert.Common.BLL.dll" `
   --report-json "H:\Xpert.Common.BLL_static_audit.json"
 ```
