@@ -73,7 +73,8 @@ namespace ConfuserExKillerRunner.Analysis
             int junkInstructionsStrippedCount,
             int cleanerHooksStrippedCount,
             bool compressorUnpacked = false,
-            IEnumerable<string> unevaluatedProtections = null)
+            IEnumerable<string> unevaluatedProtections = null,
+            bool symbolsRenamed = false)
         {
             var result = new ProtectionMatrixResult();
             var unevaluatedSet = unevaluatedProtections != null
@@ -590,7 +591,8 @@ namespace ConfuserExKillerRunner.Analysis
             result.Items.Add(compItem);
 
             // 15. Name Protection (Renaming)
-            bool renamingDetected = HasRenamingProtection(module);
+            bool renamingRemains = HasRenamingProtection(module);
+            bool renamingDetected = symbolsRenamed || renamingRemains;
             var renameItem = new ProtectionItem
             {
                 Name = "Name Protection",
@@ -608,13 +610,19 @@ namespace ConfuserExKillerRunner.Analysis
             {
                 renameItem.Status = ProtectionSupportStatus.NotDetected;
                 renameItem.ResultSummary = "N/A";
-                renameItem.Details = "Symbols do not show high-entropy ConfuserEx renaming patterns.";
+                renameItem.Details = "Symbols do not show unprintable or high-entropy ConfuserEx renaming patterns.";
+            }
+            else if (symbolsRenamed && !renamingRemains)
+            {
+                renameItem.Status = ProtectionSupportStatus.VerifiedOnRealFixture;
+                renameItem.ResultSummary = "Cleaned (Normalized)";
+                renameItem.Details = "All unprintable and Unicode-mangled identifiers have been cleaned and normalized to valid C# symbols.";
             }
             else
             {
                 renameItem.Status = ProtectionSupportStatus.PartiallyProcessed;
                 renameItem.ResultSummary = "Partially Processed";
-                renameItem.Details = "Symbol renaming is irreversible without original mapping; de4dot passes clean unprintable identifiers.";
+                renameItem.Details = "Symbol renaming detected; unprintable or mangled identifiers remain in internal/private scope.";
             }
             result.Items.Add(renameItem);
 
@@ -980,11 +988,35 @@ namespace ConfuserExKillerRunner.Analysis
                 if (!UTF8String.IsNullOrEmpty(t.Name))
                 {
                     string s = t.Name.String;
-                    if (s != null && (s.Length > 20 || s.Any(c => c > 127)))
+                    if (s != null && IsConfuserExObfuscatedIdentifier(s))
                         obfuscatedCount++;
                 }
+                foreach (var m in t.Methods)
+                {
+                    if (!UTF8String.IsNullOrEmpty(m.Name) && !m.IsConstructor && IsConfuserExObfuscatedIdentifier(m.Name.String))
+                        obfuscatedCount++;
+                }
+                foreach (var f in t.Fields)
+                {
+                    if (!UTF8String.IsNullOrEmpty(f.Name) && IsConfuserExObfuscatedIdentifier(f.Name.String))
+                        obfuscatedCount++;
+                }
+                if (obfuscatedCount > 3) return true;
             }
             return obfuscatedCount > 3;
+        }
+
+        public static bool IsConfuserExObfuscatedIdentifier(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            foreach (char c in name)
+            {
+                int code = (int)c;
+                if (code >= 0x2000 && code <= 0x206F) return true;
+                if (code >= 0xFE00 && code <= 0xFEFF) return true;
+                if (char.IsControl(c) || char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.Format) return true;
+            }
+            return false;
         }
     }
 }

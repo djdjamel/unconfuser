@@ -734,5 +734,49 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal("Not Evaluated", item.ResultSummary);
             Assert.False(matrix.AllConstantsResolved);
         }
+
+        [Fact]
+        public void NameProtection_SymbolsRenamed_EvaluatesVerifiedOnRealFixture()
+        {
+            var module = CreateEmptyModule();
+            var matrix = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: false,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 0,
+                allConstantsResolved: true,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0,
+                symbolsRenamed: true);
+
+            var item = matrix.Items.First(i => i.Name == "Name Protection");
+            Assert.True(item.Detected);
+            Assert.Equal(ProtectionSupportStatus.VerifiedOnRealFixture, item.Status);
+            Assert.Equal("Cleaned (Normalized)", item.ResultSummary);
+        }
+
+        [Fact]
+        public void IsConfuserExObfuscatedIdentifier_DetectsUnicodeFormattingChars()
+        {
+            // \u200b is Zero Width Space, \u202d is Left-to-Right Override
+            string obf1 = "\u200bMethod";
+            string obf2 = "\u202d\u200cClass";
+            Assert.True(ProtectionMatrix.IsConfuserExObfuscatedIdentifier(obf1));
+            Assert.True(ProtectionMatrix.IsConfuserExObfuscatedIdentifier(obf2));
+        }
+
+        [Fact]
+        public void IsConfuserExObfuscatedIdentifier_IgnoresLegitimateLongIdentifiers()
+        {
+            Assert.False(ProtectionMatrix.IsConfuserExObfuscatedIdentifier("ConfigChangedEventArgs"));
+            Assert.False(ProtectionMatrix.IsConfuserExObfuscatedIdentifier("APPLICATION_NAME_DESIGNATION"));
+            Assert.False(ProtectionMatrix.IsConfuserExObfuscatedIdentifier("XpertExceptionTransaction"));
+            Assert.False(ProtectionMatrix.IsConfuserExObfuscatedIdentifier("TDB_SIMPLE_INDICATORS"));
+        }
     }
 }

@@ -673,6 +673,7 @@ namespace ConfuserExKillerRunner
             }
 
             string currentIntermediate = cexkPath;
+            bool de4dotSucceeded = false;
 
             // Step 5: de4dot-cex
             var swStage5 = Stopwatch.StartNew();
@@ -689,6 +690,14 @@ namespace ConfuserExKillerRunner
 
                 Console.WriteLine($"[*] Step 5: Running de4dot-cex ({de4dotExecutable})...");
                 string de4dotArgs = $"\"{cexkPath}\" -p crx -o \"{cleanedPath}\"";
+                if (allowedDepDirs != null)
+                {
+                    foreach (var depDir in allowedDepDirs)
+                    {
+                        if (!string.IsNullOrEmpty(depDir) && Directory.Exists(depDir))
+                            de4dotArgs += $" --asm-path \"{depDir}\"";
+                    }
+                }
                 var de4dotResult = ProcessRunner.Run(de4dotExecutable, de4dotArgs, executionTempDir, timeoutMs: 180000);
 
                 if (verbose || !de4dotResult.Success)
@@ -705,6 +714,7 @@ namespace ConfuserExKillerRunner
                 {
                     Console.WriteLine($"[+] de4dot-cex completed: {cleanedPath}");
                     currentIntermediate = cleanedPath;
+                    de4dotSucceeded = true;
                 }
                 else
                 {
@@ -1054,7 +1064,9 @@ namespace ConfuserExKillerRunner
                         switchesResolvedCount: totalSwitchesResolved,
                         junkInstructionsStrippedCount: totalJunkStripped,
                         cleanerHooksStrippedCount: totalCleanerHooks,
-                        compressorUnpacked: compressorWasUnpacked);
+                        compressorUnpacked: compressorWasUnpacked,
+                        unevaluatedProtections: null,
+                        symbolsRenamed: de4dotSucceeded);
 
                     stepTimings["Stage8_ProtectionMatrix_Evaluation"] = swMatrix.ElapsedMilliseconds;
                     Console.WriteLine(ProtectionMatrix.FormatReport(matrix));

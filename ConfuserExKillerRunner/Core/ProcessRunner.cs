@@ -156,6 +156,10 @@ namespace ConfuserExKillerRunner.Core
                 if (parent == null) break;
                 candidatePaths.Add(Path.Combine(parent.FullName, "tools", "de4dot", "de4dot.exe"));
                 candidatePaths.Add(Path.Combine(parent.FullName, "de4dot.exe"));
+                candidatePaths.Add(Path.Combine(parent.FullName, "bin", "Release", "net48", "tools", "de4dot", "de4dot.exe"));
+                candidatePaths.Add(Path.Combine(parent.FullName, "bin", "Debug", "net48", "tools", "de4dot", "de4dot.exe"));
+                candidatePaths.Add(Path.Combine(parent.FullName, "ConfuserExKillerRunner", "bin", "Release", "net48", "tools", "de4dot", "de4dot.exe"));
+                candidatePaths.Add(Path.Combine(parent.FullName, "ConfuserExKillerRunner", "bin", "Debug", "net48", "tools", "de4dot", "de4dot.exe"));
                 current = parent.FullName;
             }
 
