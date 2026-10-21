@@ -15,7 +15,8 @@ namespace ConfuserExKillerRunner.Analysis
         RequiresDynamicExecution,
         PartiallyProcessed,
         VerifiedOnRealFixture,
-        Unsupported
+        Unsupported,
+        NotEvaluated
     }
 
     public sealed class ProtectionItem
@@ -35,6 +36,7 @@ namespace ConfuserExKillerRunner.Analysis
         public bool HasPartiallyProcessed { get; set; }
         public bool HasUnsupported { get; set; }
         public bool HasRequiresDynamicSkipped { get; set; }
+        public bool HasNotEvaluated { get; set; }
         public string OverallVerdict { get; set; }
         public string SummaryNotes { get; set; }
     }
@@ -53,9 +55,22 @@ namespace ConfuserExKillerRunner.Analysis
             int proxiesInlinedCount,
             int switchesResolvedCount,
             int junkInstructionsStrippedCount,
-            int cleanerHooksStrippedCount)
+            int cleanerHooksStrippedCount,
+            bool compressorUnpacked = false,
+            IEnumerable<string> unevaluatedProtections = null)
         {
             var result = new ProtectionMatrixResult();
+            var unevaluatedSet = unevaluatedProtections != null
+                ? new HashSet<string>(unevaluatedProtections, StringComparer.OrdinalIgnoreCase)
+                : null;
+
+            Func<string, string, bool> isUnevaluated = (name, mode) =>
+            {
+                if (unevaluatedSet == null) return false;
+                return unevaluatedSet.Contains(name) ||
+                       unevaluatedSet.Contains($"{name} ({mode})") ||
+                       unevaluatedSet.Contains(mode);
+            };
 
             // 1. Anti-Tamper (Normal)
             bool atNormalDetected = HasAntiTamperNormal(module) || antiTamperDecrypted;
@@ -65,7 +80,14 @@ namespace ConfuserExKillerRunner.Analysis
                 Mode = "Normal",
                 Detected = atNormalDetected
             };
-            if (!atNormalDetected)
+            if (isUnevaluated("Anti-Tamper", "Normal"))
+            {
+                atNormal.Detected = false;
+                atNormal.Status = ProtectionSupportStatus.NotEvaluated;
+                atNormal.ResultSummary = "Not Evaluated";
+                atNormal.Details = "Anti-Tamper normal detection was not evaluated.";
+            }
+            else if (!atNormalDetected)
             {
                 atNormal.Status = ProtectionSupportStatus.NotDetected;
                 atNormal.ResultSummary = "N/A";
@@ -98,7 +120,14 @@ namespace ConfuserExKillerRunner.Analysis
                 Mode = "JIT",
                 Detected = jitModeDetected
             };
-            if (!jitModeDetected)
+            if (isUnevaluated("Anti-Tamper", "JIT"))
+            {
+                atJit.Detected = false;
+                atJit.Status = ProtectionSupportStatus.NotEvaluated;
+                atJit.ResultSummary = "Not Evaluated";
+                atJit.Details = "Anti-Tamper JIT mode detection was not evaluated.";
+            }
+            else if (!jitModeDetected)
             {
                 atJit.Status = ProtectionSupportStatus.NotDetected;
                 atJit.ResultSummary = "N/A";
@@ -120,7 +149,14 @@ namespace ConfuserExKillerRunner.Analysis
                 Mode = "PE/CLR Header Scrub",
                 Detected = antiDumpDetected
             };
-            if (!antiDumpDetected)
+            if (isUnevaluated("Anti-Dump", "PE/CLR Header Scrub"))
+            {
+                antiDump.Detected = false;
+                antiDump.Status = ProtectionSupportStatus.NotEvaluated;
+                antiDump.ResultSummary = "Not Evaluated";
+                antiDump.Details = "Anti-Dump detection was not evaluated.";
+            }
+            else if (!antiDumpDetected)
             {
                 antiDump.Status = ProtectionSupportStatus.NotDetected;
                 antiDump.ResultSummary = "N/A";
@@ -148,7 +184,14 @@ namespace ConfuserExKillerRunner.Analysis
                 Mode = "P/Invoke & API Checks",
                 Detected = antiDebugDetected
             };
-            if (!antiDebugDetected)
+            if (isUnevaluated("Anti-Debug", "P/Invoke & API Checks"))
+            {
+                antiDebug.Detected = false;
+                antiDebug.Status = ProtectionSupportStatus.NotEvaluated;
+                antiDebug.ResultSummary = "Not Evaluated";
+                antiDebug.Details = "Anti-Debug detection was not evaluated.";
+            }
+            else if (!antiDebugDetected)
             {
                 antiDebug.Status = ProtectionSupportStatus.NotDetected;
                 antiDebug.ResultSummary = "N/A";
@@ -170,7 +213,14 @@ namespace ConfuserExKillerRunner.Analysis
                 Mode = "Attribute Suppression",
                 Detected = antiIldasmDetected
             };
-            if (!antiIldasmDetected)
+            if (isUnevaluated("Anti-ILDasm", "Attribute Suppression"))
+            {
+                antiIldasm.Detected = false;
+                antiIldasm.Status = ProtectionSupportStatus.NotEvaluated;
+                antiIldasm.ResultSummary = "Not Evaluated";
+                antiIldasm.Details = "Anti-ILDasm suppression detection was not evaluated.";
+            }
+            else if (!antiIldasmDetected)
             {
                 antiIldasm.Status = ProtectionSupportStatus.NotDetected;
                 antiIldasm.ResultSummary = "N/A";
@@ -185,24 +235,31 @@ namespace ConfuserExKillerRunner.Analysis
             result.Items.Add(antiIldasm);
 
             // 6. Invalid Metadata
-            bool invalidMetadataDetected = HasInvalidMetadata(module);
+            bool? invalidMetadataDetected = HasInvalidMetadata(module);
             var invalidMeta = new ProtectionItem
             {
                 Name = "Invalid Metadata",
                 Mode = "Stream & Table Mangling",
-                Detected = invalidMetadataDetected
+                Detected = invalidMetadataDetected ?? false
             };
-            if (!invalidMetadataDetected)
+            if (isUnevaluated("Invalid Metadata", "Stream & Table Mangling") || !invalidMetadataDetected.HasValue)
+            {
+                invalidMeta.Detected = false;
+                invalidMeta.Status = ProtectionSupportStatus.NotEvaluated;
+                invalidMeta.ResultSummary = "Not Evaluated";
+                invalidMeta.Details = "Invalid metadata detection not evaluated or stream table inaccessible.";
+            }
+            else if (!invalidMetadataDetected.Value)
             {
                 invalidMeta.Status = ProtectionSupportStatus.NotDetected;
                 invalidMeta.ResultSummary = "N/A";
-                invalidMeta.Details = "Standard ECMA-335 metadata tables intact.";
+                invalidMeta.Details = "Standard ECMA-335 metadata streams and tables verified intact.";
             }
             else
             {
                 invalidMeta.Status = ProtectionSupportStatus.SupportedStatic;
                 invalidMeta.ResultSummary = "Normalized";
-                invalidMeta.Details = "Tables and stream boundaries normalized during dnlib reconstruction.";
+                invalidMeta.Details = "Invalid metadata streams or mangled stream names detected and normalized during dnlib reconstruction.";
             }
             result.Items.Add(invalidMeta);
 
@@ -247,24 +304,31 @@ namespace ConfuserExKillerRunner.Analysis
             result.Items.Add(constItem);
 
             // 8. Constants (x86)
-            bool constX86Detected = HasX86ConstantDecrypters(module);
+            bool? constX86Detected = HasX86ConstantDecrypters(module);
             var constX86 = new ProtectionItem
             {
                 Name = "Constants",
                 Mode = "x86 Native",
-                Detected = constX86Detected
+                Detected = constX86Detected ?? false
             };
-            if (!constX86Detected)
+            if (isUnevaluated("Constants", "x86 Native") || !constX86Detected.HasValue)
             {
-                constX86.Status = ProtectionSupportStatus.NotDetected;
-                constX86.ResultSummary = "N/A";
-                constX86.Details = "No native x86 constant decrypter stubs present.";
+                constX86.Detected = false;
+                constX86.Status = ProtectionSupportStatus.NotEvaluated;
+                constX86.ResultSummary = "Not Evaluated";
+                constX86.Details = "Native x86 constant decrypter detection not evaluated in current module representation.";
             }
-            else
+            else if (constX86Detected.Value)
             {
                 constX86.Status = ProtectionSupportStatus.Unsupported;
                 constX86.ResultSummary = "Unsupported";
                 constX86.Details = "Native x86 machine-code decrypters require native x86 emulation, which is not supported.";
+            }
+            else
+            {
+                constX86.Status = ProtectionSupportStatus.NotDetected;
+                constX86.ResultSummary = "N/A";
+                constX86.Details = "Pure IL assembly; no native x86 constant decrypter stubs present.";
             }
             result.Items.Add(constX86);
 
@@ -276,7 +340,14 @@ namespace ConfuserExKillerRunner.Analysis
                 Mode = "Switch / State Machine",
                 Detected = cflowSwitchDetected
             };
-            if (!cflowSwitchDetected)
+            if (isUnevaluated("Control Flow", "Switch / State Machine"))
+            {
+                cflowSwitch.Detected = false;
+                cflowSwitch.Status = ProtectionSupportStatus.NotEvaluated;
+                cflowSwitch.ResultSummary = "Not Evaluated";
+                cflowSwitch.Details = "Control Flow switch dispatcher detection was not evaluated.";
+            }
+            else if (!cflowSwitchDetected)
             {
                 cflowSwitch.Status = ProtectionSupportStatus.NotDetected;
                 cflowSwitch.ResultSummary = "N/A";
@@ -304,39 +375,59 @@ namespace ConfuserExKillerRunner.Analysis
                 Mode = "Jump Mangler & Junk",
                 Detected = cflowJunkDetected
             };
-            if (!cflowJunkDetected)
+            if (isUnevaluated("Control Flow", "Jump Mangler & Junk"))
+            {
+                cflowJunk.Detected = false;
+                cflowJunk.Status = ProtectionSupportStatus.NotEvaluated;
+                cflowJunk.ResultSummary = "Not Evaluated";
+                cflowJunk.Details = "Dead code and junk instruction detection was not evaluated.";
+            }
+            else if (!cflowJunkDetected)
             {
                 cflowJunk.Status = ProtectionSupportStatus.NotDetected;
                 cflowJunk.ResultSummary = "N/A";
-                cflowJunk.Details = "No opaque predicates or dead trampoline chains detected.";
+                cflowJunk.Details = "No opaque predicates, dead trampoline chains, or junk stack pairs detected.";
             }
-            else
+            else if (junkInstructionsStrippedCount > 0)
             {
                 cflowJunk.Status = ProtectionSupportStatus.VerifiedOnRealFixture;
                 cflowJunk.ResultSummary = $"Cleaned ({junkInstructionsStrippedCount})";
                 cflowJunk.Details = "Opaque predicates evaluated, trampolines flattened, and dead instructions pruned.";
             }
+            else
+            {
+                cflowJunk.Status = ProtectionSupportStatus.PartiallyProcessed;
+                cflowJunk.ResultSummary = "Detected / Unresolved";
+                cflowJunk.Details = "Dead code or junk instruction sequences detected but not fully pruned.";
+            }
             result.Items.Add(cflowJunk);
 
             // 11. Control Flow (x86)
-            bool cflowX86Detected = HasX86ControlFlow(module);
+            bool? cflowX86Detected = HasX86ControlFlow(module);
             var cflowX86 = new ProtectionItem
             {
                 Name = "Control Flow",
                 Mode = "x86 Native Thunks",
-                Detected = cflowX86Detected
+                Detected = cflowX86Detected ?? false
             };
-            if (!cflowX86Detected)
+            if (isUnevaluated("Control Flow", "x86 Native Thunks") || !cflowX86Detected.HasValue)
             {
-                cflowX86.Status = ProtectionSupportStatus.NotDetected;
-                cflowX86.ResultSummary = "N/A";
-                cflowX86.Details = "No native x86 control-flow thunks detected.";
+                cflowX86.Detected = false;
+                cflowX86.Status = ProtectionSupportStatus.NotEvaluated;
+                cflowX86.ResultSummary = "Not Evaluated";
+                cflowX86.Details = "Native x86 control-flow thunk detection not evaluated in current module representation.";
             }
-            else
+            else if (cflowX86Detected.Value)
             {
                 cflowX86.Status = ProtectionSupportStatus.Unsupported;
                 cflowX86.ResultSummary = "Unsupported";
-                cflowX86.Details = "Native x86 control-flow thunks are not supported.";
+                cflowX86.Details = "Native x86 control-flow thunks detected. Native x86 machine-code emulation is not supported.";
+            }
+            else
+            {
+                cflowX86.Status = ProtectionSupportStatus.NotDetected;
+                cflowX86.ResultSummary = "N/A";
+                cflowX86.Details = "Pure IL assembly; no native x86 control-flow thunks detected.";
             }
             result.Items.Add(cflowX86);
 
@@ -348,7 +439,14 @@ namespace ConfuserExKillerRunner.Analysis
                 Mode = "Mild / Strong",
                 Detected = proxiesDetected
             };
-            if (!proxiesDetected)
+            if (isUnevaluated("Reference Proxies", "Mild / Strong"))
+            {
+                proxyItem.Detected = false;
+                proxyItem.Status = ProtectionSupportStatus.NotEvaluated;
+                proxyItem.ResultSummary = "Not Evaluated";
+                proxyItem.Details = "Reference proxy detection was not evaluated.";
+            }
+            else if (!proxiesDetected)
             {
                 proxyItem.Status = ProtectionSupportStatus.NotDetected;
                 proxyItem.ResultSummary = "N/A";
@@ -376,7 +474,14 @@ namespace ConfuserExKillerRunner.Analysis
                 Mode = "Normal / Dynamic",
                 Detected = resourcesDetected
             };
-            if (!resourcesDetected)
+            if (isUnevaluated("Resources", "Normal / Dynamic"))
+            {
+                resItem.Detected = false;
+                resItem.Status = ProtectionSupportStatus.NotEvaluated;
+                resItem.ResultSummary = "Not Evaluated";
+                resItem.Details = "Encrypted resource detection was not evaluated.";
+            }
+            else if (!resourcesDetected)
             {
                 resItem.Status = ProtectionSupportStatus.NotDetected;
                 resItem.ResultSummary = "N/A";
@@ -403,24 +508,43 @@ namespace ConfuserExKillerRunner.Analysis
             result.Items.Add(resItem);
 
             // 14. Compressor
-            bool compressorDetected = HasCompressor(module);
+            bool compressorDetected = compressorUnpacked || HasCompressor(module);
             var compItem = new ProtectionItem
             {
                 Name = "Compressor",
                 Mode = "Deflate Packer",
                 Detected = compressorDetected
             };
-            if (!compressorDetected)
+            if (isUnevaluated("Compressor", "Deflate Packer"))
+            {
+                compItem.Detected = false;
+                compItem.Status = ProtectionSupportStatus.NotEvaluated;
+                compItem.ResultSummary = "Not Evaluated";
+                compItem.Details = "Compressor stub detection was not evaluated.";
+            }
+            else if (!compressorDetected)
             {
                 compItem.Status = ProtectionSupportStatus.NotDetected;
                 compItem.ResultSummary = "N/A";
                 compItem.Details = "Assembly is not packaged inside a ConfuserEx compressor stub.";
             }
-            else
+            else if (compressorUnpacked)
             {
                 compItem.Status = ProtectionSupportStatus.VerifiedOnRealFixture;
                 compItem.ResultSummary = "Unpacked";
                 compItem.Details = "Compressed payload extracted, validated as PE, and unpacked.";
+            }
+            else if (!allowExecution)
+            {
+                compItem.Status = ProtectionSupportStatus.RequiresDynamicExecution;
+                compItem.ResultSummary = "Skipped (Static Mode)";
+                compItem.Details = "Compressor stub detected; dynamic method-rewrite unpacking requires --allow-execution.";
+            }
+            else
+            {
+                compItem.Status = ProtectionSupportStatus.PartiallyProcessed;
+                compItem.ResultSummary = "Detected / Unresolved";
+                compItem.Details = "ConfuserEx Compressor stub detected, but payload could not be unpacked safely.";
             }
             result.Items.Add(compItem);
 
@@ -432,7 +556,14 @@ namespace ConfuserExKillerRunner.Analysis
                 Mode = "Symbol Renaming",
                 Detected = renamingDetected
             };
-            if (!renamingDetected)
+            if (isUnevaluated("Name Protection", "Symbol Renaming"))
+            {
+                renameItem.Detected = false;
+                renameItem.Status = ProtectionSupportStatus.NotEvaluated;
+                renameItem.ResultSummary = "Not Evaluated";
+                renameItem.Details = "Symbol renaming detection was not evaluated.";
+            }
+            else if (!renamingDetected)
             {
                 renameItem.Status = ProtectionSupportStatus.NotDetected;
                 renameItem.ResultSummary = "N/A";
@@ -450,6 +581,7 @@ namespace ConfuserExKillerRunner.Analysis
             result.HasPartiallyProcessed = result.Items.Any(i => i.Detected && i.Status == ProtectionSupportStatus.PartiallyProcessed);
             result.HasUnsupported = result.Items.Any(i => i.Detected && i.Status == ProtectionSupportStatus.Unsupported);
             result.HasRequiresDynamicSkipped = result.Items.Any(i => i.Detected && i.Status == ProtectionSupportStatus.RequiresDynamicExecution);
+            result.HasNotEvaluated = result.Items.Any(i => i.Status == ProtectionSupportStatus.NotEvaluated);
 
             if (result.HasUnsupported)
             {
@@ -468,6 +600,12 @@ namespace ConfuserExKillerRunner.Analysis
                 result.IsComplete = false;
                 result.OverallVerdict = "PARTIALLY DEOBFUSCATED (Incomplete Transformations)";
                 result.SummaryNotes = "Some protections were only partially resolved; unverified transformations were safely rolled back.";
+            }
+            else if (result.HasNotEvaluated)
+            {
+                result.IsComplete = false;
+                result.OverallVerdict = "DEOBFUSCATION UNCONFIRMED (Unevaluated Protections)";
+                result.SummaryNotes = "One or more protections could not be conclusively evaluated (unsupported detectors). Deobfuscation cannot be verified as complete.";
             }
             else
             {
@@ -493,7 +631,7 @@ namespace ConfuserExKillerRunner.Analysis
 
             foreach (var item in matrix.Items)
             {
-                string det = item.Detected ? "Yes" : "No";
+                string det = item.Status == ProtectionSupportStatus.NotEvaluated ? "N/E" : (item.Detected ? "Yes" : "No");
                 sb.AppendLine(string.Format("{0,-20} {1,-24} {2,-10} {3,-26} {4,-18}",
                     item.Name,
                     item.Mode,
@@ -597,10 +735,23 @@ namespace ConfuserExKillerRunner.Analysis
             return module.Assembly.CustomAttributes.Any(ca => ca.TypeFullName.Contains("SuppressIldasmAttribute"));
         }
 
-        private static bool HasInvalidMetadata(ModuleDef module)
+        public static bool? HasInvalidMetadata(ModuleDef module)
         {
-            // If module has custom unprintable stream names or unusual table attributes
-            return false;
+            if (module == null) return null;
+            if (module is ModuleDefMD modMD && modMD.MetaData?.AllStreams != null)
+            {
+                foreach (var stream in modMD.MetaData.AllStreams)
+                {
+                    string sName = stream.Name;
+                    if (sName == "#Schema") return true;
+                    if (!string.IsNullOrEmpty(sName) && sName.Any(c => c < 32 || c > 126)) return true;
+                }
+                return false;
+            }
+            if (module is ModuleDefUser)
+                return false;
+
+            return null;
         }
 
         private static bool HasConstantDecrypters(ModuleDef module)
@@ -620,10 +771,10 @@ namespace ConfuserExKillerRunner.Analysis
             return false;
         }
 
-        private static bool HasX86ConstantDecrypters(ModuleDef module)
+        public static bool? HasX86ConstantDecrypters(ModuleDef module)
         {
-            // ConfuserEx x86 constant mode adds native x86 machine-code thunks
-            return false;
+            if (module == null) return null;
+            return HasNativeMethods(module);
         }
 
         private static bool HasSwitchFlattening(ModuleDef module)
@@ -653,13 +804,50 @@ namespace ConfuserExKillerRunner.Analysis
             return false;
         }
 
-        private static bool HasDeadCodeOrJunk(ModuleDef module)
+        public static bool HasDeadCodeOrJunk(ModuleDef module)
         {
+            if (module == null) return false;
+            foreach (var t in module.GetTypes())
+            {
+                foreach (var m in t.Methods)
+                {
+                    if (!m.HasBody || m.Body.Instructions == null || m.Body.Instructions.Count < 2)
+                        continue;
+
+                    var instrs = m.Body.Instructions;
+                    for (int i = 0; i < instrs.Count - 1; i++)
+                    {
+                        var first = instrs[i];
+                        var second = instrs[i + 1];
+
+                        if (second.OpCode == OpCodes.Pop && (first.IsLdcI4() || first.OpCode == OpCodes.Dup))
+                            return true;
+
+                        if ((first.OpCode == OpCodes.Br || first.OpCode == OpCodes.Br_S) && first.Operand == second)
+                            return true;
+                    }
+                }
+            }
             return false;
         }
 
-        private static bool HasX86ControlFlow(ModuleDef module)
+        public static bool? HasX86ControlFlow(ModuleDef module)
         {
+            if (module == null) return null;
+            return HasNativeMethods(module);
+        }
+
+        private static bool HasNativeMethods(ModuleDef module)
+        {
+            if (module == null) return false;
+            foreach (var t in module.GetTypes())
+            {
+                foreach (var m in t.Methods)
+                {
+                    if (m.IsNative || (m.ImplAttributes & MethodImplAttributes.CodeTypeMask) == MethodImplAttributes.Native)
+                        return true;
+                }
+            }
             return false;
         }
 
@@ -707,8 +895,32 @@ namespace ConfuserExKillerRunner.Analysis
             return false;
         }
 
-        private static bool HasCompressor(ModuleDef module)
+        public static bool HasCompressor(ModuleDef module)
         {
+            if (module == null) return false;
+            if (module is ModuleDefMD modMD && modMD.MetaData?.TablesStream?.FileTable != null)
+            {
+                for (uint rid = 1; rid <= modMD.MetaData.TablesStream.FileTable.Rows; rid++)
+                {
+                    var row = modMD.TablesStream.ReadFileRow(rid);
+                    string name = modMD.StringsStream.ReadNoNull(row.Name);
+                    if (string.Equals(name, "koi", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(name, "netmodule", StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+            foreach (var res in module.Resources)
+            {
+                string rName = res.Name?.String;
+                if (!string.IsNullOrEmpty(rName) &&
+                    (rName.Equals("ConfuserEx.CompressedPayload", StringComparison.OrdinalIgnoreCase) ||
+                     rName.StartsWith("Confuser.", StringComparison.OrdinalIgnoreCase) ||
+                     rName.StartsWith("koi.", StringComparison.OrdinalIgnoreCase) ||
+                     rName.Equals("koi", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return true;
+                }
+            }
             return false;
         }
 

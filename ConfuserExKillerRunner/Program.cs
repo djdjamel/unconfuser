@@ -167,6 +167,7 @@ namespace ConfuserExKillerRunner
 
                 // Stage 0: Unpack ConfuserEx Compressor if present
                 var swStage0 = Stopwatch.StartNew();
+                bool compressorWasUnpacked = false;
                 try
                 {
                     using (var probeMod = ModuleDefMD.Load(peImage))
@@ -174,6 +175,7 @@ namespace ConfuserExKillerRunner
                         var unpackResult = CompressorUnpacker.TryUnpack(probeMod, peImage, allowExecution);
                         if (unpackResult.SuccessfullyUnpacked)
                         {
+                            compressorWasUnpacked = true;
                             Console.WriteLine($"[+] CompressorUnpacker: {unpackResult.Message}");
                             peImage = unpackResult.UnpackedAssemblyBytes;
                             peImageOld = (byte[])peImage.Clone();
@@ -825,7 +827,8 @@ namespace ConfuserExKillerRunner
                         proxiesInlinedCount: totalProxiesInlined,
                         switchesResolvedCount: totalSwitchesResolved,
                         junkInstructionsStrippedCount: totalJunkStripped,
-                        cleanerHooksStrippedCount: totalCleanerHooks);
+                        cleanerHooksStrippedCount: totalCleanerHooks,
+                        compressorUnpacked: compressorWasUnpacked);
 
                     Console.WriteLine(ProtectionMatrix.FormatReport(matrix));
                 }
@@ -849,7 +852,7 @@ namespace ConfuserExKillerRunner
 
             int exitCode = 0;
             string finalStatus = "SUCCESS";
-            if (matrix != null && (matrix.HasRequiresDynamicSkipped || matrix.HasUnsupported || (strictExitCodes && matrix.HasPartiallyProcessed)))
+            if (matrix != null && (matrix.HasRequiresDynamicSkipped || matrix.HasUnsupported || matrix.HasNotEvaluated || (strictExitCodes && matrix.HasPartiallyProcessed)))
             {
                 exitCode = 2;
                 finalStatus = "PARTIAL_SUCCESS";
