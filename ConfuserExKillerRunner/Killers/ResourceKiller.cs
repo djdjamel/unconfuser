@@ -8,6 +8,7 @@ using dnlib.DotNet.Emit;
 using dnlib.DotNet.Writer;
 using Tool;
 using MethodAttributes = dnlib.DotNet.MethodAttributes;
+using ConfuserExKillerRunner.Analysis;
 
 namespace ConfuserExKillerRunner.Killers
 {
@@ -20,6 +21,7 @@ namespace ConfuserExKillerRunner.Killers
         public bool ResourcesDecrypted { get; set; }
         public List<string> ResourceNames { get; set; } = new List<string>();
         public List<string> RetainedHooksDetails { get; set; } = new List<string>();
+        public List<HookTraceRecord> HookRecords { get; set; } = new List<HookTraceRecord>();
         public string Message { get; set; }
     }
 
@@ -341,11 +343,22 @@ namespace ConfuserExKillerRunner.Killers
                 if (!isResourceResolve && !isAssemblyResolve)
                     continue;
 
+                string hookId = $"Hook_Resource-Resolver_{called.Name}";
                 if (!TryIdentifyResourceHookInstructions(instructions, i, branchTargets, ehBoundaries, out var toNeutralize, out var handlerMethod))
                 {
                     string msg = $"Retaining {called.Name} hook in <Module>.cctor: argument sequence is ambiguous, non-standard, or intersects branches/EH boundaries.";
                     Logger.LogWarning($"[ResourceKiller] {msg}");
                     result?.RetainedHooksDetails.Add(msg);
+                    result?.HookRecords.Add(new HookTraceRecord
+                    {
+                        HookId = hookId,
+                        HookType = "Resource-Resolver",
+                        DeclaringType = "<Module>",
+                        MethodName = called.Name?.String ?? string.Empty,
+                        Action = "Retained",
+                        Reason = msg,
+                        Confidence = "HIGH"
+                    });
                     continue;
                 }
 
@@ -354,6 +367,16 @@ namespace ConfuserExKillerRunner.Killers
                     string msg = $"Retaining {called.Name} hook in <Module>.cctor: handler {handlerMethod.FullName} belongs to a user class, not protector module.";
                     Logger.LogWarning($"[ResourceKiller] {msg}");
                     result?.RetainedHooksDetails.Add(msg);
+                    result?.HookRecords.Add(new HookTraceRecord
+                    {
+                        HookId = hookId,
+                        HookType = "Resource-Resolver",
+                        DeclaringType = "<Module>",
+                        MethodName = called.Name?.String ?? string.Empty,
+                        Action = "Retained",
+                        Reason = msg,
+                        Confidence = "HIGH"
+                    });
                     continue;
                 }
 
@@ -376,10 +399,30 @@ namespace ConfuserExKillerRunner.Killers
                     string msg = $"Rollback in <Module>.cctor: stripping {called.Name} failed structural audit: {string.Join("; ", errors)}.";
                     Logger.LogWarning($"[ResourceKiller] {msg}");
                     result?.RetainedHooksDetails.Add(msg);
+                    result?.HookRecords.Add(new HookTraceRecord
+                    {
+                        HookId = hookId,
+                        HookType = "Resource-Resolver",
+                        DeclaringType = "<Module>",
+                        MethodName = called.Name?.String ?? string.Empty,
+                        Action = "Retained",
+                        Reason = msg,
+                        Confidence = "HIGH"
+                    });
                     continue;
                 }
 
                 result.HandlerStripped = true;
+                result?.HookRecords.Add(new HookTraceRecord
+                {
+                    HookId = hookId,
+                    HookType = "Resource-Resolver",
+                    DeclaringType = "<Module>",
+                    MethodName = called.Name?.String ?? string.Empty,
+                    Action = "Stripped",
+                    Reason = $"Safely stripped resource resolver hook ({called.Name}) and {toNeutralize.Count - 1} setup instruction(s) from <Module>.cctor",
+                    Confidence = "HIGH"
+                });
                 Logger.LogInfo($"[ResourceKiller] Safely stripped resource resolver hook ({called.Name}) and {toNeutralize.Count - 1} setup instruction(s) from <Module>.cctor");
             }
         }

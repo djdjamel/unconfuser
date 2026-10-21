@@ -17,6 +17,7 @@ namespace ConfuserExKillerRunner.Killers
         public int RemovedMethodsCount { get; set; }
         public List<string> StrippedDetails { get; set; } = new List<string>();
         public List<string> RetainedHooksDetails { get; set; } = new List<string>();
+        public List<HookTraceRecord> HookRecords { get; set; } = new List<HookTraceRecord>();
     }
 
     public static class CleanerKiller
@@ -85,6 +86,7 @@ namespace ConfuserExKillerRunner.Killers
                 string hookType = ClassifyProtectorMethod(methodDef, resourcesDecrypted, constantsDecrypted, antiTamperDecrypted, result);
                 if (hookType != null)
                 {
+                    string hookId = $"Hook_{hookType}_{methodDef.Name}";
                     int paramsCount = methodDef.Parameters?.Count ?? 0;
                     if (calledMethod.MethodSig != null && calledMethod.MethodSig.HasThis)
                         paramsCount++;
@@ -96,6 +98,16 @@ namespace ConfuserExKillerRunner.Killers
                         string msg = $"Retaining {hookType} hook {methodDef.Name} in <Module>.cctor: argument producers cannot be safely or unambiguously identified.";
                         Logger.LogWarning($"[CleanerKiller] {msg}");
                         result.RetainedHooksDetails.Add(msg);
+                        result.HookRecords.Add(new HookTraceRecord
+                        {
+                            HookId = hookId,
+                            HookType = hookType,
+                            DeclaringType = cctor.DeclaringType?.FullName ?? "<Module>",
+                            MethodName = methodDef.Name?.String ?? string.Empty,
+                            Action = "Retained",
+                            Reason = msg,
+                            Confidence = "HIGH"
+                        });
                         continue;
                     }
 
@@ -108,6 +120,16 @@ namespace ConfuserExKillerRunner.Killers
                             string msg = $"Retaining {hookType} hook {methodDef.Name} in <Module>.cctor: non-void return value consumer cannot be safely or unambiguously identified.";
                             Logger.LogWarning($"[CleanerKiller] {msg}");
                             result.RetainedHooksDetails.Add(msg);
+                            result.HookRecords.Add(new HookTraceRecord
+                            {
+                                HookId = hookId,
+                                HookType = hookType,
+                                DeclaringType = cctor.DeclaringType?.FullName ?? "<Module>",
+                                MethodName = methodDef.Name?.String ?? string.Empty,
+                                Action = "Retained",
+                                Reason = msg,
+                                Confidence = "HIGH"
+                            });
                             continue;
                         }
                         toNeutralize.Add(consumerPop);
@@ -135,13 +157,35 @@ namespace ConfuserExKillerRunner.Killers
                             s.Instruction.Operand = s.Operand;
                         }
 
-                        Logger.LogWarning($"[CleanerKiller] Rollback in <Module>.cctor: stripping hook {methodDef.Name} failed structural IL audit ({string.Join("; ", auditReport.Errors)}). Original IL restored.");
+                        string rollbackMsg = $"Rollback in <Module>.cctor: stripping hook {methodDef.Name} failed structural IL audit ({string.Join("; ", auditReport.Errors)}). Original IL restored.";
+                        Logger.LogWarning($"[CleanerKiller] {rollbackMsg}");
+                        result.RetainedHooksDetails.Add(rollbackMsg);
+                        result.HookRecords.Add(new HookTraceRecord
+                        {
+                            HookId = hookId,
+                            HookType = hookType,
+                            DeclaringType = cctor.DeclaringType?.FullName ?? "<Module>",
+                            MethodName = methodDef.Name?.String ?? string.Empty,
+                            Action = "Retained",
+                            Reason = rollbackMsg,
+                            Confidence = "HIGH"
+                        });
                         continue;
                     }
 
                     methodsToRemove.Add(methodDef);
                     result.StrippedHooksCount++;
                     result.StrippedDetails.Add($"{hookType} hook removed from <Module>.cctor: {methodDef.Name}");
+                    result.HookRecords.Add(new HookTraceRecord
+                    {
+                        HookId = hookId,
+                        HookType = hookType,
+                        DeclaringType = cctor.DeclaringType?.FullName ?? "<Module>",
+                        MethodName = methodDef.Name?.String ?? string.Empty,
+                        Action = "Stripped",
+                        Reason = $"Safely stripped {hookType} initializer call to {methodDef.Name} and {toNeutralize.Count - 1} related instruction(s) in <Module>.cctor",
+                        Confidence = "HIGH"
+                    });
                     Logger.LogInfo($"[CleanerKiller] Safely stripped {hookType} initializer call to {methodDef.Name} and {toNeutralize.Count - 1} related instruction(s) in <Module>.cctor");
                 }
             }
@@ -318,6 +362,16 @@ namespace ConfuserExKillerRunner.Killers
                 string msg = "Retaining Anti-Tamper hook in <Module>.cctor: Anti-Tamper sections have not been confirmed as decrypted (execution disabled or decryption unconfirmed).";
                 Logger.LogWarning($"[CleanerKiller] {msg}");
                 result?.RetainedHooksDetails.Add(msg);
+                result?.HookRecords.Add(new HookTraceRecord
+                {
+                    HookId = $"Hook_Anti-Tamper_{method.Name}",
+                    HookType = "Anti-Tamper",
+                    DeclaringType = method.DeclaringType?.FullName ?? "<Module>",
+                    MethodName = method.Name?.String ?? string.Empty,
+                    Action = "Retained",
+                    Reason = msg,
+                    Confidence = "HIGH"
+                });
                 return null;
             }
 
@@ -348,6 +402,16 @@ namespace ConfuserExKillerRunner.Killers
                 string msg = $"Retaining hook {method.Name} in <Module>.cctor: ambiguous classification (calls VirtualProtect but does not match pure Anti-Dump with verified PE header zeroing).";
                 Logger.LogWarning($"[CleanerKiller] {msg}");
                 result?.RetainedHooksDetails.Add(msg);
+                result?.HookRecords.Add(new HookTraceRecord
+                {
+                    HookId = $"Hook_Ambiguous-VirtualProtect_{method.Name}",
+                    HookType = "Ambiguous-VirtualProtect",
+                    DeclaringType = method.DeclaringType?.FullName ?? "<Module>",
+                    MethodName = method.Name?.String ?? string.Empty,
+                    Action = "Retained",
+                    Reason = msg,
+                    Confidence = "MEDIUM"
+                });
                 return null;
             }
 
@@ -359,18 +423,67 @@ namespace ConfuserExKillerRunner.Killers
                     string msg = $"Retaining hook {method.Name} in <Module>.cctor: ambiguous Anti-Debug hook containing memory writes or cipher operations.";
                     Logger.LogWarning($"[CleanerKiller] {msg}");
                     result?.RetainedHooksDetails.Add(msg);
+                    result?.HookRecords.Add(new HookTraceRecord
+                    {
+                        HookId = $"Hook_Anti-Debug_{method.Name}",
+                        HookType = "Anti-Debug",
+                        DeclaringType = method.DeclaringType?.FullName ?? "<Module>",
+                        MethodName = method.Name?.String ?? string.Empty,
+                        Action = "Retained",
+                        Reason = msg,
+                        Confidence = "MEDIUM"
+                    });
                     return null;
                 }
                 return "Anti-Debug";
             }
 
             // 6. Resource Resolver
-            if (hasResourceResolve && resourcesDecrypted && IsConfuserResourceResolver(method))
-                return "Resource-Resolver";
+            if (hasResourceResolve)
+            {
+                if (resourcesDecrypted && IsConfuserResourceResolver(method))
+                    return "Resource-Resolver";
+
+                if (!resourcesDecrypted)
+                {
+                    string msg = $"Retaining Resource-Resolver hook {method.Name} in <Module>.cctor: resources have not been decrypted.";
+                    Logger.LogWarning($"[CleanerKiller] {msg}");
+                    result?.RetainedHooksDetails.Add(msg);
+                    result?.HookRecords.Add(new HookTraceRecord
+                    {
+                        HookId = $"Hook_Resource-Resolver_{method.Name}",
+                        HookType = "Resource-Resolver",
+                        DeclaringType = method.DeclaringType?.FullName ?? "<Module>",
+                        MethodName = method.Name?.String ?? string.Empty,
+                        Action = "Retained",
+                        Reason = msg,
+                        Confidence = "HIGH"
+                    });
+                    return null;
+                }
+            }
 
             // 7. Constant Buffer Initializer
-            if (hasInitializeArray && constantsDecrypted && method.Parameters.Count == 0 && IsConfuserConstantBufferInitializer(method))
-                return "Constant-Buffer";
+            if (hasInitializeArray && method.Parameters.Count == 0 && IsConfuserConstantBufferInitializer(method))
+            {
+                if (constantsDecrypted)
+                    return "Constant-Buffer";
+
+                string msg = $"Retaining Constant-Buffer hook {method.Name} in <Module>.cctor: constants have not been fully decrypted.";
+                Logger.LogWarning($"[CleanerKiller] {msg}");
+                result?.RetainedHooksDetails.Add(msg);
+                result?.HookRecords.Add(new HookTraceRecord
+                {
+                    HookId = $"Hook_Constant-Buffer_{method.Name}",
+                    HookType = "Constant-Buffer",
+                    DeclaringType = method.DeclaringType?.FullName ?? "<Module>",
+                    MethodName = method.Name?.String ?? string.Empty,
+                    Action = "Retained",
+                    Reason = msg,
+                    Confidence = "HIGH"
+                });
+                return null;
+            }
 
             return null;
         }

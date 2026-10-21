@@ -18,6 +18,7 @@ namespace ConfuserExKillerRunner.Core
         public TargetArchitecture Architecture { get; set; }
         public ushort Machine { get; set; }
         public bool IsPe32Plus { get; set; }
+        public string PeFormat => IsPe32Plus ? "PE32+" : "PE32";
         public bool HasClrHeader { get; set; }
         public uint ClrFlags { get; set; }
         public bool IsIlOnly => (ClrFlags & 0x00000001) != 0;
@@ -185,6 +186,59 @@ namespace ConfuserExKillerRunner.Core
             }
 
             return info;
+        }
+
+        public static string DetectTargetFramework(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+                return "Unknown";
+
+            try
+            {
+                using (var mod = dnlib.DotNet.ModuleDefMD.Load(filePath))
+                {
+                    return DetectTargetFramework(mod);
+                }
+            }
+            catch
+            {
+                return "Unknown";
+            }
+        }
+
+        public static string DetectTargetFramework(dnlib.DotNet.ModuleDef module)
+        {
+            if (module == null)
+                return "Unknown";
+
+            try
+            {
+                if (module.Assembly != null && module.Assembly.HasCustomAttributes)
+                {
+                    foreach (var ca in module.Assembly.CustomAttributes)
+                    {
+                        if (ca != null && ca.TypeFullName == "System.Runtime.Versioning.TargetFrameworkAttribute")
+                        {
+                            if (ca.ConstructorArguments.Count > 0 && ca.ConstructorArguments[0].Value != null)
+                            {
+                                string tf = ca.ConstructorArguments[0].Value.ToString();
+                                if (!string.IsNullOrWhiteSpace(tf))
+                                    return tf;
+                            }
+                        }
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(module.RuntimeVersion))
+                {
+                    return module.RuntimeVersion;
+                }
+            }
+            catch
+            {
+            }
+
+            return "Unknown";
         }
     }
 }

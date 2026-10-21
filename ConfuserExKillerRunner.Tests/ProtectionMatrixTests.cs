@@ -514,5 +514,225 @@ namespace ConfuserExKillerRunner.Tests
 
             Assert.True(matrixPartialConst.HasCodeProtectionsPartiallyProcessed);
         }
+
+        [Fact]
+        public void Constants_1_NoConstantsDetected_EvaluatesConsistentTrue()
+        {
+            var module = CreateEmptyModule();
+            bool resolved = ProtectionMatrix.DetermineAllConstantsResolved(
+                isUnevaluated: false,
+                constantsDetected: false,
+                decryptedCount: 0,
+                decrypterReportedAllResolved: false,
+                allowExecution: false);
+
+            Assert.True(resolved);
+
+            var matrix = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: false,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 0,
+                allConstantsResolved: false,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0);
+
+            var item = matrix.Items.First(i => i.Name == "Constants" && i.Mode.Contains("Normal"));
+            Assert.Equal(ProtectionSupportStatus.NotDetected, item.Status);
+            Assert.Equal("N/A", item.ResultSummary);
+            Assert.True(matrix.AllConstantsResolved);
+        }
+
+        [Fact]
+        public void Constants_2_ConstantsDetectedAndAllResolved_EvaluatesConsistentTrue()
+        {
+            var module = CreateEmptyModule();
+            bool resolved = ProtectionMatrix.DetermineAllConstantsResolved(
+                isUnevaluated: false,
+                constantsDetected: true,
+                decryptedCount: 15,
+                decrypterReportedAllResolved: true,
+                allowExecution: true);
+
+            Assert.True(resolved);
+
+            var matrix = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: true,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 15,
+                allConstantsResolved: true,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0);
+
+            var item = matrix.Items.First(i => i.Name == "Constants" && i.Mode.Contains("Normal"));
+            Assert.Equal(ProtectionSupportStatus.VerifiedOnRealFixture, item.Status);
+            Assert.Equal("Decrypted (15)", item.ResultSummary);
+            Assert.True(matrix.AllConstantsResolved);
+        }
+
+        private static void AddConstantDecrypter(ModuleDef module)
+        {
+            var m = new MethodDefUser(
+                "Decrypter",
+                MethodSig.CreateStatic(new GenericMVar(0), module.CorLibTypes.UInt32),
+                MethodImplAttributes.IL,
+                MethodAttributes.Public | MethodAttributes.Static);
+            m.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+            m.Body = new dnlib.DotNet.Emit.CilBody();
+            m.Body.Instructions.Add(new dnlib.DotNet.Emit.Instruction(dnlib.DotNet.Emit.OpCodes.Ldnull));
+            m.Body.Instructions.Add(new dnlib.DotNet.Emit.Instruction(dnlib.DotNet.Emit.OpCodes.Ret));
+            module.GlobalType.Methods.Add(m);
+        }
+
+        [Fact]
+        public void Constants_3_ConstantsDetectedNoneResolved_EvaluatesConsistentFalseEvenIfStaleTrueProvided()
+        {
+            var module = CreateEmptyModule();
+            // Add a decrypter method so constantsDetected is true
+            AddConstantDecrypter(module);
+
+            // Even if runner had stale allConstantsResolved = true, DetermineAllConstantsResolved returns false when decryptedCount == 0!
+            bool resolved = ProtectionMatrix.DetermineAllConstantsResolved(
+                isUnevaluated: false,
+                constantsDetected: true,
+                decryptedCount: 0,
+                decrypterReportedAllResolved: true,
+                allowExecution: true);
+
+            Assert.False(resolved);
+
+            var matrix = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: true,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 0,
+                allConstantsResolved: true, // Stale runner boolean
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0);
+
+            var item = matrix.Items.First(i => i.Name == "Constants" && i.Mode.Contains("Normal"));
+            Assert.Equal(ProtectionSupportStatus.PartiallyProcessed, item.Status);
+            Assert.Equal("Unresolved", item.ResultSummary);
+            // Single source of truth: matrix.AllConstantsResolved must be false
+            Assert.False(matrix.AllConstantsResolved);
+        }
+
+        [Fact]
+        public void Constants_4_PartialResolution_EvaluatesConsistentFalse()
+        {
+            var module = CreateEmptyModule();
+            bool resolved = ProtectionMatrix.DetermineAllConstantsResolved(
+                isUnevaluated: false,
+                constantsDetected: true,
+                decryptedCount: 5,
+                decrypterReportedAllResolved: false,
+                allowExecution: true);
+
+            Assert.False(resolved);
+
+            var matrix = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: true,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 5,
+                allConstantsResolved: false,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0);
+
+            var item = matrix.Items.First(i => i.Name == "Constants" && i.Mode.Contains("Normal"));
+            Assert.Equal(ProtectionSupportStatus.PartiallyProcessed, item.Status);
+            Assert.Equal("Partial (5)", item.ResultSummary);
+            Assert.False(matrix.AllConstantsResolved);
+        }
+
+        [Fact]
+        public void Constants_5_DynamicExecutionNotAllowed_EvaluatesRequiresDynamicSkippedAndFalse()
+        {
+            var module = CreateEmptyModule();
+            AddConstantDecrypter(module);
+
+            bool resolved = ProtectionMatrix.DetermineAllConstantsResolved(
+                isUnevaluated: false,
+                constantsDetected: true,
+                decryptedCount: 0,
+                decrypterReportedAllResolved: false,
+                allowExecution: false);
+
+            Assert.False(resolved);
+
+            var matrix = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: false,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 0,
+                allConstantsResolved: false,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0);
+
+            var item = matrix.Items.First(i => i.Name == "Constants" && i.Mode.Contains("Normal"));
+            Assert.Equal(ProtectionSupportStatus.RequiresDynamicExecution, item.Status);
+            Assert.Equal("Skipped (Static Mode)", item.ResultSummary);
+            Assert.False(matrix.AllConstantsResolved);
+        }
+
+        [Fact]
+        public void Constants_6_Unevaluated_EvaluatesNotEvaluatedAndFalse()
+        {
+            var module = CreateEmptyModule();
+            bool resolved = ProtectionMatrix.DetermineAllConstantsResolved(
+                isUnevaluated: true,
+                constantsDetected: true,
+                decryptedCount: 10,
+                decrypterReportedAllResolved: true,
+                allowExecution: true);
+
+            Assert.False(resolved);
+
+            var matrix = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: true,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 10,
+                allConstantsResolved: true,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0,
+                unevaluatedProtections: new[] { "Constants (Normal / Dynamic)" });
+
+            var item = matrix.Items.First(i => i.Name == "Constants" && i.Mode.Contains("Normal"));
+            Assert.Equal(ProtectionSupportStatus.NotEvaluated, item.Status);
+            Assert.Equal("Not Evaluated", item.ResultSummary);
+            Assert.False(matrix.AllConstantsResolved);
+        }
     }
 }

@@ -135,7 +135,40 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Contains("Constants Protection", comp.ExposedSignatures);
             Assert.Contains("Control Flow Switch", comp.ExposedSignatures);
             Assert.Contains("Anti-Tamper", comp.PreservedSignatures);
-            Assert.Contains("internal signatures newly exposed after unpacking outer protection layers", comp.IndicatorInterpretation);
+            Assert.Contains("correlates with 2 newly exposed indicator signature(s)", comp.IndicatorInterpretation);
+            Assert.Contains("Constants Protection", comp.IndicatorInterpretation);
+        }
+
+        [Fact]
+        public void Compare_ScoreIncrease_WithoutExposedSignatures_FormulatesUnconfirmedHypothesis()
+        {
+            var preScan = new NetDetectScanResult
+            {
+                Available = true,
+                VerdictScore = 9,
+                PrimaryDetector = "ConfuserEx",
+                Confidence = "HIGH",
+                GenericTechniques = new System.Collections.Generic.List<string> { "Anti-Tamper" }
+            };
+
+            var postScan = new NetDetectScanResult
+            {
+                Available = true,
+                VerdictScore = 21,
+                PrimaryDetector = "ConfuserEx",
+                Confidence = "HIGH",
+                GenericTechniques = new System.Collections.Generic.List<string> { "Anti-Tamper" }
+            };
+
+            var comp = NetDetectIntegration.Compare(preScan, postScan);
+
+            Assert.True(comp.Available);
+            Assert.Equal(12, comp.ScoreDelta);
+            Assert.Empty(comp.ExposedSignatures);
+            Assert.Contains("unconfirmed hypothesis: internal marker exposure vs potential transformation artifact", comp.IndicatorInterpretation);
+            // Ensure the interpretation does not claim signatures absent from data
+            Assert.DoesNotContain("Compressor", comp.IndicatorInterpretation);
+            Assert.DoesNotContain("Anti-Debug", comp.IndicatorInterpretation);
         }
 
         [Fact]
@@ -169,7 +202,32 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(3, comp.ResolvedSignatures.Count);
             Assert.Empty(comp.ExposedSignatures);
             Assert.Empty(comp.PreservedSignatures);
-            Assert.Contains("reflects successful stripping", comp.IndicatorInterpretation);
+            Assert.Contains("reflects successful resolution of protector indicators", comp.IndicatorInterpretation);
+        }
+
+        [Fact]
+        public void Parse_GenericTechniques_SupportsBothTechniqueAndNameFields()
+        {
+            string json = @"{
+                ""detection"": {
+                    ""detected"": true,
+                    ""verdict_score"": 15,
+                    ""primary_detector"": ""ConfuserEx"",
+                    ""confidence"": ""HIGH"",
+                    ""generic_techniques"": [
+                        { ""technique"": ""Invisible Unicode Character Mangling"", ""severity"": ""HIGH"", ""weight"": 5 },
+                        { ""name"": ""Suspected String Encryption"", ""severity"": ""MEDIUM"", ""weight"": 2 }
+                    ]
+                }
+            }";
+
+            var result = NetDetectIntegration.ParseNetDetectJson(json);
+
+            Assert.True(result.Available);
+            Assert.Equal(15, result.VerdictScore);
+            Assert.Equal(2, result.GenericTechniques.Count);
+            Assert.Contains("Invisible Unicode Character Mangling", result.GenericTechniques);
+            Assert.Contains("Suspected String Encryption", result.GenericTechniques);
         }
 
         [Fact]

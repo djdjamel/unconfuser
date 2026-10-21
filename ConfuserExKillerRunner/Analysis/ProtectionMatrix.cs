@@ -38,12 +38,27 @@ namespace ConfuserExKillerRunner.Analysis
         public bool HasUnsupported { get; set; }
         public bool HasRequiresDynamicSkipped { get; set; }
         public bool HasNotEvaluated { get; set; }
+        public bool AllConstantsResolved { get; set; }
         public string OverallVerdict { get; set; }
         public string SummaryNotes { get; set; }
     }
 
     public static class ProtectionMatrix
     {
+        public static bool DetermineAllConstantsResolved(
+            bool isUnevaluated,
+            bool constantsDetected,
+            int decryptedCount,
+            bool decrypterReportedAllResolved,
+            bool allowExecution)
+        {
+            if (isUnevaluated) return false;
+            if (!constantsDetected) return true;
+            if (!allowExecution) return false;
+            if (decryptedCount > 0 && decrypterReportedAllResolved) return true;
+            return false;
+        }
+
         public static ProtectionMatrixResult Evaluate(
             ModuleDef module,
             bool allowExecution,
@@ -266,6 +281,13 @@ namespace ConfuserExKillerRunner.Analysis
 
             // 7. Constants (Normal & Dynamic)
             bool constantsDetected = constantsDecryptedCount > 0 || HasConstantDecrypters(module);
+            bool effectiveAllConstantsResolved = DetermineAllConstantsResolved(
+                isUnevaluated("Constants", "Normal / Dynamic"),
+                constantsDetected,
+                constantsDecryptedCount,
+                allConstantsResolved,
+                allowExecution);
+
             var constItem = new ProtectionItem
             {
                 Name = "Constants",
@@ -285,13 +307,13 @@ namespace ConfuserExKillerRunner.Analysis
                 constItem.ResultSummary = "N/A";
                 constItem.Details = "No encrypted constant decrypters or constant arrays found.";
             }
-            else if (constantsDecryptedCount > 0 && allConstantsResolved)
+            else if (constantsDecryptedCount > 0 && effectiveAllConstantsResolved)
             {
                 constItem.Status = ProtectionSupportStatus.VerifiedOnRealFixture;
                 constItem.ResultSummary = $"Decrypted ({constantsDecryptedCount})";
                 constItem.Details = "All encrypted strings and primitive arrays successfully evaluated and inlined.";
             }
-            else if (constantsDecryptedCount > 0 && !allConstantsResolved)
+            else if (constantsDecryptedCount > 0 && !effectiveAllConstantsResolved)
             {
                 constItem.Status = ProtectionSupportStatus.PartiallyProcessed;
                 constItem.ResultSummary = $"Partial ({constantsDecryptedCount})";
@@ -309,6 +331,7 @@ namespace ConfuserExKillerRunner.Analysis
                 constItem.ResultSummary = "Unresolved";
                 constItem.Details = "Encrypted constants detected but no matching keys or supported decrypter signatures resolved.";
             }
+            result.AllConstantsResolved = effectiveAllConstantsResolved;
             result.Items.Add(constItem);
 
             // 8. Constants (x86)
@@ -497,9 +520,19 @@ namespace ConfuserExKillerRunner.Analysis
             }
             else if (resourcesExtractedCount > 0)
             {
-                resItem.Status = ProtectionSupportStatus.VerifiedOnRealFixture;
-                resItem.ResultSummary = $"Extracted ({resourcesExtractedCount})";
-                resItem.Details = "Encrypted resources decrypted, re-embedded into manifest, and resolve hooks pruned.";
+                bool hooksRemaining = HasEncryptedResources(module);
+                if (!hooksRemaining)
+                {
+                    resItem.Status = ProtectionSupportStatus.VerifiedOnRealFixture;
+                    resItem.ResultSummary = $"Extracted ({resourcesExtractedCount})";
+                    resItem.Details = "Encrypted resources decrypted, re-embedded into manifest, and resolve hooks pruned.";
+                }
+                else
+                {
+                    resItem.Status = ProtectionSupportStatus.PartiallyProcessed;
+                    resItem.ResultSummary = $"Extracted ({resourcesExtractedCount}) / Hook Retained";
+                    resItem.Details = "Encrypted resources decrypted and re-embedded into manifest, but resource resolve hook was retained in <Module>.";
+                }
             }
             else if (!allowExecution)
             {
@@ -768,7 +801,7 @@ namespace ConfuserExKillerRunner.Analysis
             return null;
         }
 
-        private static bool HasConstantDecrypters(ModuleDef module)
+        public static bool HasConstantDecrypters(ModuleDef module)
         {
             if (module == null || module.GlobalType == null) return false;
             foreach (var m in module.GlobalType.Methods)

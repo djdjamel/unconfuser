@@ -12,7 +12,19 @@ namespace ConfuserExKillerRunner.Analysis
         public string Sha256 { get; set; } = string.Empty;
         public long SizeBytes { get; set; }
         public string TargetArchitecture { get; set; } = "Unknown";
+        public string PeFormat { get; set; } = "Unknown";
         public string TargetFramework { get; set; } = "Unknown";
+    }
+
+    public sealed class HookTraceRecord
+    {
+        public string HookId { get; set; } = string.Empty;
+        public string HookType { get; set; } = string.Empty;
+        public string DeclaringType { get; set; } = string.Empty;
+        public string MethodName { get; set; } = string.Empty;
+        public string Action { get; set; } = "Retained";
+        public string Reason { get; set; } = string.Empty;
+        public string Confidence { get; set; } = "HIGH";
     }
 
     public sealed class TransformationReportMetrics
@@ -80,6 +92,7 @@ namespace ConfuserExKillerRunner.Analysis
 
         public List<string> ExceptionsAndRollbacks { get; set; } = new List<string>();
         public List<string> KnownLimitations { get; set; } = new List<string>();
+        public List<HookTraceRecord> Hooks { get; set; } = new List<HookTraceRecord>();
 
         public string FinalStatus { get; set; } = "UNKNOWN"; // SUCCESS, PARTIAL_SUCCESS, FAILED
         public string OverallVerdict { get; set; } = string.Empty;
@@ -118,6 +131,7 @@ namespace ConfuserExKillerRunner.Analysis
             inObj["sha256"] = JsonValue.From(Input.Sha256 ?? string.Empty);
             inObj["sizeBytes"] = JsonValue.From(Input.SizeBytes);
             inObj["targetArchitecture"] = JsonValue.From(Input.TargetArchitecture ?? "Unknown");
+            inObj["peFormat"] = JsonValue.From(Input.PeFormat ?? "Unknown");
             inObj["targetFramework"] = JsonValue.From(Input.TargetFramework ?? "Unknown");
             root["input"] = inObj;
 
@@ -126,6 +140,9 @@ namespace ConfuserExKillerRunner.Analysis
             outObj["path"] = JsonValue.From(Output.Path ?? string.Empty);
             outObj["sha256"] = JsonValue.From(Output.Sha256 ?? string.Empty);
             outObj["sizeBytes"] = JsonValue.From(Output.SizeBytes);
+            outObj["targetArchitecture"] = JsonValue.From(Output.TargetArchitecture ?? "Unknown");
+            outObj["peFormat"] = JsonValue.From(Output.PeFormat ?? "Unknown");
+            outObj["targetFramework"] = JsonValue.From(Output.TargetFramework ?? "Unknown");
             outObj["produced"] = JsonValue.From(!string.IsNullOrEmpty(Output.Path) && File.Exists(Output.Path));
             root["output"] = outObj;
 
@@ -241,6 +258,25 @@ namespace ConfuserExKillerRunner.Analysis
             if (KnownLimitations != null)
                 foreach (var l in KnownLimitations) limArr.Add(JsonValue.From(l));
             root["knownLimitations"] = limArr;
+
+            // Hooks Traceability
+            var hookArr = JsonValue.NewArray();
+            if (Hooks != null)
+            {
+                foreach (var h in Hooks)
+                {
+                    var hObj = JsonValue.NewObject();
+                    hObj["hookId"] = JsonValue.From(h.HookId ?? string.Empty);
+                    hObj["hookType"] = JsonValue.From(h.HookType ?? string.Empty);
+                    hObj["declaringType"] = JsonValue.From(h.DeclaringType ?? string.Empty);
+                    hObj["methodName"] = JsonValue.From(h.MethodName ?? string.Empty);
+                    hObj["action"] = JsonValue.From(h.Action ?? string.Empty);
+                    hObj["reason"] = JsonValue.From(h.Reason ?? string.Empty);
+                    hObj["confidence"] = JsonValue.From(h.Confidence ?? "HIGH");
+                    hookArr.Add(hObj);
+                }
+            }
+            root["hooks"] = hookArr;
 
             // Verdict
             var verdObj = JsonValue.NewObject();

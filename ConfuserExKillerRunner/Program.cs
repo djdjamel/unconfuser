@@ -84,7 +84,7 @@ namespace ConfuserExKillerRunner
                 {
                     outputPath = args[++i];
                 }
-                else if ((arg == "--json-report" || arg == "--report-json" || arg == "--report" || arg == "-r" || arg == "--json") && i + 1 < args.Length)
+                else if ((arg == "--json-report" || arg == "--report-json" || arg == "--report" || arg == "-r" || arg == "--json" || arg == "-j") && i + 1 < args.Length)
                 {
                     jsonReportPath = Path.GetFullPath(args[++i]);
                 }
@@ -144,7 +144,9 @@ namespace ConfuserExKillerRunner
             AuditReport baselineAudit = null;
             try
             {
+                var swBaseline = Stopwatch.StartNew();
                 baselineAudit = QualityAuditor.Audit(originalInputPath, runExternalVerifier: false);
+                stepTimings["Baseline_QualityAudit"] = swBaseline.ElapsedMilliseconds;
             }
             catch (Exception ex)
             {
@@ -353,13 +355,14 @@ namespace ConfuserExKillerRunner
                 bool cor20WasRepaired = false;
                 bool jitDetected = false;
                 int totalConstantsDecrypted = 0;
-                bool allConstantsResolved = true;
+                bool allConstantsResolved = false;
                 int totalResourcesExtracted = 0;
                 int totalProxiesInlined = 0;
                 int totalSwitchesResolved = 0;
                 int totalJunkStripped = 0;
                 int totalCleanerHooks = 0;
                 var preservedHooks = new List<string>();
+                var hookRegistry = new Dictionary<string, HookTraceRecord>(StringComparer.Ordinal);
 
                 if (!initialLoadOk)
                 {
@@ -466,11 +469,13 @@ namespace ConfuserExKillerRunner
                         else
                         {
                             constantsDecrypted = dynamicConst.allResolved;
+                            allConstantsResolved = dynamicConst.allResolved;
                             Console.WriteLine($"[*] ConstantKiller: Isolated worker executed ({dynamicConst.message}).");
                         }
                     }
                     else
                     {
+                        allConstantsResolved = false;
                         Tool.Logger.LogWarning($"[ConstantKiller] Isolated worker constant decryption failed: {dynamicConst.message}");
                     }
                 }
@@ -555,6 +560,11 @@ namespace ConfuserExKillerRunner
                             totalCleanerHooks++;
                             Console.WriteLine("[+] ResourceKiller: Stripped runtime ResourceResolve hook");
                         }
+                        if (resResult.HookRecords != null)
+                        {
+                            foreach (var hr in resResult.HookRecords)
+                                hookRegistry[hr.HookId] = hr;
+                        }
                         if (resResult.RetainedHooksDetails != null && resResult.RetainedHooksDetails.Count > 0)
                             preservedHooks.AddRange(resResult.RetainedHooksDetails);
 
@@ -593,6 +603,11 @@ namespace ConfuserExKillerRunner
                         totalCleanerHooks += cleanResult.StrippedHooksCount + cleanResult.RemovedMethodsCount;
                         if (cleanResult.StrippedHooksCount > 0)
                             Console.WriteLine($"[+] CleanerKiller: Stripped {cleanResult.StrippedHooksCount} protector initializers from <Module>.cctor");
+                        if (cleanResult.HookRecords != null)
+                        {
+                            foreach (var hr in cleanResult.HookRecords)
+                                hookRegistry[hr.HookId] = hr;
+                        }
                         if (cleanResult.RetainedHooksDetails != null && cleanResult.RetainedHooksDetails.Count > 0)
                             preservedHooks.AddRange(cleanResult.RetainedHooksDetails);
                         stepTimings["Stage3_CleanerHooks"] = swStage3.ElapsedMilliseconds;
@@ -626,10 +641,12 @@ namespace ConfuserExKillerRunner
                         Console.WriteLine("[!] Static mode: Skipping AST & IL rewriting on Anti-Tamper encrypted method bodies.");
                     }
 
+                var swIntermediateWrite = Stopwatch.StartNew();
                 Console.WriteLine($"[*] Writing intermediate module: {cexkPath}");
                 var writerOpts = new ModuleWriterOptions(module) { Logger = DnlibLogger.Instance };
                 writerOpts.MetaDataOptions.Flags |= MetaDataFlags.KeepOldMaxStack;
                 module.Write(cexkPath, writerOpts);
+                stepTimings["Intermediate_DiskWrite"] = swIntermediateWrite.ElapsedMilliseconds;
             }
 
             string currentIntermediate = cexkPath;
@@ -712,6 +729,11 @@ namespace ConfuserExKillerRunner
                 {
                     var cleanFinal = CleanerKiller.StripProtectorHooks(module2, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
                     totalCleanerHooks += cleanFinal.StrippedHooksCount + cleanFinal.RemovedMethodsCount;
+                    if (cleanFinal.HookRecords != null)
+                    {
+                        foreach (var hr in cleanFinal.HookRecords)
+                            hookRegistry[hr.HookId] = hr;
+                    }
                     if (cleanFinal.RetainedHooksDetails != null && cleanFinal.RetainedHooksDetails.Count > 0)
                         preservedHooks.AddRange(cleanFinal.RetainedHooksDetails);
                     PredicateKiller.Execute(module2);
@@ -724,19 +746,61 @@ namespace ConfuserExKillerRunner
                     Console.WriteLine($"[+] Final SwitchKiller: {switchCount2} switches resolved");
                     FinalizeMethodBodies(module2);
                 }
+
+                // Reconcile hook registry against final assembly state to ensure accurate traceability
+                var finalCctor = module2.GlobalType?.FindStaticConstructor();
+                var remainingCctorCalls = new HashSet<string>();
+                if (finalCctor != null && finalCctor.HasBody)
+                {
+                    foreach (var ins in finalCctor.Body.Instructions)
+                    {
+                        if ((ins.OpCode == dnlib.DotNet.Emit.OpCodes.Call || ins.OpCode == dnlib.DotNet.Emit.OpCodes.Callvirt) && ins.Operand is IMethod calledM)
+                        {
+                            if (!UTF8String.IsNullOrEmpty(calledM.Name))
+                                remainingCctorCalls.Add(calledM.Name.String);
+                        }
+                    }
+                }
+                var globalMethods = new HashSet<string>(module2.GlobalType?.Methods.Select(m => m.Name.String) ?? Enumerable.Empty<string>());
+
+                foreach (var hook in hookRegistry.Values)
+                {
+                    if (hook.Action == "Retained")
+                    {
+                        bool callRemains = remainingCctorCalls.Contains(hook.MethodName);
+                        bool methodRemains = globalMethods.Contains(hook.MethodName);
+
+                        if (!callRemains && !methodRemains)
+                        {
+                            hook.Action = "Stripped";
+                            hook.Reason = $"Hook method {hook.MethodName} and its call were pruned from <Module> during intermediate deobfuscation passes.";
+                        }
+                        else if (!callRemains)
+                        {
+                            hook.Action = "Stripped";
+                            hook.Reason = $"Hook call to {hook.MethodName} was eliminated from <Module>.cctor during intermediate deobfuscation passes.";
+                        }
+                    }
+                }
+
                 var writerOpts2 = new ModuleWriterOptions(module2) { Logger = DnlibLogger.Instance };
                 writerOpts2.MetaDataOptions.Flags |= MetaDataFlags.KeepOldMaxStack;
                 module2.Write(candidatePath, writerOpts2);
             }
             stepTimings["Stage6_FinalCleanup"] = swStage6.ElapsedMilliseconds;
 
-            var distinctPreservedHooks = preservedHooks.Distinct().ToList();
-            if (distinctPreservedHooks.Count > 0)
+            var activePreservedHooks = hookRegistry.Values.Where(h => h.Action == "Retained").ToList();
+            preservedHooks.Clear();
+            foreach (var h in activePreservedHooks)
             {
-                Console.WriteLine($"[*] Preserved Hooks in <Module>.cctor ({distinctPreservedHooks.Count}):");
-                foreach (var hook in distinctPreservedHooks)
+                preservedHooks.Add(h.Reason);
+            }
+            if (activePreservedHooks.Count > 0)
+            {
+                Console.WriteLine($"[*] Preserved Hooks in <Module>.cctor ({activePreservedHooks.Count}):");
+                foreach (var hook in activePreservedHooks)
                 {
-                    Console.WriteLine($"  [i] {hook}");
+                    Console.WriteLine($"  [i] [{hook.HookType}] {hook.MethodName} (Confidence: {hook.Confidence}): {hook.Reason}");
                 }
             }
 
@@ -759,9 +823,9 @@ namespace ConfuserExKillerRunner
                 }
                 Console.ResetColor();
             }
-            foreach (var hook in distinctPreservedHooks)
+            foreach (var hook in activePreservedHooks)
             {
-                auditReport.Warnings.Add($"Preserved Hook: {hook}");
+                auditReport.Warnings.Add($"Preserved Hook: [{hook.HookType}] {hook.MethodName}: {hook.Reason}");
             }
 
             Console.WriteLine($"[*] Status:                 [{auditReport.Status}]");
@@ -805,13 +869,17 @@ namespace ConfuserExKillerRunner
                                 Sha256 = DeobfuscationReport.ComputeSha256(originalInputPath),
                                 SizeBytes = new FileInfo(originalInputPath).Length,
                                 TargetArchitecture = archInfo != null ? archInfo.Architecture.ToString() : "Unknown",
-                                TargetFramework = archInfo?.IsPe32Plus == true ? "PE32+" : "PE32"
+                                PeFormat = archInfo?.PeFormat ?? "Unknown",
+                                TargetFramework = ArchitectureDetector.DetectTargetFramework(originalInputPath)
                             },
                             Output = new FileReportInfo
                             {
                                 Path = finalOutputPath,
                                 Sha256 = string.Empty,
-                                SizeBytes = 0
+                                SizeBytes = 0,
+                                TargetArchitecture = archInfo != null ? archInfo.Architecture.ToString() : "Unknown",
+                                PeFormat = archInfo?.PeFormat ?? "Unknown",
+                                TargetFramework = "Unknown"
                             },
                             QualityAudit = new QualityAuditReportInfo
                             {
@@ -947,6 +1015,7 @@ namespace ConfuserExKillerRunner
             ProtectionMatrixResult matrix = null;
             try
             {
+                var swMatrix = Stopwatch.StartNew();
                 using (var finalModule = ModuleDefMD.Load(activeReportOutputPath))
                 {
                     matrix = ProtectionMatrix.Evaluate(
@@ -964,6 +1033,7 @@ namespace ConfuserExKillerRunner
                         cleanerHooksStrippedCount: totalCleanerHooks,
                         compressorUnpacked: compressorWasUnpacked);
 
+                    stepTimings["Stage8_ProtectionMatrix_Evaluation"] = swMatrix.ElapsedMilliseconds;
                     Console.WriteLine(ProtectionMatrix.FormatReport(matrix));
                 }
             }
@@ -1006,6 +1076,11 @@ namespace ConfuserExKillerRunner
             {
                 try
                 {
+                    string timingNote = "Pipeline stage timings reflect discrete execution time per phase; totalElapsedMs reflects total wall-clock duration including baseline audit, intermediate disk serialization, candidate verification, and report generation.";
+                    string summaryNotes = isIndeterminate 
+                        ? (string.IsNullOrEmpty(matrix?.SummaryNotes) ? $"Candidate assembly was preserved as unverified candidate because IL verification was indeterminate. Existing final output (if any) was not overwritten. {timingNote}" : $"{matrix.SummaryNotes} | IL verification was indeterminate; candidate not promoted. {timingNote}")
+                        : (string.IsNullOrEmpty(matrix?.SummaryNotes) ? timingNote : $"{matrix.SummaryNotes} | {timingNote}");
+
                     var report = new DeobfuscationReport
                     {
                         Input = new FileReportInfo
@@ -1014,13 +1089,17 @@ namespace ConfuserExKillerRunner
                             Sha256 = DeobfuscationReport.ComputeSha256(originalInputPath),
                             SizeBytes = new FileInfo(originalInputPath).Length,
                             TargetArchitecture = archInfo != null ? archInfo.Architecture.ToString() : "Unknown",
-                            TargetFramework = archInfo?.IsPe32Plus == true ? "PE32+" : "PE32"
+                            PeFormat = archInfo?.PeFormat ?? "Unknown",
+                            TargetFramework = ArchitectureDetector.DetectTargetFramework(originalInputPath)
                         },
                         Output = new FileReportInfo
                         {
                             Path = activeReportOutputPath,
                             Sha256 = File.Exists(activeReportOutputPath) ? DeobfuscationReport.ComputeSha256(activeReportOutputPath) : string.Empty,
-                            SizeBytes = File.Exists(activeReportOutputPath) ? new FileInfo(activeReportOutputPath).Length : 0
+                            SizeBytes = File.Exists(activeReportOutputPath) ? new FileInfo(activeReportOutputPath).Length : 0,
+                            TargetArchitecture = archInfo != null ? archInfo.Architecture.ToString() : "Unknown",
+                            PeFormat = archInfo?.PeFormat ?? "Unknown",
+                            TargetFramework = ArchitectureDetector.DetectTargetFramework(activeReportOutputPath)
                         },
                         Protections = matrix?.Items ?? new List<ProtectionItem>(),
                         Transformations = new TransformationReportMetrics
@@ -1028,7 +1107,7 @@ namespace ConfuserExKillerRunner
                             MethodsInspected = auditReport?.TotalMethods ?? 0,
                             MethodsWithBodies = auditReport?.MethodsWithBody ?? 0,
                             ConstantsDecryptedCount = totalConstantsDecrypted,
-                            AllConstantsResolved = allConstantsResolved,
+                            AllConstantsResolved = matrix?.AllConstantsResolved ?? allConstantsResolved,
                             ResourcesExtractedCount = totalResourcesExtracted,
                             ProxiesInlinedCount = totalProxiesInlined,
                             SwitchesResolvedCount = totalSwitchesResolved,
@@ -1052,6 +1131,7 @@ namespace ConfuserExKillerRunner
                             RegressionsIntroducedCount = regressions?.Count ?? 0,
                             Regressions = regressions ?? new List<string>()
                         },
+                        Hooks = hookRegistry.Values.ToList(),
                         PassTimingsMs = stepTimings,
                         TotalElapsedMs = swTotal.ElapsedMilliseconds,
                         PeakWorkingSetBytes = Process.GetCurrentProcess().PeakWorkingSet64,
@@ -1059,9 +1139,7 @@ namespace ConfuserExKillerRunner
                         FinalStatus = finalStatus,
                         OverallVerdict = isIndeterminate ? "INDETERMINATE (IL Verification Inconclusive - Candidate Not Promoted)" : (matrix?.OverallVerdict ?? finalStatus),
                         ExitCode = exitCode,
-                        SummaryNotes = isIndeterminate 
-                            ? (string.IsNullOrEmpty(matrix?.SummaryNotes) ? "Candidate assembly was preserved as unverified candidate because IL verification was indeterminate. Existing final output (if any) was not overwritten." : matrix.SummaryNotes + " | IL verification was indeterminate; candidate not promoted.")
-                            : (matrix?.SummaryNotes ?? string.Empty)
+                        SummaryNotes = summaryNotes
                     };
 
                     if (netDetectComp != null && netDetectComp.Available)
@@ -1092,12 +1170,14 @@ namespace ConfuserExKillerRunner
                             report.KnownLimitations.Add("Dynamic execution required for full deobfuscation (--allow-execution).");
                         if (matrix.HasUnsupported)
                             report.KnownLimitations.Add("Unsupported native x86 machine-code or JIT hooks preserved.");
-                        if (matrix.HasPartiallyProcessed)
-                            report.KnownLimitations.Add("Some constants or proxies could not be resolved and were preserved.");
+                        if (!matrix.AllConstantsResolved)
+                            report.KnownLimitations.Add("Encrypted constants were detected but not all references could be resolved.");
+                        if (matrix.HasPartiallyProcessed && matrix.AllConstantsResolved)
+                            report.KnownLimitations.Add("Some protected members or proxies could not be resolved and were preserved.");
                     }
-                    foreach (var hook in distinctPreservedHooks)
+                    foreach (var hook in activePreservedHooks)
                     {
-                        report.KnownLimitations.Add($"Preserved Hook: {hook}");
+                        report.KnownLimitations.Add($"Preserved Hook: [{hook.HookType}] {hook.MethodName}: {hook.Reason}");
                     }
 
                     report.Save(jsonReportPath);

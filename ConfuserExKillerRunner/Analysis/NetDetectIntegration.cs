@@ -150,10 +150,14 @@ namespace ConfuserExKillerRunner.Analysis
                     }
                 }
 
-                // Extract generic techniques from "techniques" array
-                if (detObj.ContainsKey("techniques") && detObj["techniques"].IsArray)
+                // Extract generic techniques from "generic_techniques" or "techniques" array
+                var techniquesNode = detObj.ContainsKey("generic_techniques") && detObj["generic_techniques"].IsArray
+                    ? detObj["generic_techniques"]
+                    : (detObj.ContainsKey("techniques") && detObj["techniques"].IsArray ? detObj["techniques"] : null);
+
+                if (techniquesNode != null)
                 {
-                    foreach (var t in detObj["techniques"].AsArray())
+                    foreach (var t in techniquesNode.AsArray())
                     {
                         string tech = t.IsObject ? t["technique"].AsString(t["name"].AsString()) : t.AsString();
                         if (!string.IsNullOrEmpty(tech) && !result.GenericTechniques.Contains(tech))
@@ -212,21 +216,51 @@ namespace ConfuserExKillerRunner.Analysis
             int delta = postScan.VerdictScore - preScan.VerdictScore;
             double pct = preScan.VerdictScore > 0 ? (delta * 100.0 / preScan.VerdictScore) : 0;
 
-            var preSet = new HashSet<string>(preScan.GenericTechniques, StringComparer.OrdinalIgnoreCase);
-            var postSet = new HashSet<string>(postScan.GenericTechniques, StringComparer.OrdinalIgnoreCase);
+            var preItems = new List<string>(preScan.GenericTechniques);
+            foreach (var p in preScan.Protectors)
+            {
+                if (!preItems.Contains(p, StringComparer.OrdinalIgnoreCase))
+                    preItems.Add(p);
+            }
 
-            var resolved = preScan.GenericTechniques.Where(t => !postSet.Contains(t)).ToList();
-            var exposed = postScan.GenericTechniques.Where(t => !preSet.Contains(t)).ToList();
-            var preserved = postScan.GenericTechniques.Where(t => preSet.Contains(t)).ToList();
+            var postItems = new List<string>(postScan.GenericTechniques);
+            foreach (var p in postScan.Protectors)
+            {
+                if (!postItems.Contains(p, StringComparer.OrdinalIgnoreCase))
+                    postItems.Add(p);
+            }
+
+            var preSet = new HashSet<string>(preItems, StringComparer.OrdinalIgnoreCase);
+            var postSet = new HashSet<string>(postItems, StringComparer.OrdinalIgnoreCase);
+
+            var resolved = preItems.Where(t => !postSet.Contains(t)).ToList();
+            var exposed = postItems.Where(t => !preSet.Contains(t)).ToList();
+            var preserved = postItems.Where(t => preSet.Contains(t)).ToList();
 
             string interpretation;
             if (delta > 0)
             {
-                interpretation = $"Heuristic score increase (+{delta}) reflects internal signatures newly exposed after unpacking outer protection layers (e.g. Anti-Tamper/Compressor), not an engine regression.";
+                if (exposed.Count > 0)
+                {
+                    string exposedSummary = string.Join(", ", exposed.Take(3)) + (exposed.Count > 3 ? $" (+{exposed.Count - 3} more)" : "");
+                    string resolvedPart = resolved.Count > 0 ? $" (resolved outer signatures: {string.Join(", ", resolved)})" : "";
+                    interpretation = $"Heuristic score increase (+{delta}) correlates with {exposed.Count} newly exposed indicator signature(s) ({exposedSummary}){resolvedPart}.";
+                }
+                else
+                {
+                    interpretation = $"Heuristic score increase (+{delta}) observed without newly identified signature categories (unconfirmed hypothesis: internal marker exposure vs potential transformation artifact).";
+                }
             }
             else if (delta < 0)
             {
-                interpretation = $"Heuristic score reduction (-{Math.Abs(delta)}) reflects successful stripping of protector hooks and control flow cleanup.";
+                if (resolved.Count > 0)
+                {
+                    interpretation = $"Heuristic score reduction (-{Math.Abs(delta)}) reflects successful resolution of protector indicators ({string.Join(", ", resolved)}).";
+                }
+                else
+                {
+                    interpretation = $"Heuristic score reduction (-{Math.Abs(delta)}) observed between pre- and post-deobfuscation triage scans.";
+                }
             }
             else
             {
