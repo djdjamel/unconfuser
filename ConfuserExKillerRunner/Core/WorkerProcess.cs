@@ -12,7 +12,21 @@ namespace ConfuserExKillerRunner.Core
     {
         public int TimeoutMs { get; set; } = 30000;
         public string TempDirectory { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the isolated worker process is permitted
+        /// to resolve referenced dependencies from the directory containing the target assembly.
+        /// <para>
+        /// <b>Security Notice:</b> Default is <c>false</c>. Enabling this option permits the worker
+        /// to load assemblies from the target directory during dynamic decryption/unpacking.
+        /// If the target assembly directory contains malicious or untrusted third-party assemblies,
+        /// this could lead to unintended code execution in the worker process.
+        /// Whenever possible, use <see cref="AllowedDependencyDirectories"/> (<c>--dep-dir</c>) to specify
+        /// isolated, trusted directories for required dependencies instead.
+        /// </para>
+        /// </summary>
         public bool AllowTargetDirectoryDependencies { get; set; } = false;
+
         public List<string> AllowedDependencyDirectories { get; set; } = new List<string>();
         public TargetArchitecture PreferredArchitecture { get; set; } = TargetArchitecture.Unknown;
     }
@@ -179,7 +193,7 @@ namespace ConfuserExKillerRunner.Core
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
                 Logger.LogInfo($"[WorkerClient] Spawning isolated worker ({Path.GetFileName(runnerBin)}) for AntiTamper (Timeout: {timeoutMs}ms)...");
-                var procResult = ProcessRunner.Run(runnerBin, sbArgs.ToString(), Path.GetDirectoryName(targetAssemblyPath), timeoutMs);
+                var procResult = ProcessRunner.Run(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
 
                 if (procResult.TimedOut)
                 {
@@ -271,7 +285,7 @@ namespace ConfuserExKillerRunner.Core
                 string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
-                var procResult = ProcessRunner.Run(runnerBin, sbArgs.ToString(), Path.GetDirectoryName(targetAssemblyPath), timeoutMs);
+                var procResult = ProcessRunner.Run(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
 
                 if (procResult.TimedOut)
                 {
@@ -279,15 +293,23 @@ namespace ConfuserExKillerRunner.Core
                     return res;
                 }
 
+                if (File.Exists(tempMetaOut))
+                {
+                    string metaContent = File.ReadAllText(tempMetaOut);
+                    WorkerProtocol.ParseResourceMeta(metaContent, res);
+                }
+
                 if (File.Exists(tempResOut) && new FileInfo(tempResOut).Length > 0)
                 {
                     res.DecryptedResourceContainer = File.ReadAllBytes(tempResOut);
                     res.Success = true;
-                    res.Message = "Dynamic resource decryption succeeded in isolated worker.";
+                    if (string.IsNullOrEmpty(res.Message))
+                        res.Message = "Dynamic resource decryption succeeded in isolated worker.";
                 }
                 else
                 {
-                    res.Message = $"Resource worker finished without payload: {procResult.StandardError.Trim()}";
+                    if (string.IsNullOrEmpty(res.Message))
+                        res.Message = $"Resource worker finished without payload: {procResult.StandardError.Trim()}";
                 }
             }
             catch (Exception ex)
@@ -346,7 +368,7 @@ namespace ConfuserExKillerRunner.Core
                 string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
-                var procResult = ProcessRunner.Run(runnerBin, sbArgs.ToString(), Path.GetDirectoryName(targetAssemblyPath), timeoutMs);
+                var procResult = ProcessRunner.Run(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
 
                 if (procResult.TimedOut)
                 {
@@ -356,21 +378,8 @@ namespace ConfuserExKillerRunner.Core
 
                 if (File.Exists(tempMetaOut))
                 {
-                    try
-                    {
-                        string metaContent = File.ReadAllText(tempMetaOut);
-                        var msgMatch = System.Text.RegularExpressions.Regex.Match(metaContent, "\"Message\"\\s*:\\s*\"([^\"]+)\"");
-                        if (msgMatch.Success && !string.IsNullOrWhiteSpace(msgMatch.Groups[1].Value))
-                        {
-                            res.Message = msgMatch.Groups[1].Value;
-                        }
-                        var epMatch = System.Text.RegularExpressions.Regex.Match(metaContent, "\"EntryPointToken\"\\s*:\\s*\"0x([0-9a-fA-F]+)\"");
-                        if (epMatch.Success && uint.TryParse(epMatch.Groups[1].Value, System.Globalization.NumberStyles.HexNumber, null, out uint epToken))
-                        {
-                            res.RecoveredEntryPointToken = epToken;
-                        }
-                    }
-                    catch { }
+                    string metaContent = File.ReadAllText(tempMetaOut);
+                    WorkerProtocol.ParseCompressorMeta(metaContent, res);
                 }
 
                 if (File.Exists(tempPeOut) && new FileInfo(tempPeOut).Length > 0)
@@ -458,22 +467,8 @@ namespace ConfuserExKillerRunner.Core
 
                 if (File.Exists(tempMetaOut))
                 {
-                    try
-                    {
-                        string meta = File.ReadAllText(tempMetaOut);
-                        var countMatch = System.Text.RegularExpressions.Regex.Match(meta, "\"DecryptedCount\"\\s*:\\s*(\\d+)");
-                        if (countMatch.Success && int.TryParse(countMatch.Groups[1].Value, out int parsed))
-                            decryptedCount = parsed;
-
-                        var allMatch = System.Text.RegularExpressions.Regex.Match(meta, "\"AllResolved\"\\s*:\\s*(true|false)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                        if (allMatch.Success && bool.TryParse(allMatch.Groups[1].Value, out bool parsedAll))
-                            allResolved = parsedAll;
-
-                        var msgMatch = System.Text.RegularExpressions.Regex.Match(meta, "\"Message\"\\s*:\\s*\"([^\"]+)\"");
-                        if (msgMatch.Success && !string.IsNullOrWhiteSpace(msgMatch.Groups[1].Value))
-                            metaMessage = msgMatch.Groups[1].Value;
-                    }
-                    catch { }
+                    string meta = File.ReadAllText(tempMetaOut);
+                    WorkerProtocol.ParseConstantsMeta(meta, out decryptedCount, out allResolved, out metaMessage);
                 }
 
                 if (!File.Exists(tempPeOut))
@@ -556,9 +551,7 @@ namespace ConfuserExKillerRunner.Core
                 if (File.Exists(tempMetaOut))
                 {
                     string meta = File.ReadAllText(tempMetaOut);
-                    var countMatch = System.Text.RegularExpressions.Regex.Match(meta, "\"RestoredCount\"\\s*:\\s*(\\d+)");
-                    if (countMatch.Success && int.TryParse(countMatch.Groups[1].Value, out int parsed))
-                        restoredCount = parsed;
+                    WorkerProtocol.ParseFieldRvaMeta(meta, out restoredCount, out string _);
                 }
 
                 if (restoredCount > 0 && File.Exists(tempPeOut))
@@ -584,25 +577,7 @@ namespace ConfuserExKillerRunner.Core
 
         private static void ParseAntiTamperMeta(string json, AntiTamperResult result)
         {
-            if (string.IsNullOrEmpty(json)) return;
-
-            // Extract status
-            var statusMatch = System.Text.RegularExpressions.Regex.Match(json, "\"Status\"\\s*:\\s*\"([^\"]+)\"");
-            if (statusMatch.Success && Enum.TryParse<AntiTamperStatus>(statusMatch.Groups[1].Value, out var parsedStatus))
-                result.Status = parsedStatus;
-
-            // Extract message
-            var msgMatch = System.Text.RegularExpressions.Regex.Match(json, "\"Message\"\\s*:\\s*\"([^\"]+)\"");
-            if (msgMatch.Success)
-                result.Message = msgMatch.Groups[1].Value;
-
-            // Extract sections
-            var secMatches = System.Text.RegularExpressions.Regex.Matches(json, "\"Section\"\\s*:\\s*\"([^\"]+)\"");
-            foreach (System.Text.RegularExpressions.Match m in secMatches)
-            {
-                if (!result.DecryptedSections.Contains(m.Groups[1].Value))
-                    result.DecryptedSections.Add(m.Groups[1].Value);
-            }
+            WorkerProtocol.ParseAntiTamperMeta(json, result);
         }
     }
 }

@@ -1264,6 +1264,7 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("                          NOTE: Subprocess isolation is NOT an OS security sandbox. Run untrusted samples in a VM.");
             Console.WriteLine("  --worker-timeout <ms>   Timeout in milliseconds for isolated worker process (default: 30000)");
             Console.WriteLine("  --allow-target-deps     Permit worker to resolve dependencies from target assembly directory");
+            Console.WriteLine("                          CAUTION: Only enable if target directory is trusted. Use --dep-dir for safe paths.");
             Console.WriteLine("  --dep-dir <path>        Add explicitly authorized directory for dependency resolution");
             Console.WriteLine("  -o, --output <path>     Specify custom destination path for final cleaned assembly");
             Console.WriteLine("  -d, --de4dot <path>     Specify explicit path to de4dot-cex executable");

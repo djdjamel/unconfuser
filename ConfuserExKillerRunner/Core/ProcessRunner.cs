@@ -40,6 +40,7 @@ namespace ConfuserExKillerRunner.Core
                 psi.WorkingDirectory = workingDirectory;
             }
 
+            using (var job = Environment.OSVersion.Platform == PlatformID.Win32NT ? new JobObject() : null)
             using (var proc = new Process { StartInfo = psi })
             {
                 proc.OutputDataReceived += (sender, e) =>
@@ -54,6 +55,7 @@ namespace ConfuserExKillerRunner.Core
                 };
 
                 proc.Start();
+                job?.AssignProcess(proc);
                 proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
 
@@ -62,6 +64,7 @@ namespace ConfuserExKillerRunner.Core
 
                 if (!exited)
                 {
+                    job?.Terminate(1);
                     KillProcessTree(proc);
                     return new ProcessResult
                     {

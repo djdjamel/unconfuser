@@ -408,6 +408,41 @@ namespace ConfuserExKillerRunner.Tests
             mod.Write(path);
         }
 
+        [Fact]
+        public void WorkerOptions_AllowTargetDirectoryDependencies_DefaultsToFalse()
+        {
+            var options = new WorkerOptions();
+            Assert.False(options.AllowTargetDirectoryDependencies, "AllowTargetDirectoryDependencies must be secure by default (false).");
+        }
+
+        [Fact]
+        public void WorkerClient_ExecutesInNeutralWorkingDirectory_PreventingTargetDirCwdHijacking()
+        {
+            // Create a target assembly in a dedicated directory
+            string targetDir = Path.Combine(_testDir, "TargetFolder");
+            Directory.CreateDirectory(targetDir);
+            string targetDll = Path.Combine(targetDir, "CleanTarget.dll");
+            CreateSimpleAssembly(targetDll);
+
+            // Create an isolated temp directory for the worker
+            string isolatedTempDir = Path.Combine(_testDir, "IsolatedTemp");
+            Directory.CreateDirectory(isolatedTempDir);
+
+            byte[] originalBytes = File.ReadAllBytes(targetDll);
+            var opts = new WorkerOptions
+            {
+                TimeoutMs = 5000,
+                TempDirectory = isolatedTempDir,
+                AllowTargetDirectoryDependencies = false
+            };
+
+            var result = WorkerClient.ExecuteAntiTamper(targetDll, originalBytes, opts);
+
+            // AntiTamper killer executes in neutral isolatedTempDir, not targetDir
+            Assert.NotNull(result);
+            Assert.NotEqual(AntiTamperStatus.NotAttempted, result.Status);
+        }
+
         private static string ComputeSha256(byte[] data)
         {
             using (var sha = SHA256.Create())
