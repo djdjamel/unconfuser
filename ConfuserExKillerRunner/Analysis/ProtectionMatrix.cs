@@ -855,12 +855,30 @@ namespace ConfuserExKillerRunner.Analysis
                     {
                         if (instrs[i].OpCode == OpCodes.Switch)
                         {
-                            // In ConfuserEx switch flattening, switch is preceded by an arithmetic/bitwise operation (xor, rem, rem_un)
-                            for (int k = Math.Max(0, i - 6); k < i; k++)
+                            int headerStart = Math.Max(0, i - 6);
+                            bool hasArith = false;
+                            for (int k = headerStart; k < i; k++)
                             {
                                 var op = instrs[k].OpCode;
                                 if (op == OpCodes.Xor || op == OpCodes.Rem || op == OpCodes.Rem_Un)
-                                    return true;
+                                {
+                                    hasArith = true;
+                                    break;
+                                }
+                            }
+                            if (!hasArith) continue;
+
+                            // ConfuserEx switch flattening is a loop/state-machine dispatcher.
+                            // There must be at least one backward branch targeting the header [headerStart..i].
+                            for (int b = i + 1; b < instrs.Count; b++)
+                            {
+                                var target = instrs[b].Operand as Instruction;
+                                if (target != null)
+                                {
+                                    int targetIdx = instrs.IndexOf(target);
+                                    if (targetIdx >= headerStart && targetIdx <= i)
+                                        return true;
+                                }
                             }
                         }
                     }
@@ -995,6 +1013,8 @@ namespace ConfuserExKillerRunner.Analysis
             int obfuscatedCount = 0;
             foreach (var t in module.GetTypes())
             {
+                if (t.IsGlobalModuleType || (t.DeclaringType != null && t.DeclaringType.IsGlobalModuleType))
+                    continue;
                 if (!UTF8String.IsNullOrEmpty(t.Name))
                 {
                     string s = t.Name.String;

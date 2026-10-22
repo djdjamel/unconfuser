@@ -28,8 +28,16 @@ build/
 *.orig.dll
 *.candidate.*
 benchmarks/fixtures/*
+!benchmarks/fixtures/real_confuserex/
+!benchmarks/fixtures/real_confuserex/**
 !benchmarks/fixtures/real_confuserex_antitamper/
 !benchmarks/fixtures/real_confuserex_antitamper/**
+!benchmarks/fixtures/real_confuserex_antitamper_constants/
+!benchmarks/fixtures/real_confuserex_antitamper_constants/**
+!benchmarks/fixtures/real_confuserex_proxy_cflow/
+!benchmarks/fixtures/real_confuserex_proxy_cflow/**
+!benchmarks/fixtures/real_confuserex_compressor/
+!benchmarks/fixtures/real_confuserex_compressor/**
 scratch/
 tools/
 

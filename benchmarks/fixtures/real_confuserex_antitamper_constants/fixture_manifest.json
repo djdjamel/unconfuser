@@ -1,0 +1,34 @@
+{
+  "manifest_version": "1.0.0",
+  "generator": "benchmarks/prepare_real_fixture.py",
+  "confuserex_toolchain": {
+    "release": "v1.0.0",
+    "commit": "3c9c29d9daf2f1259edf69054c5693d5d225a980",
+    "cli_filename": "Confuser.CLI.exe",
+    "expected_cli_sha256": "2b3e5cb7f96589e5377700a5f7f25e9fc6a14539e85256e6ac6e85c07f769f61",
+    "actual_cli_sha256": "2b3e5cb7f96589e5377700a5f7f25e9fc6a14539e85256e6ac6e85c07f769f61"
+  },
+  "source_module": {
+    "name": "BenignSample.exe",
+    "sha256": "f213b38cb6b655391d860d0769bb61e4006e73ff3e50df9d7326ef187af0cdbe",
+    "size_bytes": 7680
+  },
+  "protection_profile": {
+    "filename": "confuser_at_const.crproj",
+    "sha256": "2aded030d344e8a810657a0434138b2019c64c2ce111fcd18384a448c2373d00",
+    "size_bytes": 462
+  },
+  "fixture": {
+    "filename": "BenignSample.exe",
+    "sha256": "e278913ab49cc42b1c52a3a01af9272223008ed4d8fe6a1d0416435945977ea0",
+    "size_bytes": 31744
+  },
+  "source_code": {
+    "source_files": [
+      "BenignSample.csproj",
+      "Greeting.txt",
+      "Program.cs"
+    ],
+    "sources_sha256": "0367782f5bb58073f6f543ee1c4cfc8100e4c7e55ca24c6d1e6ba4454486053a"
+  }
+}

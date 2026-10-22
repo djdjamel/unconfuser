@@ -1,0 +1,7 @@
+<project outputDir="C:\Users\acer\claude\xp_src\benchmarks\fixtures\real_confuserex_proxy_cflow" baseDir="C:\Users\acer\claude\xp_src\benchmarks\BenignSample\bin\Release\net48" xmlns="http://confuser.codeplex.com">
+  <rule pattern="true" inherit="false">
+    <protection id="ref proxy" />
+    <protection id="ctrl flow" />
+  </rule>
+  <module path="C:\Users\acer\claude\xp_src\benchmarks\BenignSample\bin\Release\net48\BenignSample.exe" />
+</project>

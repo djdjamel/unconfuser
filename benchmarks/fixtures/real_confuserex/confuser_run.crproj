@@ -1,0 +1,10 @@
+<project outputDir="C:\Users\acer\claude\xp_src\benchmarks\fixtures\real_confuserex" baseDir="C:\Users\acer\claude\xp_src\benchmarks\BenignSample\bin\Release\net48" xmlns="http://confuser.codeplex.com">
+  <!-- Pinned deterministic profile for ConfuserEx v1.0.0 benchmark testing -->
+  <rule pattern="true" inherit="false">
+    <protection id="constants" />
+    <protection id="ctrl flow" />
+    <protection id="ref proxy" />
+    <protection id="resources" />
+  </rule>
+  <module path="C:\Users\acer\claude\xp_src\benchmarks\BenignSample\bin\Release\net48\BenignSample.exe" />
+</project>

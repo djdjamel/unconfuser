@@ -1106,7 +1106,7 @@ namespace ConfuserExKillerRunner
                 exitCode = 2;
                 finalStatus = "INDETERMINATE";
             }
-            else if (matrix != null && (matrix.HasRequiresDynamicSkipped || matrix.HasUnsupported || matrix.HasNotEvaluated || matrix.HasCodeProtectionsPartiallyProcessed || (strictExitCodes && matrix.HasPartiallyProcessed)))
+            else if (matrix != null && (matrix.HasRequiresDynamicSkipped || matrix.HasUnsupported || (strictExitCodes && (matrix.HasNotEvaluated || matrix.HasCodeProtectionsPartiallyProcessed || matrix.HasPartiallyProcessed))))
             {
                 exitCode = 2;
                 finalStatus = "PARTIAL_SUCCESS";

@@ -101,8 +101,10 @@ namespace ConfuserExKillerRunner.Tests
                 "--no-netdetect"
             });
 
-            Assert.True(exitCode == 0 || exitCode == 2, $"Expected exit code 0 or 2 (PARTIAL_SUCCESS), but got {exitCode}");
+            Assert.Equal(0, exitCode);
             Assert.True(File.Exists(outPath));
+            string unverifiedPath = Path.Combine(_testDir, "real_cex_deobf.unverified_candidate.exe");
+            Assert.False(File.Exists(unverifiedPath), "Did not expect an unverified candidate on a successful run.");
 
             // QualityAuditor verification
             var audit = QualityAuditor.Audit(outPath, runExternalVerifier: false);
@@ -184,19 +186,47 @@ namespace ConfuserExKillerRunner.Tests
                 "--no-netdetect"
             });
 
-            Assert.True(exitCode == 0 || exitCode == 2, $"Expected exit code 0 or 2 (PARTIAL_SUCCESS / INDETERMINATE), but got {exitCode}");
+            Assert.Equal(0, exitCode);
+            Assert.True(File.Exists(outPath), $"Expected cleaned assembly at {outPath}");
             string unverifiedPath = Path.Combine(_testDir, "real_at_deobf.unverified_candidate.exe");
-            string actualOutput = File.Exists(outPath) ? outPath : unverifiedPath;
-            Assert.True(File.Exists(actualOutput));
+            Assert.False(File.Exists(unverifiedPath), "Did not expect an unverified candidate on a successful run.");
 
-            var audit = QualityAuditor.Audit(actualOutput, runExternalVerifier: false);
+            var audit = QualityAuditor.Audit(outPath, runExternalVerifier: false);
             Assert.True(audit.CanLoad);
             Assert.True(audit.StructuralAuditPassed);
             Assert.Equal(0, audit.InvalidInstructionsCount);
+            Assert.Equal(0, audit.StackUnderflowCount);
+
+            // Assertions on final state of protection & residual references
+            using (var module = ModuleDefMD.Load(outPath))
+            {
+                var cctor = module.GlobalType?.FindStaticConstructor();
+                Assert.NotNull(cctor);
+                // Zero residual calls to AntiTamper protector in <Module>.cctor
+                Assert.DoesNotContain(cctor.Body.Instructions, i =>
+                    (i.OpCode == dnlib.DotNet.Emit.OpCodes.Call || i.OpCode == dnlib.DotNet.Emit.OpCodes.Callvirt) &&
+                    i.Operand != null && i.Operand.ToString().Contains("AntiTamper"));
+
+                // Protector P/Invoke (VirtualProtect) pruned from <Module>
+                Assert.DoesNotContain(module.GlobalType.Methods, m => m.IsPinvokeImpl && m.ImplMap?.Name == "VirtualProtect");
+
+                // Every user method has readable, non-empty CIL
+                foreach (var type in module.GetTypes())
+                {
+                    if (type.IsGlobalModuleType) continue;
+                    foreach (var m in type.Methods)
+                    {
+                        if (m.HasBody)
+                        {
+                            Assert.NotEmpty(m.Body.Instructions);
+                        }
+                    }
+                }
+            }
 
             var psi = new ProcessStartInfo
             {
-                FileName = actualOutput,
+                FileName = outPath,
                 Arguments = "test",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -236,6 +266,140 @@ namespace ConfuserExKillerRunner.Tests
             using var module = ModuleDefMD.Load(outPath);
             Assert.NotNull(module);
             Assert.True(module.Types.Count > 0);
+        }
+
+        [Fact]
+        public void RealConfuserEx_AntiTamperAndConstants_DynamicExecution_DeobfuscatesBothLayers()
+        {
+            string fixturePath = GetFixturePath(Path.Combine("benchmarks", "fixtures", "real_confuserex_antitamper_constants", "BenignSample.exe"));
+            string outPath = Path.Combine(_testDir, "real_atc_deobf.exe");
+
+            int exitCode = Program.Main(new[]
+            {
+                fixturePath,
+                "-o", outPath,
+                "--allow-execution",
+                "--no-de4dot",
+                "--no-netdetect"
+            });
+
+            Assert.Equal(0, exitCode);
+            Assert.True(File.Exists(outPath));
+
+            var audit = QualityAuditor.Audit(outPath, runExternalVerifier: false);
+            Assert.True(audit.CanLoad);
+            Assert.True(audit.StructuralAuditPassed);
+            Assert.Equal(0, audit.InvalidInstructionsCount);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = outPath,
+                Arguments = "test",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var proc = Process.Start(psi);
+            Assert.NotNull(proc);
+            string stdout = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(10000);
+
+            Assert.Equal(0, proc.ExitCode);
+            Assert.Contains("BENIGN_START", stdout);
+            Assert.Contains("CONST_STR:ConfuserEx_Benchmark_Secret_String_2026", stdout);
+            Assert.Contains("CONST_NUM:133742:9223372036854775800", stdout);
+            Assert.Contains("BENIGN_END", stdout);
+        }
+
+        [Fact]
+        public void RealConfuserEx_ProxyAndControlFlow_DynamicExecution_DeobfuscatesBothLayers()
+        {
+            string fixturePath = GetFixturePath(Path.Combine("benchmarks", "fixtures", "real_confuserex_proxy_cflow", "BenignSample.exe"));
+            string outPath = Path.Combine(_testDir, "real_pc_deobf.exe");
+
+            int exitCode = Program.Main(new[]
+            {
+                fixturePath,
+                "-o", outPath,
+                "--allow-execution",
+                "--no-de4dot",
+                "--no-netdetect"
+            });
+
+            Assert.Equal(0, exitCode);
+            Assert.True(File.Exists(outPath));
+
+            var audit = QualityAuditor.Audit(outPath, runExternalVerifier: false);
+            Assert.True(audit.CanLoad);
+            Assert.True(audit.StructuralAuditPassed);
+            Assert.Equal(0, audit.InvalidInstructionsCount);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = outPath,
+                Arguments = "test",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var proc = Process.Start(psi);
+            Assert.NotNull(proc);
+            string stdout = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(10000);
+
+            Assert.Equal(0, proc.ExitCode);
+            Assert.Contains("BENIGN_START", stdout);
+            Assert.Contains("PROXY:42", stdout);
+            Assert.Contains("CFLOW:100:30:35:95", stdout);
+            Assert.Contains("BENIGN_END", stdout);
+        }
+
+        [Fact]
+        public void RealConfuserEx_Compressor_DynamicExecution_UnpacksPayloadAndMatchesBaseline()
+        {
+            string fixturePath = GetFixturePath(Path.Combine("benchmarks", "fixtures", "real_confuserex_compressor", "BenignSample.exe"));
+            string outPath = Path.Combine(_testDir, "real_comp_deobf.exe");
+
+            int exitCode = Program.Main(new[]
+            {
+                fixturePath,
+                "-o", outPath,
+                "--allow-execution",
+                "--no-de4dot",
+                "--no-netdetect"
+            });
+
+            Assert.Equal(0, exitCode);
+            Assert.True(File.Exists(outPath));
+
+            var audit = QualityAuditor.Audit(outPath, runExternalVerifier: false);
+            Assert.True(audit.CanLoad);
+            Assert.True(audit.StructuralAuditPassed);
+            Assert.Equal(0, audit.InvalidInstructionsCount);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = outPath,
+                Arguments = "test",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var proc = Process.Start(psi);
+            Assert.NotNull(proc);
+            string stdout = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(10000);
+
+            Assert.Equal(0, proc.ExitCode);
+            Assert.Contains("BENIGN_START", stdout);
+            Assert.Contains("CONST_STR:ConfuserEx_Benchmark_Secret_String_2026", stdout);
+            Assert.Contains("BENIGN_END", stdout);
         }
     }
 }
