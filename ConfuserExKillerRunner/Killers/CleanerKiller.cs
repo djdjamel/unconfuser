@@ -15,6 +15,8 @@ namespace ConfuserExKillerRunner.Killers
     {
         public int StrippedHooksCount { get; set; }
         public int RemovedMethodsCount { get; set; }
+        public int StrippedAttributesCount { get; set; }
+        public bool AntiIldasmStripped { get; set; }
         public List<string> StrippedDetails { get; set; } = new List<string>();
         public List<string> RetainedHooksDetails { get; set; } = new List<string>();
         public List<HookTraceRecord> HookRecords { get; set; } = new List<HookTraceRecord>();
@@ -22,11 +24,50 @@ namespace ConfuserExKillerRunner.Killers
 
     public static class CleanerKiller
     {
+        public static bool StripAntiIldasm(ModuleDef module)
+        {
+            if (module == null) return false;
+            bool stripped = false;
+            if (module.Assembly != null && module.Assembly.HasCustomAttributes)
+            {
+                for (int i = module.Assembly.CustomAttributes.Count - 1; i >= 0; i--)
+                {
+                    var ca = module.Assembly.CustomAttributes[i];
+                    if (ca?.TypeFullName != null && ca.TypeFullName.IndexOf("SuppressIldasmAttribute", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        module.Assembly.CustomAttributes.RemoveAt(i);
+                        stripped = true;
+                    }
+                }
+            }
+            if (module.HasCustomAttributes)
+            {
+                for (int i = module.CustomAttributes.Count - 1; i >= 0; i--)
+                {
+                    var ca = module.CustomAttributes[i];
+                    if (ca?.TypeFullName != null && ca.TypeFullName.IndexOf("SuppressIldasmAttribute", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        module.CustomAttributes.RemoveAt(i);
+                        stripped = true;
+                    }
+                }
+            }
+            return stripped;
+        }
+
         public static CleanerResult StripProtectorHooks(ModuleDef module, bool resourcesDecrypted = false, bool constantsDecrypted = false, bool antiTamperDecrypted = false)
         {
             if (module == null) throw new ArgumentNullException(nameof(module));
 
             var result = new CleanerResult();
+
+            if (StripAntiIldasm(module))
+            {
+                result.AntiIldasmStripped = true;
+                result.StrippedAttributesCount++;
+                result.StrippedDetails.Add("Stripped SuppressIldasmAttribute from assembly/module custom attributes");
+            }
+
             var cctor = module.GlobalType?.FindStaticConstructor();
             if (cctor == null || !cctor.HasBody)
                 return result;

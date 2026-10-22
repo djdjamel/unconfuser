@@ -778,5 +778,144 @@ namespace ConfuserExKillerRunner.Tests
             Assert.False(ProtectionMatrix.IsConfuserExObfuscatedIdentifier("XpertExceptionTransaction"));
             Assert.False(ProtectionMatrix.IsConfuserExObfuscatedIdentifier("TDB_SIMPLE_INDICATORS"));
         }
+
+        [Fact]
+        public void Evaluate_AntiIldasm_WhenPresentAndNotStripped_ReportsDetected_NotRemoved()
+        {
+            var module = CreateEmptyModule();
+            // Add SuppressIldasmAttribute to module's assembly
+            var attrRef = module.CorLibTypes.GetTypeRef("System.Runtime.CompilerServices", "SuppressIldasmAttribute");
+            var memberRef = new MemberRefUser(module, ".ctor", MethodSig.CreateInstance(module.CorLibTypes.Void), attrRef);
+            module.Assembly.CustomAttributes.Add(new CustomAttribute(memberRef));
+
+            var matrix = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: false,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 0,
+                allConstantsResolved: true,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0,
+                antiIldasmStripped: false);
+
+            var item = matrix.Items.First(i => i.Name == "Anti-ILDasm");
+            Assert.True(item.Detected);
+            Assert.NotEqual("Removed", item.ResultSummary);
+            Assert.Equal("Detected", item.ResultSummary);
+            Assert.Equal(ProtectionSupportStatus.Detected, item.Status);
+            Assert.NotEqual("FULLY DEOBFUSCATED", matrix.OverallVerdict);
+        }
+
+        [Fact]
+        public void Evaluate_AntiIldasm_WhenStrippedAndVerifiedAbsent_ReportsRemoved()
+        {
+            var module = CreateEmptyModule(); // Does not have the attribute
+
+            var matrix = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: false,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 0,
+                allConstantsResolved: true,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0,
+                antiIldasmStripped: true);
+
+            var item = matrix.Items.First(i => i.Name == "Anti-ILDasm");
+            Assert.True(item.Detected);
+            Assert.Equal("Removed", item.ResultSummary);
+            Assert.Equal(ProtectionSupportStatus.SupportedStatic, item.Status);
+        }
+
+        [Fact]
+        public void CleanerKiller_StripAntiIldasm_RemovesSuppressIldasmAttribute()
+        {
+            var module = CreateEmptyModule();
+            var attrRef = module.CorLibTypes.GetTypeRef("System.Runtime.CompilerServices", "SuppressIldasmAttribute");
+            var memberRef = new MemberRefUser(module, ".ctor", MethodSig.CreateInstance(module.CorLibTypes.Void), attrRef);
+            module.Assembly.CustomAttributes.Add(new CustomAttribute(memberRef));
+
+            Assert.True(ProtectionMatrix.HasAntiIldasmAttribute(module));
+
+            bool stripped = Killers.CleanerKiller.StripAntiIldasm(module);
+            Assert.True(stripped);
+            Assert.False(ProtectionMatrix.HasAntiIldasmAttribute(module));
+        }
+
+        [Fact]
+        public void Evaluate_PropagatesUnevaluated_Protections()
+        {
+            var module = CreateEmptyModule();
+            var unevaluated = new[] { "Name Protection", "Anti-Tamper (Normal)" };
+
+            var matrix = ProtectionMatrix.Evaluate(
+                module,
+                allowExecution: false,
+                antiTamperDecrypted: false,
+                jitModeDetected: false,
+                cor20Repaired: false,
+                constantsDecryptedCount: 0,
+                allConstantsResolved: true,
+                resourcesExtractedCount: 0,
+                proxiesInlinedCount: 0,
+                switchesResolvedCount: 0,
+                junkInstructionsStrippedCount: 0,
+                cleanerHooksStrippedCount: 0,
+                unevaluatedProtections: unevaluated);
+
+            var nameItem = matrix.Items.First(i => i.Name == "Name Protection");
+            Assert.Equal(ProtectionSupportStatus.NotEvaluated, nameItem.Status);
+            Assert.Equal("Not Evaluated", nameItem.ResultSummary);
+
+            var atItem = matrix.Items.First(i => i.Name == "Anti-Tamper" && i.Mode == "Normal");
+            Assert.Equal(ProtectionSupportStatus.NotEvaluated, atItem.Status);
+            Assert.Equal("Not Evaluated", atItem.ResultSummary);
+
+            Assert.True(matrix.HasNotEvaluated);
+            Assert.Equal("DEOBFUSCATION UNCONFIRMED (Unevaluated Protections)", matrix.OverallVerdict);
+        }
+
+        [Fact]
+        public void Evaluate_All6ProtectionStates_HandledCorrectly()
+        {
+            var module = CreateEmptyModule();
+
+            // 1. NotDetected
+            var matrixClean = ProtectionMatrix.Evaluate(module, false, false, false, false, 0, true, 0, 0, 0, 0, 0);
+            Assert.Contains(matrixClean.Items, i => i.Status == ProtectionSupportStatus.NotDetected);
+
+            // 2. Detected (Anti-ILDasm present and not stripped)
+            var attrRef = module.CorLibTypes.GetTypeRef("System.Runtime.CompilerServices", "SuppressIldasmAttribute");
+            var memberRef = new MemberRefUser(module, ".ctor", MethodSig.CreateInstance(module.CorLibTypes.Void), attrRef);
+            module.Assembly.CustomAttributes.Add(new CustomAttribute(memberRef));
+            var matrixDetected = ProtectionMatrix.Evaluate(module, false, false, false, false, 0, true, 0, 0, 0, 0, 0);
+            Assert.Contains(matrixDetected.Items, i => i.Status == ProtectionSupportStatus.Detected);
+
+            // 3. SupportedStatic (Anti-ILDasm stripped)
+            module.Assembly.CustomAttributes.Clear();
+            var matrixSupported = ProtectionMatrix.Evaluate(module, false, false, false, false, 0, true, 0, 0, 0, 0, 0, antiIldasmStripped: true);
+            Assert.Contains(matrixSupported.Items, i => i.Status == ProtectionSupportStatus.SupportedStatic);
+
+            // 4. PartiallyProcessed (switch flattening detected but not resolved)
+            var matrixPartial = ProtectionMatrix.Evaluate(module, false, false, false, false, 0, false, 0, 0, 0, 0, 0);
+            // Constants with 0 decrypted and not all resolved
+            // 5. Unsupported (JIT mode detected)
+            var matrixUnsupported = ProtectionMatrix.Evaluate(module, false, false, true, false, 0, true, 0, 0, 0, 0, 0);
+            Assert.Contains(matrixUnsupported.Items, i => i.Status == ProtectionSupportStatus.Unsupported);
+
+            // 6. NotEvaluated
+            var matrixUneval = ProtectionMatrix.Evaluate(module, false, false, false, false, 0, true, 0, 0, 0, 0, 0, unevaluatedProtections: new[] { "Anti-Dump" });
+            Assert.Contains(matrixUneval.Items, i => i.Status == ProtectionSupportStatus.NotEvaluated);
+        }
     }
 }

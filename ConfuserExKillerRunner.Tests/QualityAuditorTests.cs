@@ -496,5 +496,59 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal("INDETERMINATE", report.Status);
             Assert.Empty(report.Errors);
         }
+
+        [Fact]
+        public void InterpretPEVerifyILResult_FrenchUserMethodError_StatusIsFailed()
+        {
+            var report = new AuditReport { CanLoad = true };
+            string stdout = "[IL]: Erreur : [test.dll : TestType::TestMethod][jeton :0x06000042][offset 0x0000000A] Échec de la vérification de type.";
+            QualityAuditor.InterpretPEVerifyILResult(1, stdout, "", false, report);
+
+            Assert.Equal("FAILED", report.ILVerificationStatus);
+            Assert.Equal("FAILED", report.Status);
+            Assert.False(report.StructuralAuditPassed);
+            Assert.Single(report.Errors);
+            Assert.Contains("method verification error(s)", report.ILVerificationNotes);
+        }
+
+        [Fact]
+        public void InterpretPEVerifyILResult_EnglishUserMethodErrorWithMethodToken_StatusIsFailed()
+        {
+            var report = new AuditReport { CanLoad = true };
+            // Crucial test: method token 'token :0x06000042' must NOT be classified as module stub warning!
+            string stdout = "[IL]: Error: [test.dll : TestType::TestMethod][token :0x06000042][offset 0x00000010] Branch out of the method.";
+            QualityAuditor.InterpretPEVerifyILResult(1, stdout, "", false, report);
+
+            Assert.Equal("FAILED", report.ILVerificationStatus);
+            Assert.Equal("FAILED", report.Status);
+            Assert.False(report.StructuralAuditPassed);
+            Assert.Single(report.Errors);
+        }
+
+        [Fact]
+        public void InterpretPEVerifyMDResult_MetadataError_StatusIsFailed()
+        {
+            var report = new AuditReport { CanLoad = true };
+            string stdout = "[MD]: Erreur : Le jeton TypeRef est dupliqué [jeton :0x01000002]";
+            QualityAuditor.InterpretPEVerifyMDResult(1, stdout, "", false, report);
+
+            Assert.False(report.StructuralAuditPassed);
+            Assert.Equal("FAILED", report.Status);
+            Assert.Single(report.Errors);
+            Assert.Contains(report.Errors, e => e.Contains("metadata error(s)"));
+        }
+
+        [Fact]
+        public void InterpretPEVerifyILResult_UnclassifiedOutputNonZeroExit_StatusIsIndeterminate()
+        {
+            var report = new AuditReport { CanLoad = true };
+            string stdout = "Some unknown third-party verifier output that cannot be parsed";
+            QualityAuditor.InterpretPEVerifyILResult(1, stdout, "", false, report);
+
+            Assert.Equal("INDETERMINATE", report.ILVerificationStatus);
+            Assert.Equal("INDETERMINATE", report.Status);
+            Assert.Empty(report.Errors);
+            Assert.Contains(report.Warnings, w => w.Contains("unclassified output"));
+        }
     }
 }

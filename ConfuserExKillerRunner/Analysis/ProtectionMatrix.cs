@@ -34,7 +34,7 @@ namespace ConfuserExKillerRunner.Analysis
         public List<ProtectionItem> Items { get; set; } = new List<ProtectionItem>();
         public bool IsComplete { get; set; }
         public bool HasPartiallyProcessed { get; set; }
-        public bool HasCodeProtectionsPartiallyProcessed => Items.Any(i => i.Detected && i.Status == ProtectionSupportStatus.PartiallyProcessed && i.Name != "Name Protection");
+        public bool HasCodeProtectionsPartiallyProcessed => Items.Any(i => i.Detected && (i.Status == ProtectionSupportStatus.PartiallyProcessed || i.Status == ProtectionSupportStatus.Detected) && i.Name != "Name Protection");
         public bool HasUnsupported { get; set; }
         public bool HasRequiresDynamicSkipped { get; set; }
         public bool HasNotEvaluated { get; set; }
@@ -74,7 +74,8 @@ namespace ConfuserExKillerRunner.Analysis
             int cleanerHooksStrippedCount,
             bool compressorUnpacked = false,
             IEnumerable<string> unevaluatedProtections = null,
-            bool symbolsRenamed = false)
+            bool symbolsRenamed = false,
+            bool antiIldasmStripped = false)
         {
             var result = new ProtectionMatrixResult();
             var unevaluatedSet = unevaluatedProtections != null
@@ -223,7 +224,8 @@ namespace ConfuserExKillerRunner.Analysis
             result.Items.Add(antiDebug);
 
             // 5. Anti-ILDasm
-            bool antiIldasmDetected = HasAntiIldasmAttribute(module);
+            bool antiIldasmPresent = HasAntiIldasmAttribute(module);
+            bool antiIldasmDetected = antiIldasmPresent || antiIldasmStripped;
             var antiIldasm = new ProtectionItem
             {
                 Name = "Anti-ILDasm",
@@ -237,17 +239,23 @@ namespace ConfuserExKillerRunner.Analysis
                 antiIldasm.ResultSummary = "Not Evaluated";
                 antiIldasm.Details = "Anti-ILDasm suppression detection was not evaluated.";
             }
-            else if (!antiIldasmDetected)
-            {
-                antiIldasm.Status = ProtectionSupportStatus.NotDetected;
-                antiIldasm.ResultSummary = "N/A";
-                antiIldasm.Details = "No SuppressIldasmAttribute present.";
-            }
-            else
+            else if (antiIldasmStripped && !antiIldasmPresent)
             {
                 antiIldasm.Status = ProtectionSupportStatus.SupportedStatic;
                 antiIldasm.ResultSummary = "Removed";
                 antiIldasm.Details = "SuppressIldasmAttribute stripped from module attributes.";
+            }
+            else if (antiIldasmPresent)
+            {
+                antiIldasm.Status = ProtectionSupportStatus.Detected;
+                antiIldasm.ResultSummary = "Detected";
+                antiIldasm.Details = "SuppressIldasmAttribute is present on the module and was not stripped.";
+            }
+            else
+            {
+                antiIldasm.Status = ProtectionSupportStatus.NotDetected;
+                antiIldasm.ResultSummary = "N/A";
+                antiIldasm.Details = "No SuppressIldasmAttribute present.";
             }
             result.Items.Add(antiIldasm);
 
@@ -627,7 +635,7 @@ namespace ConfuserExKillerRunner.Analysis
             result.Items.Add(renameItem);
 
             // Evaluate Overall Verdict
-            result.HasPartiallyProcessed = result.Items.Any(i => i.Detected && i.Status == ProtectionSupportStatus.PartiallyProcessed);
+            result.HasPartiallyProcessed = result.Items.Any(i => i.Detected && (i.Status == ProtectionSupportStatus.PartiallyProcessed || i.Status == ProtectionSupportStatus.Detected));
             result.HasUnsupported = result.Items.Any(i => i.Detected && i.Status == ProtectionSupportStatus.Unsupported);
             result.HasRequiresDynamicSkipped = result.Items.Any(i => i.Detected && i.Status == ProtectionSupportStatus.RequiresDynamicExecution);
             result.HasNotEvaluated = result.Items.Any(i => i.Status == ProtectionSupportStatus.NotEvaluated);
@@ -784,10 +792,12 @@ namespace ConfuserExKillerRunner.Analysis
             return false;
         }
 
-        private static bool HasAntiIldasmAttribute(ModuleDef module)
+        public static bool HasAntiIldasmAttribute(ModuleDef module)
         {
-            if (module == null || module.Assembly == null) return false;
-            return module.Assembly.CustomAttributes.Any(ca => ca.TypeFullName.Contains("SuppressIldasmAttribute"));
+            if (module == null) return false;
+            bool onAssembly = module.Assembly != null && module.Assembly.CustomAttributes.Any(ca => ca?.TypeFullName != null && ca.TypeFullName.IndexOf("SuppressIldasmAttribute", StringComparison.OrdinalIgnoreCase) >= 0);
+            bool onModule = module.CustomAttributes.Any(ca => ca?.TypeFullName != null && ca.TypeFullName.IndexOf("SuppressIldasmAttribute", StringComparison.OrdinalIgnoreCase) >= 0);
+            return onAssembly || onModule;
         }
 
         public static bool? HasInvalidMetadata(ModuleDef module)
@@ -979,7 +989,7 @@ namespace ConfuserExKillerRunner.Analysis
             return false;
         }
 
-        private static bool HasRenamingProtection(ModuleDef module)
+        public static bool HasRenamingProtection(ModuleDef module)
         {
             if (module == null) return false;
             int obfuscatedCount = 0;

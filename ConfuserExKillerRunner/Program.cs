@@ -170,6 +170,7 @@ namespace ConfuserExKillerRunner
                 // Stage 0: Unpack ConfuserEx Compressor if present
                 var swStage0 = Stopwatch.StartNew();
                 bool compressorWasUnpacked = false;
+                bool antiIldasmWasStripped = false;
                 try
                 {
                     bool isCompressorStub = false;
@@ -623,6 +624,7 @@ namespace ConfuserExKillerRunner
                         var swStage3 = Stopwatch.StartNew();
                         Console.WriteLine("[*] Step 3: Cleaning Protector Hooks...");
                         var cleanResult = CleanerKiller.StripProtectorHooks(module, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
+                        if (cleanResult.AntiIldasmStripped) antiIldasmWasStripped = true;
                         totalCleanerHooks += cleanResult.StrippedHooksCount + cleanResult.RemovedMethodsCount;
                         if (cleanResult.StrippedHooksCount > 0)
                             Console.WriteLine($"[+] CleanerKiller: Stripped {cleanResult.StrippedHooksCount} protector initializers from <Module>.cctor");
@@ -761,6 +763,7 @@ namespace ConfuserExKillerRunner
                 if (!staticAntiTamperDetected)
                 {
                     var cleanFinal = CleanerKiller.StripProtectorHooks(module2, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
+                    if (cleanFinal.AntiIldasmStripped) antiIldasmWasStripped = true;
                     totalCleanerHooks += cleanFinal.StrippedHooksCount + cleanFinal.RemovedMethodsCount;
                     if (cleanFinal.HookRecords != null)
                     {
@@ -1051,6 +1054,12 @@ namespace ConfuserExKillerRunner
                 var swMatrix = Stopwatch.StartNew();
                 using (var finalModule = ModuleDefMD.Load(activeReportOutputPath))
                 {
+                    var unevaluated = new List<string>();
+                    if (skipDe4dot && ProtectionMatrix.HasRenamingProtection(finalModule))
+                    {
+                        unevaluated.Add("Name Protection");
+                    }
+
                     matrix = ProtectionMatrix.Evaluate(
                         finalModule,
                         allowExecution: allowExecution,
@@ -1065,8 +1074,9 @@ namespace ConfuserExKillerRunner
                         junkInstructionsStrippedCount: totalJunkStripped,
                         cleanerHooksStrippedCount: totalCleanerHooks,
                         compressorUnpacked: compressorWasUnpacked,
-                        unevaluatedProtections: null,
-                        symbolsRenamed: de4dotSucceeded);
+                        unevaluatedProtections: unevaluated,
+                        symbolsRenamed: de4dotSucceeded,
+                        antiIldasmStripped: antiIldasmWasStripped);
 
                     stepTimings["Stage8_ProtectionMatrix_Evaluation"] = swMatrix.ElapsedMilliseconds;
                     Console.WriteLine(ProtectionMatrix.FormatReport(matrix));

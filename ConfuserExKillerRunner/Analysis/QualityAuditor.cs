@@ -392,25 +392,33 @@ namespace ConfuserExKillerRunner.Analysis
             int moduleStubErrors = 0;
             int userMethodErrors = 0;
             var userErrors = new List<string>();
+            var unclassifiedErrors = new List<string>();
 
             foreach (var line in errorLines)
             {
                 if (line.IndexOf("0x80070002", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    line.IndexOf("en raison d'un assembly référencé manquant", StringComparison.OrdinalIgnoreCase) >= 0)
+                    line.IndexOf("en raison d'un assembly référencé manquant", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    line.IndexOf("due to missing referenced assembly", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     missingDepErrors++;
                     report.Warnings.Add($"PEVerify /IL dependency warning: {line.Trim()}");
                 }
-                else if (line.Contains("<Module>::") || line.Contains("[MD]:") || line.Contains("token :0x060000"))
+                else if (line.Contains("<Module>::.cctor") || line.Contains("<Module>..cctor"))
                 {
                     moduleStubErrors++;
                     report.Warnings.Add($"PEVerify /IL <Module> warning: {line.Trim()}");
                 }
                 else if (line.IndexOf("[IL]: Erreur", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                         line.IndexOf("[IL]: Error", StringComparison.OrdinalIgnoreCase) >= 0)
+                         line.IndexOf("[IL]: Error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         line.IndexOf("Error:", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         line.IndexOf("Erreur:", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     userMethodErrors++;
                     userErrors.Add(line.Trim());
+                }
+                else
+                {
+                    unclassifiedErrors.Add(line.Trim());
                 }
             }
 
@@ -423,15 +431,28 @@ namespace ConfuserExKillerRunner.Analysis
                 report.Errors.Add($"PEVerify reported errors: {outSnippet}");
                 report.Warnings.Add($"PEVerify reported errors: {outSnippet}");
             }
-            else if (missingDepErrors > 0 || moduleStubErrors > 0)
+            else if (missingDepErrors > 0 && moduleStubErrors == 0 && unclassifiedErrors.Count == 0)
+            {
+                report.ILVerificationStatus = "INDETERMINATE";
+                report.ILVerificationNotes = $"PEVerify /IL incomplete due to {missingDepErrors} missing referenced assembly error(s).";
+            }
+            else if (moduleStubErrors > 0 && missingDepErrors == 0 && unclassifiedErrors.Count == 0)
             {
                 report.ILVerificationStatus = "WARNINGS";
-                report.ILVerificationNotes = $"PEVerify /IL passed for all user methods with {missingDepErrors} missing dependency warning(s) and {moduleStubErrors} module stub warning(s).";
+                report.ILVerificationNotes = $"PEVerify /IL passed for all user methods with {moduleStubErrors} module stub warning(s).";
+            }
+            else if (missingDepErrors > 0 || moduleStubErrors > 0)
+            {
+                report.ILVerificationStatus = "INDETERMINATE";
+                report.ILVerificationNotes = $"PEVerify /IL reported {missingDepErrors} dependency warning(s) and {moduleStubErrors} module stub warning(s).";
             }
             else
             {
-                report.ILVerificationStatus = "PASSED";
-                report.ILVerificationNotes = "PEVerify: All classes and methods verified.";
+                string snippet = unclassifiedErrors.Count > 0 ? string.Join("; ", unclassifiedErrors.Take(3)) : combinedOutput;
+                if (snippet.Length > 200) snippet = snippet.Substring(0, 200) + "...";
+                report.ILVerificationStatus = "INDETERMINATE";
+                report.ILVerificationNotes = $"PEVerify /IL exited with non-zero code {exitCode} and unclassified diagnostic: {snippet}";
+                report.Warnings.Add($"PEVerify unclassified output: {snippet}");
             }
         }
 
@@ -459,7 +480,21 @@ namespace ConfuserExKillerRunner.Analysis
             bool allVerified = combinedOutput.IndexOf("Toutes les classes et les méthodes vérifiées", StringComparison.OrdinalIgnoreCase) >= 0
                             || combinedOutput.IndexOf("All Classes and Methods Verified", StringComparison.OrdinalIgnoreCase) >= 0;
 
-            if (has0x8013129d && allVerified)
+            var genuineMdErrors = mdLines.Where(l =>
+                (l.IndexOf("[MD]: Erreur", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 l.IndexOf("[MD]: Error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 l.IndexOf("Erreur :", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 l.IndexOf("Error :", StringComparison.OrdinalIgnoreCase) >= 0) &&
+                !l.Contains("0x8013129d")).ToList();
+
+            if (genuineMdErrors.Count > 0)
+            {
+                string snippet = string.Join("; ", genuineMdErrors.Take(3));
+                if (snippet.Length > 200) snippet = snippet.Substring(0, 200) + "...";
+                report.Errors.Add($"PEVerify /MD reported {genuineMdErrors.Count} metadata error(s): {snippet}");
+                report.Warnings.Add($"PEVerify /MD reported: {snippet}");
+            }
+            else if (has0x8013129d && allVerified)
             {
                 report.Warnings.Add("PEVerify /MD warning: ConfuserEx <Module> stub metadata warning (0x8013129d). All classes and methods verified.");
             }
