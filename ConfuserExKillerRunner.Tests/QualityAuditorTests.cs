@@ -7,6 +7,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class QualityAuditorTests
     {
         private static MethodDef CreateDummyMethod()
@@ -549,6 +550,72 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal("INDETERMINATE", report.Status);
             Assert.Empty(report.Errors);
             Assert.Contains(report.Warnings, w => w.Contains("unclassified output"));
+        }
+
+        [Fact]
+        public void DetectStructuredRegressions_WithBranchTargetError_ExtractsDefectTypeAndToken()
+        {
+            var baseline = new AuditReport { CanLoad = true };
+            var candidate = new AuditReport
+            {
+                CanLoad = true,
+                Errors = new List<string>
+                {
+                    "[IL]: Error: [offset 0x0000001B] Branch target out of range [token 0x06000015]"
+                }
+            };
+
+            var diags = QualityAuditor.DetectStructuredRegressions(baseline, candidate);
+
+            Assert.Single(diags);
+            var diag = diags[0];
+            Assert.Equal(DefectType.InvalidBranch, diag.DefectType);
+            Assert.Equal(0x06000015u, diag.Token);
+            Assert.Equal(0x1B, diag.InstructionIndex);
+            Assert.Equal(DiagnosticSeverity.Error, diag.Severity);
+            Assert.Contains("InvalidBranch", diag.ToString());
+        }
+
+        [Fact]
+        public void DetectStructuredRegressions_WithStackUnderflow_ExtractsStackDefect()
+        {
+            var baseline = new AuditReport { CanLoad = true };
+            var candidate = new AuditReport
+            {
+                CanLoad = true,
+                Errors = new List<string>
+                {
+                    "Stack underflow in method TestMethod at IL_0005"
+                }
+            };
+
+            var diags = QualityAuditor.DetectStructuredRegressions(baseline, candidate);
+
+            Assert.Single(diags);
+            var diag = diags[0];
+            Assert.Equal(DefectType.StackUnderflow, diag.DefectType);
+            Assert.Equal(5, diag.InstructionIndex);
+        }
+
+        [Fact]
+        public void DetectStructuredRegressions_WithMetadataError_ExtractsMetadataDefect()
+        {
+            var baseline = new AuditReport { CanLoad = true };
+            var candidate = new AuditReport
+            {
+                CanLoad = true,
+                Errors = new List<string>
+                {
+                    "[MD]: Error: TypeRef duplicate [token 0x01000002]"
+                }
+            };
+
+            var diags = QualityAuditor.DetectStructuredRegressions(baseline, candidate);
+
+            Assert.Single(diags);
+            var diag = diags[0];
+            Assert.Equal(DefectType.MetadataError, diag.DefectType);
+            Assert.Equal(0x01000002u, diag.Token);
         }
     }
 }

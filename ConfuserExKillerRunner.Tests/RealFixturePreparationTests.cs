@@ -4,6 +4,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Integration")]
     public class RealFixturePreparationTests
     {
         private static string GetRepoRoot()

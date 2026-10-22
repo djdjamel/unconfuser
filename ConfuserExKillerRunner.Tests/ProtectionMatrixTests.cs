@@ -6,6 +6,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class ProtectionMatrixTests
     {
         private ModuleDef CreateEmptyModule()

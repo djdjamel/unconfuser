@@ -8,6 +8,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Integration")]
     public class RealConfuserExFixtureTests : IDisposable
     {
         private readonly string _testDir;

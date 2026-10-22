@@ -9,6 +9,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class PEParsingAndRobustnessTests
     {
         [Fact]
@@ -194,11 +195,39 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
-        public void AntiTamperKiller_DetectJitMode_IdentifiesNativeVirtualProtectInGlobalType()
+        public void AntiTamperKiller_DetectJitMode_IdentifiesMultiSignalJitHook()
         {
             var mod = new ModuleDefUser("TestModJit");
             var globalType = mod.GlobalType;
 
+            // Signal 1: VirtualProtect P/Invoke
+            var pinvokeMethod = new MethodDefUser("VirtualProtectHook",
+                MethodSig.CreateStatic(mod.CorLibTypes.Boolean, mod.CorLibTypes.IntPtr, mod.CorLibTypes.UInt32, mod.CorLibTypes.UInt32, mod.CorLibTypes.UInt32.ToByRefSig()),
+                MethodImplAttributes.IL,
+                MethodAttributes.PinvokeImpl | MethodAttributes.Public | MethodAttributes.Static);
+
+            pinvokeMethod.ImplMap = new ImplMapUser(new ModuleRefUser(mod, "kernel32.dll"), "VirtualProtect", PInvokeAttributes.CallConvWinapi);
+            globalType.Methods.Add(pinvokeMethod);
+
+            // Signal 2: compileMethod / clrjit reference in global method body
+            var hookInstaller = new MethodDefUser("InstallHook", MethodSig.CreateStatic(mod.CorLibTypes.Void));
+            hookInstaller.Body = new dnlib.DotNet.Emit.CilBody();
+            hookInstaller.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ldstr, "clrjit.dll"));
+            hookInstaller.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Pop));
+            hookInstaller.Body.Instructions.Add(dnlib.DotNet.Emit.Instruction.Create(dnlib.DotNet.Emit.OpCodes.Ret));
+            globalType.Methods.Add(hookInstaller);
+
+            bool detected = Killers.AntiTamperKiller.DetectJitMode(mod);
+            Assert.True(detected);
+        }
+
+        [Fact]
+        public void AntiTamperKiller_DetectJitMode_VirtualProtectAloneWithoutJitIndicator_ReturnsFalse()
+        {
+            var mod = new ModuleDefUser("TestModAntiDumpOnly");
+            var globalType = mod.GlobalType;
+
+            // VirtualProtect P/Invoke alone (e.g. used by Anti-Dump or benign memory protection)
             var pinvokeMethod = new MethodDefUser("VirtualProtectHook",
                 MethodSig.CreateStatic(mod.CorLibTypes.Boolean, mod.CorLibTypes.IntPtr, mod.CorLibTypes.UInt32, mod.CorLibTypes.UInt32, mod.CorLibTypes.UInt32.ToByRefSig()),
                 MethodImplAttributes.IL,
@@ -208,7 +237,7 @@ namespace ConfuserExKillerRunner.Tests
             globalType.Methods.Add(pinvokeMethod);
 
             bool detected = Killers.AntiTamperKiller.DetectJitMode(mod);
-            Assert.True(detected);
+            Assert.False(detected, "VirtualProtect alone without JIT symbols must NOT trigger AntiTamper JIT detection.");
         }
 
         [Fact]

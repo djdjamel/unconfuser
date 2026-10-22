@@ -10,6 +10,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Integration")]
     public class DynamicExecutionSecurityTests : IDisposable
     {
         private readonly string _testDir;

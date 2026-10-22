@@ -5,6 +5,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class JobObjectTests
     {
         [Fact]

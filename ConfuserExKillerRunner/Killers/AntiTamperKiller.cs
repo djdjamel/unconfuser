@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using ConfuserExKillerRunner.Analysis;
+using dnlib.DotNet;
 using Tool;
 
 namespace ConfuserExKillerRunner.Killers
@@ -358,32 +359,67 @@ namespace ConfuserExKillerRunner.Killers
         {
             if (module == null) return false;
 
-            // Check module references for native JIT hooks or AntiTamper.JIT
+            // Signal 1: Check module references for native JIT hooks or AntiTamper.JIT
             foreach (var modRef in module.GetModuleRefs())
             {
-                if (modRef.Name.String.IndexOf("AntiTamper", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (!UTF8String.IsNullOrEmpty(modRef.Name) &&
+                    (modRef.Name.String.IndexOf("AntiTamper", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     modRef.Name.String.IndexOf("clrjit", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     modRef.Name.String.IndexOf("mscorjit", StringComparison.OrdinalIgnoreCase) >= 0))
+                {
                     return true;
+                }
             }
 
-            // Check P/Invoke methods in <Module> for native VirtualProtect / JIT compileMethod
+            // Signal 2: Check global type (<Module>) methods for memory manipulation primitives AND JIT symbols
+            bool hasMemoryProtectionPrimitive = false;
+            bool hasJitIndicator = false;
+
             if (module.GlobalType != null)
             {
                 foreach (var method in module.GlobalType.Methods)
                 {
                     if (method.IsPinvokeImpl && method.ImplMap != null)
                     {
-                        string name = method.ImplMap.Name.String;
-                        if (string.Equals(name, "VirtualProtect", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(name, "SetUnhandledExceptionFilter", StringComparison.OrdinalIgnoreCase))
+                        string fnName = method.ImplMap.Name?.String;
+                        string modName = method.ImplMap.Module?.Name?.String;
+
+                        if (string.Equals(fnName, "VirtualProtect", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(fnName, "SetUnhandledExceptionFilter", StringComparison.OrdinalIgnoreCase))
                         {
-                            // Further inspect if compileMethod is referenced
-                            return true;
+                            hasMemoryProtectionPrimitive = true;
+                        }
+
+                        if (!string.IsNullOrEmpty(modName) &&
+                            (modName.IndexOf("clrjit", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                             modName.IndexOf("mscorjit", StringComparison.OrdinalIgnoreCase) >= 0))
+                        {
+                            hasJitIndicator = true;
+                        }
+                    }
+
+                    if (method.HasBody && method.Body.HasInstructions)
+                    {
+                        foreach (var instr in method.Body.Instructions)
+                        {
+                            if (instr.OpCode == dnlib.DotNet.Emit.OpCodes.Ldstr && instr.Operand is string strVal)
+                            {
+                                if (strVal.IndexOf("clrjit", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    strVal.IndexOf("mscorjit", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    strVal.IndexOf("compileMethod", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    strVal.IndexOf("getJit", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    strVal.IndexOf("ICorJitCompiler", StringComparison.OrdinalIgnoreCase) >= 0)
+                                {
+                                    hasJitIndicator = true;
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            return false;
+            // AntiTamper JIT mode requires BOTH memory protection manipulation AND JIT-specific symbols
+            return hasMemoryProtectionPrimitive && hasJitIndicator;
         }
     }
 }

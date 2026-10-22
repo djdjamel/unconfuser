@@ -22,6 +22,7 @@ namespace ConfuserExKillerRunner.Analysis
         public int UnresolvedCallSitesCount { get; set; }
         public List<string> Warnings { get; set; } = new List<string>();
         public List<string> Errors { get; set; } = new List<string>();
+        public List<RegressionDiagnostic> Diagnostics { get; set; } = new List<RegressionDiagnostic>();
 
         /// <summary>
         /// Explicit structural audit result: true if no structural defects, orphaned branch targets, invalid EH boundaries, or stack underflows were found.
@@ -53,6 +54,132 @@ namespace ConfuserExKillerRunner.Analysis
                     return "WARNINGS";
                 return "CLEAN";
             }
+        }
+    }
+
+    public enum DefectType
+    {
+        Unknown,
+        InvalidInstruction,
+        InvalidBranch,
+        InvalidExceptionHandler,
+        StackUnderflow,
+        UnresolvedCallSite,
+        MetadataError,
+        VerificationError,
+        StructuralFailure
+    }
+
+    public enum DiagnosticSeverity
+    {
+        Info,
+        Warning,
+        Error,
+        Critical
+    }
+
+    public sealed class RegressionDiagnostic
+    {
+        public DefectType DefectType { get; set; } = DefectType.Unknown;
+        public DiagnosticSeverity Severity { get; set; } = DiagnosticSeverity.Error;
+        public uint? Token { get; set; }
+        public int? InstructionIndex { get; set; }
+        public string MethodName { get; set; }
+        public string Description { get; set; }
+        public string RawMessage { get; set; }
+
+        public override string ToString()
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append($"[{Severity}] {DefectType}: {Description ?? RawMessage}");
+            if (Token.HasValue) sb.Append($" (Token: 0x{Token.Value:X8})");
+            if (!string.IsNullOrEmpty(MethodName)) sb.Append($" in {MethodName}");
+            if (InstructionIndex.HasValue) sb.Append($" at IL_{InstructionIndex.Value:X4}");
+            return sb.ToString();
+        }
+
+        public static RegressionDiagnostic FromRawError(string rawError)
+        {
+            if (string.IsNullOrEmpty(rawError))
+                return new RegressionDiagnostic { RawMessage = string.Empty, Description = "Unknown regression" };
+
+            var diag = new RegressionDiagnostic
+            {
+                RawMessage = rawError,
+                Description = rawError,
+                Severity = DiagnosticSeverity.Error
+            };
+
+            // Detect DefectType from message pattern
+            if (rawError.IndexOf("branch", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                rawError.IndexOf("target", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                diag.DefectType = DefectType.InvalidBranch;
+            }
+            else if (rawError.IndexOf("stack", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     rawError.IndexOf("underflow", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                diag.DefectType = DefectType.StackUnderflow;
+            }
+            else if (rawError.IndexOf("exception", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     rawError.IndexOf("handler", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     rawError.IndexOf("clause", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                diag.DefectType = DefectType.InvalidExceptionHandler;
+            }
+            else if (rawError.IndexOf("instruction", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     rawError.IndexOf("opcode", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                diag.DefectType = DefectType.InvalidInstruction;
+            }
+            else if (rawError.IndexOf("call", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     rawError.IndexOf("methodspec", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                diag.DefectType = DefectType.UnresolvedCallSite;
+            }
+            else if (rawError.IndexOf("[MD]", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     rawError.IndexOf("metadata", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                diag.DefectType = DefectType.MetadataError;
+            }
+            else if (rawError.IndexOf("[IL]", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     rawError.IndexOf("peverify", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     rawError.IndexOf("ilverify", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                diag.DefectType = DefectType.VerificationError;
+            }
+
+            // Extract IL offset if present (e.g. at [IL: (offset 0x0000001B)] or IL_001B)
+            var offsetMatch = System.Text.RegularExpressions.Regex.Match(rawError, @"(?:offset\s+(?:0x)?|IL_)([0-9a-fA-F]{2,8})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (offsetMatch.Success && int.TryParse(offsetMatch.Groups[1].Value, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out int parsedOffset))
+            {
+                diag.InstructionIndex = parsedOffset;
+            }
+
+            // Extract Token if present (e.g. [token 0x06000001] or [MD Token: 0x02000002])
+            var tokenMatch = System.Text.RegularExpressions.Regex.Match(rawError, @"(?:token\s+(?:0x)?|token\s*:\s*(?:0x)?|Token:\s*(?:0x)?|jeton\s*:\s*(?:0x)?)([0-9a-fA-F]{8})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (!tokenMatch.Success)
+            {
+                // Fallback: match 8-hex digit token (e.g. at 0x06000001) that is not the offset
+                var hexMatches = System.Text.RegularExpressions.Regex.Matches(rawError, @"0x([0-9a-fA-F]{8})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (System.Text.RegularExpressions.Match hm in hexMatches)
+                {
+                    if (uint.TryParse(hm.Groups[1].Value, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out uint cand))
+                    {
+                        if (diag.InstructionIndex.HasValue && (int)cand == diag.InstructionIndex.Value)
+                            continue; // skip the offset
+                        tokenMatch = hm;
+                        break;
+                    }
+                }
+            }
+
+            if (tokenMatch.Success && uint.TryParse(tokenMatch.Groups[1].Value, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out uint parsedToken))
+            {
+                diag.Token = parsedToken;
+            }
+
+            return diag;
         }
     }
 
@@ -132,6 +259,29 @@ namespace ConfuserExKillerRunner.Analysis
             }
 
             return false;
+        }
+
+        public static List<RegressionDiagnostic> DetectStructuredRegressions(AuditReport baseline, AuditReport candidate)
+        {
+            var regressions = new List<RegressionDiagnostic>();
+            if (candidate == null) return regressions;
+            if (baseline == null)
+            {
+                foreach (var err in candidate.Errors)
+                    regressions.Add(RegressionDiagnostic.FromRawError(err));
+                return regressions;
+            }
+
+            var baselineErrors = new HashSet<string>(baseline.Errors, StringComparer.Ordinal);
+            foreach (var err in candidate.Errors)
+            {
+                if (!baselineErrors.Contains(err))
+                {
+                    regressions.Add(RegressionDiagnostic.FromRawError(err));
+                }
+            }
+
+            return regressions;
         }
 
         public static List<string> DetectRegressions(AuditReport baseline, AuditReport candidate)
