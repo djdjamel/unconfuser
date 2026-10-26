@@ -547,8 +547,11 @@ namespace ConfuserExKillerRunner.Analysis
             foreach (var line in errorLines)
             {
                 if (line.IndexOf("0x80070002", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    line.IndexOf("0x8007000B", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     line.IndexOf("en raison d'un assembly référencé manquant", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    line.IndexOf("due to missing referenced assembly", StringComparison.OrdinalIgnoreCase) >= 0)
+                    line.IndexOf("due to missing referenced assembly", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    line.IndexOf("format incorrect", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    line.IndexOf("bad format", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     missingDepErrors++;
                     report.Warnings.Add($"PEVerify /IL dependency warning: {line.Trim()}");

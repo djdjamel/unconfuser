@@ -43,6 +43,8 @@ namespace ConfuserExKillerRunner
             string jsonReportPath = null;
             bool strictExitCodes = false;
             bool verbose = false;
+            bool restoreSemanticNames = false;
+            bool forcePromote = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -91,6 +93,14 @@ namespace ConfuserExKillerRunner
                 else if (arg == "--strict-exit-codes")
                 {
                     strictExitCodes = true;
+                }
+                else if (arg == "--restore-names" || arg == "--semantic-names")
+                {
+                    restoreSemanticNames = true;
+                }
+                else if (arg == "--force-promote" || arg == "--force")
+                {
+                    forcePromote = true;
                 }
                 else if (!arg.StartsWith("-") && assemblyPath == null)
                 {
@@ -659,12 +669,36 @@ namespace ConfuserExKillerRunner
                         totalJunkStripped += dcsPost.JunkPairsStripped + dcsPost.TrampolinesFlattened;
                         if (dcsPost.MethodsOptimized > 0)
                             Console.WriteLine($"[+] DeadCodeStripper (Post): {dcsPost.Message}");
+
+                        // Post-Switch Protector Hook Stripping:
+                        // Now that control-flow switches in <Module>..cctor are resolved, any protector initializers
+                        // previously guarded by switch branches are exposed and can be safely neutralized before de4dot.
+                        var cleanPostSwitch = CleanerKiller.StripProtectorHooks(module, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
+                        if (cleanPostSwitch.StrippedHooksCount > 0)
+                        {
+                            totalCleanerHooks += cleanPostSwitch.StrippedHooksCount + cleanPostSwitch.RemovedMethodsCount;
+                            Console.WriteLine($"[+] CleanerKiller (Post-Switch): Stripped {cleanPostSwitch.StrippedHooksCount} protector initializers from <Module>.cctor");
+                            if (cleanPostSwitch.HookRecords != null)
+                            {
+                                foreach (var hr in cleanPostSwitch.HookRecords)
+                                    hookRegistry[hr.HookId] = hr;
+                            }
+                        }
+
                         stepTimings["Stage4_ControlFlow_DeadCode"] = swStage4.ElapsedMilliseconds;
                     }
                     else
                     {
                         Console.WriteLine("[!] Static mode: Skipping AST & IL rewriting on Anti-Tamper encrypted method bodies.");
                     }
+
+                var cctorPre = module.GlobalType?.FindStaticConstructor();
+                if (cctorPre != null && cctorPre.HasBody)
+                {
+                    Console.WriteLine($"[DEBUG] <Module>..cctor before de4dot ({cctorPre.Body.Instructions.Count} instrs):");
+                    foreach (var ins in cctorPre.Body.Instructions)
+                        Console.WriteLine($"  IL_{ins.Offset:X4}: {ins.OpCode} {ins.Operand}");
+                }
 
                 var swIntermediateWrite = Stopwatch.StartNew();
                 Console.WriteLine($"[*] Writing intermediate module: {cexkPath}");
@@ -760,9 +794,24 @@ namespace ConfuserExKillerRunner
 
             using (var module2 = ModuleDefMD.Load(currentIntermediate))
             {
+                var cctorPostDe4dot = module2.GlobalType?.FindStaticConstructor();
+                if (cctorPostDe4dot != null && cctorPostDe4dot.HasBody)
+                {
+                    Console.WriteLine($"[DEBUG] <Module>..cctor after de4dot ({cctorPostDe4dot.Body.Instructions.Count} instrs):");
+                    foreach (var ins in cctorPostDe4dot.Body.Instructions)
+                        Console.WriteLine($"  IL_{ins.Offset:X4}: {ins.OpCode} {ins.Operand}");
+                }
+
                 if (!staticAntiTamperDetected)
                 {
                     var cleanFinal = CleanerKiller.StripProtectorHooks(module2, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
+                    if (cctorPostDe4dot != null && cctorPostDe4dot.HasBody)
+                    {
+                        CleanerKiller.SanitizeModuleStaticConstructor(cctorPostDe4dot);
+                        Console.WriteLine($"[DEBUG] <Module>..cctor after Step 6 CleanerKiller ({cctorPostDe4dot.Body.Instructions.Count} instrs):");
+                        foreach (var ins in cctorPostDe4dot.Body.Instructions)
+                            Console.WriteLine($"  IL_{ins.Offset:X4}: {ins.OpCode} {ins.Operand}");
+                    }
                     if (cleanFinal.AntiIldasmStripped) antiIldasmWasStripped = true;
                     totalCleanerHooks += cleanFinal.StrippedHooksCount + cleanFinal.RemovedMethodsCount;
                     if (cleanFinal.HookRecords != null)
@@ -781,6 +830,16 @@ namespace ConfuserExKillerRunner
                     totalJunkStripped += dcsFinal2.JunkPairsStripped + dcsFinal2.TrampolinesFlattened;
                     Console.WriteLine($"[+] Final SwitchKiller: {switchCount2} switches resolved");
                     FinalizeMethodBodies(module2);
+                }
+
+                if (restoreSemanticNames)
+                {
+                    var swSemantic = Stopwatch.StartNew();
+                    Console.WriteLine("[*] Step 6.1: Running SemanticRenamer (Restoring Forms, Controls, Handlers, and Resources)...");
+                    var semResult = SemanticRenamer.Execute(module2, verbose);
+                    Console.WriteLine($"[+] SemanticRenamer: {semResult.Message}");
+                    FinalizeMethodBodies(module2);
+                    stepTimings["Stage6_SemanticRenamer"] = swSemantic.ElapsedMilliseconds;
                 }
 
                 // Reconcile hook registry against final assembly state to ensure accurate traceability
@@ -858,6 +917,27 @@ namespace ConfuserExKillerRunner
                     auditReport.Errors.Add("Engine Regression: " + reg);
                 }
                 Console.ResetColor();
+
+                try
+                {
+                    using (var candMod = ModuleDefMD.Load(candidatePath))
+                    {
+                        var candCctor = candMod.GlobalType?.FindStaticConstructor();
+                        if (candCctor != null && candCctor.HasBody)
+                        {
+                            Console.WriteLine($"[DEBUG] Disassembly of candidate <Module>..cctor ({candCctor.Body.Instructions.Count} instructions):");
+                            for (int i = 0; i < candCctor.Body.Instructions.Count; i++)
+                            {
+                                var ci = candCctor.Body.Instructions[i];
+                                Console.WriteLine($"  IL_{ci.Offset:X4}: {ci.OpCode} {ci.Operand}");
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[DEBUG] Could not disassemble candidate: {ex.Message}");
+                }
             }
             foreach (var hook in activePreservedHooks)
             {
@@ -888,9 +968,10 @@ namespace ConfuserExKillerRunner
 
             if (auditReport.Status == "FAILED" && (!staticAntiTamperDetected || regressions.Count > 0))
             {
-                try { if (File.Exists(candidatePath)) File.Delete(candidatePath); } catch { }
+                string failedPreservePath = finalOutputPath + ".failed_candidate.dll";
+                try { File.Copy(candidatePath, failedPreservePath, overwrite: true); } catch { }
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("[!] Deobfuscation audit reported FAILED. Candidate assembly rejected; no corrupt output written.");
+                Console.WriteLine($"[!] Deobfuscation audit reported FAILED. Candidate preserved at: {failedPreservePath}");
                 Console.ResetColor();
 
                 if (!string.IsNullOrEmpty(jsonReportPath))
@@ -954,7 +1035,7 @@ namespace ConfuserExKillerRunner
             bool isIndeterminate = auditReport.Status == "INDETERMINATE";
             string activeReportOutputPath = finalOutputPath;
 
-            if (isIndeterminate)
+            if (isIndeterminate && !forcePromote)
             {
                 string dir = Path.GetDirectoryName(finalOutputPath);
                 if (string.IsNullOrEmpty(dir)) dir = Directory.GetCurrentDirectory();
@@ -1075,7 +1156,7 @@ namespace ConfuserExKillerRunner
                         cleanerHooksStrippedCount: totalCleanerHooks,
                         compressorUnpacked: compressorWasUnpacked,
                         unevaluatedProtections: unevaluated,
-                        symbolsRenamed: de4dotSucceeded,
+                        symbolsRenamed: de4dotSucceeded || restoreSemanticNames,
                         antiIldasmStripped: antiIldasmWasStripped);
 
                     stepTimings["Stage8_ProtectionMatrix_Evaluation"] = swMatrix.ElapsedMilliseconds;
@@ -1272,6 +1353,8 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("  --no-netdetect          Skip NetDetect pre/post obfuscation audit");
             Console.WriteLine("  --json-report, --report-json <path>  Generate structured versioned JSON audit report");
             Console.WriteLine("  --strict-exit-codes     Return exit code 2 on any partial deobfuscation");
+            Console.WriteLine("  --restore-names, --semantic-names   Restore semantic symbol names (Forms, Controls, Event Handlers, Resources)");
+            Console.WriteLine("  --force-promote, --force            Promote candidate to output path even if external dependencies cause indeterminate status");
             Console.WriteLine("  --verbose               Enable verbose console output");
             Console.WriteLine("  -h, --help              Show this help message");
             Console.WriteLine();

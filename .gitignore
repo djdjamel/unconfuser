@@ -40,6 +40,11 @@ benchmarks/fixtures/*
 !benchmarks/fixtures/real_confuserex_compressor/**
 scratch/
 tools/
+dnSpy/
+audit/final_audit/staging*/
+audit/final_audit/frozen/
+audit/final_audit/out/
+audit/final_audit/diag/
 
 # OS files
 Thumbs.db

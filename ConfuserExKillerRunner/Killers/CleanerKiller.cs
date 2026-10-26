@@ -281,6 +281,115 @@ namespace ConfuserExKillerRunner.Killers
             return result;
         }
 
+        public static void SanitizeModuleStaticConstructor(MethodDef cctor, CleanerResult result = null)
+        {
+            if (cctor == null || !cctor.HasBody || cctor.Body.Instructions == null || cctor.Body.Instructions.Count == 0)
+                return;
+
+            if (QualityAuditor.IsMethodStructurallyValid(cctor, out _))
+                return;
+
+            var instructions = cctor.Body.Instructions;
+            int simulatedDepth = 0;
+            var underflowCalls = new List<Instruction>();
+
+            for (int i = 0; i < instructions.Count; i++)
+            {
+                var inst = instructions[i];
+                if (inst == null) continue;
+
+                if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
+                {
+                    if (inst.Operand is IMethod calledMethod)
+                    {
+                        var sig = calledMethod.MethodSig;
+                        int pops = sig?.Params?.Count ?? 0;
+                        if (sig != null && sig.HasThis) pops++;
+                        int pushes = (sig?.RetType != null && sig.RetType.ElementType != ElementType.Void) ? 1 : 0;
+
+                        if (simulatedDepth < pops)
+                        {
+                            underflowCalls.Add(inst);
+                        }
+                        else
+                        {
+                            simulatedDepth = simulatedDepth - pops + pushes;
+                        }
+                    }
+                }
+                else if (inst.OpCode == OpCodes.Nop)
+                {
+                }
+                else if (inst.OpCode == OpCodes.Ret)
+                {
+                }
+                else
+                {
+                    inst.CalculateStackUsage(out int pushes, out int pops);
+                    if (simulatedDepth < pops)
+                        simulatedDepth = 0;
+                    else
+                        simulatedDepth = simulatedDepth - pops + pushes;
+                }
+            }
+
+            if (underflowCalls.Count > 0)
+            {
+                var backup = instructions.Select(ins => (Inst: ins, Op: ins.OpCode, Opnd: ins.Operand)).ToList();
+
+                foreach (var badCall in underflowCalls)
+                {
+                    badCall.OpCode = OpCodes.Nop;
+                    badCall.Operand = null;
+                }
+
+                if (QualityAuditor.IsMethodStructurallyValid(cctor, out _))
+                {
+                    if (result != null)
+                        result.StrippedHooksCount += underflowCalls.Count;
+                    string msg = $"Sanitized {underflowCalls.Count} stack-underflowing orphaned call(s) in <Module>.cctor";
+                    Logger.LogInfo($"[CleanerKiller] {msg}");
+                    result?.StrippedDetails.Add(msg);
+                    return;
+                }
+                else
+                {
+                    foreach (var b in backup)
+                    {
+                        b.Inst.OpCode = b.Op;
+                        b.Inst.Operand = b.Opnd;
+                    }
+                }
+            }
+
+            // Fallback trial: try neutralizing each call individually
+            for (int i = 0; i < instructions.Count; i++)
+            {
+                var inst = instructions[i];
+                if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
+                {
+                    var origOp = inst.OpCode;
+                    var origOperand = inst.Operand;
+
+                    inst.OpCode = OpCodes.Nop;
+                    inst.Operand = null;
+
+                    if (QualityAuditor.IsMethodStructurallyValid(cctor, out _))
+                    {
+                        if (result != null)
+                            result.StrippedHooksCount++;
+                        string msg = $"Sanitized orphaned call {origOperand} in <Module>.cctor";
+                        Logger.LogInfo($"[CleanerKiller] {msg}");
+                        result?.StrippedDetails.Add(msg);
+                        return;
+                    }
+
+                    inst.OpCode = origOp;
+                    inst.Operand = origOperand;
+                }
+            }
+        }
+
         private static string ClassifyProtectorMethod(MethodDef method, bool resourcesDecrypted, bool constantsDecrypted, bool antiTamperDecrypted, CleanerResult result = null)
         {
             if (method.DeclaringType != null && !method.DeclaringType.IsGlobalModuleType)

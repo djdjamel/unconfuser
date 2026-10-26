@@ -133,6 +133,8 @@ dotnet run --project ConfuserExKillerRunner/ConfuserExKillerRunner.csproj -f net
 #   --no-netdetect          Skip NetDetect pre/post obfuscation audit
 #   --json-report <path>    Generate structured versioned JSON audit report
 #   --strict-exit-codes     Return exit code 2 on any partial deobfuscation
+#   --restore-names         Restore semantic symbol names (Forms, Controls, Handlers, Resources)
+#   --force-promote         Promote candidate to output path even if external dependencies cause indeterminate status
 #   --verbose               Enable verbose console output
 
 # Exit Codes:
