@@ -1211,6 +1211,7 @@ namespace ConfuserExKillerRunner.Analysis
 
             var manifestResources = new HashSet<string>(module.Resources.Select(r => r.Name.String), StringComparer.Ordinal);
 
+            // 1. Check ComponentResourceManager and ResourceManager(typeof(T)) call sites
             foreach (var type in module.GetTypes())
             {
                 if (!type.HasMethods) continue;
@@ -1226,6 +1227,7 @@ namespace ConfuserExKillerRunner.Analysis
                             (called.DeclaringType.FullName == "System.ComponentModel.ComponentResourceManager" ||
                              called.DeclaringType.FullName == "System.Resources.ResourceManager"))
                         {
+                            // Check for typeof(T) pattern via ldtoken
                             for (int j = Math.Max(0, i - 5); j < i; j++)
                             {
                                 var prev = instrs[j];
@@ -1237,10 +1239,108 @@ namespace ConfuserExKillerRunner.Analysis
                                         string err = $"Missing Manifest Resource: Type '{type.FullName}' invokes ComponentResourceManager for '{tokenType.FullName}', but manifest resource stream '{expectedRes}' does not exist.";
                                         report.Errors.Add(err);
                                         report.Warnings.Add(err);
+                                        report.Diagnostics.Add(new RegressionDiagnostic
+                                        {
+                                            DefectType = DefectType.MetadataError,
+                                            Severity = DiagnosticSeverity.Error,
+                                            Token = type.MDToken.Raw,
+                                            MethodName = method.Name.String,
+                                            Description = err,
+                                            RawMessage = err
+                                        });
+                                    }
+                                    break;
+                                }
+                            }
+
+                            // Check for string baseName pattern via ldstr
+                            if (called.DeclaringType.FullName == "System.Resources.ResourceManager")
+                            {
+                                for (int j = i - 1; j >= Math.Max(0, i - 6); j--)
+                                {
+                                    var prev = instrs[j];
+                                    if (prev.OpCode == OpCodes.Ldstr && prev.Operand is string baseName && !string.IsNullOrEmpty(baseName))
+                                    {
+                                        string expectedRes1 = baseName + ".resources";
+                                        string expectedRes2 = baseName;
+                                        if (!manifestResources.Contains(expectedRes1) && !manifestResources.Contains(expectedRes2))
+                                        {
+                                            string err = $"Missing Manifest Resource: Type '{type.FullName}' in method '{method.Name}' initializes ResourceManager with baseName '{baseName}', but manifest resource stream '{expectedRes1}' does not exist.";
+                                            report.Errors.Add(err);
+                                            report.Warnings.Add(err);
+                                            report.Diagnostics.Add(new RegressionDiagnostic
+                                            {
+                                                DefectType = DefectType.MetadataError,
+                                                Severity = DiagnosticSeverity.Error,
+                                                Token = type.MDToken.Raw,
+                                                MethodName = method.Name.String,
+                                                Description = err,
+                                                RawMessage = err
+                                            });
+                                        }
+                                        break;
                                     }
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // 2. Validate integrity of embedded .resources streams
+            foreach (var emb in module.Resources.OfType<EmbeddedResource>())
+            {
+                if (emb.Name.String.EndsWith(".resources", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        using (var stream = emb.GetResourceStream())
+                        {
+                            if (stream != null && stream.Length >= 4)
+                            {
+                                byte[] magic = new byte[4];
+                                int read = stream.Read(magic, 0, 4);
+                                stream.Position = 0;
+                                // 0xBEEFCACE in little endian: 0xCE, 0xCA, 0xEF, 0xBE
+                                if (read == 4 && magic[0] == 0xCE && magic[1] == 0xCA && magic[2] == 0xEF && magic[3] == 0xBE)
+                                {
+                                    try
+                                    {
+                                        using (var reader = new System.Resources.ResourceReader(stream))
+                                        {
+                                            var en = reader.GetEnumerator();
+                                            while (en.MoveNext()) { }
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        string err = $"Corrupted Manifest Resource: Resource stream '{emb.Name}' has valid magic header but failed to deserialize: {ex.Message}";
+                                        report.Errors.Add(err);
+                                        report.Warnings.Add(err);
+                                        report.Diagnostics.Add(new RegressionDiagnostic
+                                        {
+                                            DefectType = DefectType.MetadataError,
+                                            Severity = DiagnosticSeverity.Error,
+                                            Description = err,
+                                            RawMessage = err
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        string err = $"Failed to read resource stream '{emb.Name}': {ex.Message}";
+                        report.Errors.Add(err);
+                        report.Warnings.Add(err);
+                        report.Diagnostics.Add(new RegressionDiagnostic
+                        {
+                            DefectType = DefectType.MetadataError,
+                            Severity = DiagnosticSeverity.Error,
+                            Description = err,
+                            RawMessage = err
+                        });
                     }
                 }
             }
