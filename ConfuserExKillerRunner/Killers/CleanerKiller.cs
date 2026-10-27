@@ -17,6 +17,7 @@ namespace ConfuserExKillerRunner.Killers
         public int RemovedMethodsCount { get; set; }
         public int StrippedAttributesCount { get; set; }
         public bool AntiIldasmStripped { get; set; }
+        public bool AntiDebugStripped { get; set; }
         public List<string> StrippedDetails { get; set; } = new List<string>();
         public List<string> RetainedHooksDetails { get; set; } = new List<string>();
         public List<HookTraceRecord> HookRecords { get; set; } = new List<HookTraceRecord>();
@@ -216,6 +217,7 @@ namespace ConfuserExKillerRunner.Killers
 
                     methodsToRemove.Add(methodDef);
                     result.StrippedHooksCount++;
+                    if (hookType == "Anti-Debug") result.AntiDebugStripped = true;
                     result.StrippedDetails.Add($"{hookType} hook removed from <Module>.cctor: {methodDef.Name}");
                     result.HookRecords.Add(new HookTraceRecord
                     {
@@ -228,6 +230,26 @@ namespace ConfuserExKillerRunner.Killers
                         Confidence = "HIGH"
                     });
                     Logger.LogInfo($"[CleanerKiller] Safely stripped {hookType} initializer call to {methodDef.Name} and {toNeutralize.Count - 1} related instruction(s) in <Module>.cctor");
+                }
+            }
+
+            // Collect any subsidiary delegate methods referenced by methodsToRemove (e.g. smethod_1 watchdog thread)
+            var subsidiaryMethods = new List<MethodDef>();
+            foreach (var m in methodsToRemove)
+            {
+                if (m.HasBody && m.Body.Instructions != null)
+                {
+                    foreach (var ins in m.Body.Instructions)
+                    {
+                        if (ins.OpCode == OpCodes.Ldftn && ins.Operand is IMethod called)
+                        {
+                            var targetDef = called.ResolveMethodDef() ?? (called as MethodDef);
+                            if (targetDef != null && targetDef.DeclaringType != null && targetDef.DeclaringType.IsGlobalModuleType && !methodsToRemove.Contains(targetDef))
+                            {
+                                subsidiaryMethods.Add(targetDef);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -250,6 +272,20 @@ namespace ConfuserExKillerRunner.Killers
                             string msg = $"Retaining protector method {m.Name} in {declType.Name}: live references remain in module.";
                             Logger.LogWarning($"[CleanerKiller] {msg}");
                             result.RetainedHooksDetails.Add(msg);
+                        }
+                    }
+                }
+
+                foreach (var sub in subsidiaryMethods)
+                {
+                    var declType = sub.DeclaringType;
+                    if (declType != null && declType.Methods.Contains(sub))
+                    {
+                        if (!IsReferencedInModule(module, sub))
+                        {
+                            declType.Methods.Remove(sub);
+                            result.RemovedMethodsCount++;
+                            Logger.LogInfo($"[CleanerKiller] Removed unused subsidiary protector method {sub.Name} from {declType.Name}");
                         }
                     }
                 }
@@ -368,6 +404,15 @@ namespace ConfuserExKillerRunner.Killers
                 var inst = instructions[i];
                 if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
                 {
+                    // SAFETY: Only allow neutralizing calls where target is defined on <Module>
+                    // and is a protector method. NEVER neutralize calls to user methods or framework classes!
+                    if (inst.Operand is IMethod calledMethod)
+                    {
+                        var targetDef = calledMethod.ResolveMethodDef() ?? (calledMethod as MethodDef);
+                        if (targetDef != null && targetDef.DeclaringType != null && !targetDef.DeclaringType.IsGlobalModuleType)
+                            continue;
+                    }
+
                     var origOp = inst.OpCode;
                     var origOperand = inst.Operand;
 
@@ -424,9 +469,11 @@ namespace ConfuserExKillerRunner.Killers
                     }
 
                     if (fullName.IndexOf("IsAttached", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        fullName.IndexOf("IsLogging", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         fullName.IndexOf("CheckRemoteDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         fullName.IndexOf("IsDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         fullName.IndexOf("OutputDebugString", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        fullName.IndexOf("FailFast", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         string.Equals(pinvokeName, "IsDebuggerPresent", StringComparison.OrdinalIgnoreCase) ||
                         string.Equals(pinvokeName, "CheckRemoteDebuggerPresent", StringComparison.OrdinalIgnoreCase) ||
                         string.Equals(pinvokeName, "OutputDebugStringA", StringComparison.OrdinalIgnoreCase) ||
@@ -467,6 +514,22 @@ namespace ConfuserExKillerRunner.Killers
                     (inst.OpCode == OpCodes.Ldc_I4_S && inst.Operand is byte bVal && bVal == 0x3c))
                 {
                     hasPeHeaderOffset = true;
+                }
+
+                if (inst.OpCode == OpCodes.Ldstr && inst.Operand is string sVal)
+                {
+                    if (sVal.IndexOf("ENABLE_PROFILING", StringComparison.OrdinalIgnoreCase) >= 0)
+                        hasDebuggerCheck = true;
+                }
+
+                if (inst.OpCode == OpCodes.Ldftn && inst.Operand is IMethod delegatedMethod)
+                {
+                    var delDef = delegatedMethod.ResolveMethodDef() ?? (delegatedMethod as MethodDef);
+                    if (delDef != null && delDef.HasBody && delDef.DeclaringType != null && delDef.DeclaringType.IsGlobalModuleType)
+                    {
+                        if (IsConfuserAntiDebugMethod(delDef))
+                            hasDebuggerCheck = true;
+                    }
                 }
 
                 var code = inst.OpCode.Code;
@@ -511,12 +574,25 @@ namespace ConfuserExKillerRunner.Killers
                 }
             }
 
-            // 1. Anti-Tamper: calls VirtualProtect and exhibits section fields or pointer decryption characteristics
+            // 1. Anti-Dump: calls VirtualProtect to wipe/zero headers without decryption cipher arithmetic, debugger checks, or section metadata fields.
+            // MUST explicitly exhibit proven PE header zeroing/wiping behavior (e.g. stind/initblk with 0 or ZeroMemory/memset structurally linked to the module base or PE header pointer).
+            bool isAntiDump = hasVirtualProtect &&
+                              !hasCipherArithmetic &&
+                              !hasDebuggerCheck &&
+                              !hasSectionField &&
+                              HasLinkedPeHeaderZeroing(method);
+
+            if (isAntiDump)
+            {
+                return "Anti-Dump";
+            }
+
+            // 2. Anti-Tamper: calls VirtualProtect and exhibits section fields or pointer decryption characteristics
             bool isAntiTamper = hasVirtualProtect && (
                 hasSectionField ||
                 (hasPointerWrite && hasCipherArithmetic) ||
                 ((hasPointerConversion || hasPointerIndirection) && hasBackwardBranch && hasCipherArithmetic) ||
-                (hasPeHeaderOffset && hasCipherArithmetic)
+                (hasPeHeaderOffset && (hasCipherArithmetic || hasPointerWrite || hasPointerIndirection || hasPointerConversion))
             );
 
             if (isAntiTamper)
@@ -540,24 +616,10 @@ namespace ConfuserExKillerRunner.Killers
                 return null;
             }
 
-            // 2. Canonical Stub calls
+            // 3. Canonical Stub calls
             if (IsExactStubProtectorCall(method))
             {
                 return "Protector-Stub";
-            }
-
-            // 3. Anti-Dump: calls VirtualProtect to wipe/zero headers without decryption cipher arithmetic, debugger checks, or section metadata fields.
-            // MUST explicitly exhibit proven PE header zeroing/wiping behavior (e.g. stind/initblk with 0 or ZeroMemory/memset structurally linked to the module base or PE header pointer).
-            // Merely reading an offset 0x3c, or calling VirtualProtect with an unlinked memory zeroing, is ambiguous and must NOT classify as Anti-Dump.
-            bool isAntiDump = hasVirtualProtect &&
-                              !hasCipherArithmetic &&
-                              !hasDebuggerCheck &&
-                              !hasSectionField &&
-                              HasLinkedPeHeaderZeroing(method);
-
-            if (isAntiDump)
-            {
-                return "Anti-Dump";
             }
 
             // 4. Ambiguous VirtualProtect hook: If a method calls VirtualProtect but cannot be unambiguously classified as pure Anti-Dump,
@@ -898,6 +960,32 @@ namespace ConfuserExKillerRunner.Killers
                    string.Equals(name, "CheckRemoteDebuggerPresent", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(name, "OutputDebugStringA", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(name, "OutputDebugStringW", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsConfuserAntiDebugMethod(MethodDef method)
+        {
+            if (method == null || !method.HasBody || method.Body.Instructions == null)
+                return false;
+
+            foreach (var inst in method.Body.Instructions)
+            {
+                if (inst.OpCode == OpCodes.Ldstr && inst.Operand is string s &&
+                    s.IndexOf("ENABLE_PROFILING", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+
+                if (inst.Operand is IMethod called)
+                {
+                    string fn = called.FullName;
+                    if (fn.IndexOf("IsAttached", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        fn.IndexOf("IsLogging", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        fn.IndexOf("FailFast", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        fn.IndexOf("IsDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        fn.IndexOf("CheckRemoteDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0)
+                        return true;
+                }
+            }
+
+            return false;
         }
 
         private enum PeSymbolicKind

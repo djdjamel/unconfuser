@@ -617,5 +617,74 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(DefectType.MetadataError, diag.DefectType);
             Assert.Equal(0x01000002u, diag.Token);
         }
+
+        [Fact]
+        public void AuditManifestResourcesIntegrity_WhenMissingResource_ReportsError()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var formType = new TypeDefUser("TestApp", "MyForm", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(formType);
+
+            var initMethod = new MethodDefUser("InitializeComponent", MethodSig.CreateInstance(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var crmTypeRef = new TypeRefUser(module, "System.ComponentModel", "ComponentResourceManager", module.CorLibTypes.AssemblyRef);
+            var crmCtor = new MemberRefUser(module, ".ctor",
+                MethodSig.CreateInstance(module.CorLibTypes.Void,
+                    new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                crmTypeRef);
+            var getTypeFromHandle = new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef).ToTypeSig(),
+                    new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef));
+
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, formType));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getTypeFromHandle));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Newobj, crmCtor));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            formType.Methods.Add(initMethod);
+
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.AuditManifestResourcesIntegrity(module, report);
+
+            Assert.NotEmpty(report.Errors);
+            Assert.Contains(report.Errors, e => e.Contains("Missing Manifest Resource") && e.Contains("MyForm"));
+        }
+
+        [Fact]
+        public void AuditManifestResourcesIntegrity_WhenResourcePresent_PassesClean()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var formType = new TypeDefUser("TestApp", "MyForm", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(formType);
+
+            var initMethod = new MethodDefUser("InitializeComponent", MethodSig.CreateInstance(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var crmTypeRef = new TypeRefUser(module, "System.ComponentModel", "ComponentResourceManager", module.CorLibTypes.AssemblyRef);
+            var crmCtor = new MemberRefUser(module, ".ctor",
+                MethodSig.CreateInstance(module.CorLibTypes.Void,
+                    new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                crmTypeRef);
+            var getTypeFromHandle = new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef).ToTypeSig(),
+                    new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef));
+
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, formType));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getTypeFromHandle));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Newobj, crmCtor));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            formType.Methods.Add(initMethod);
+
+            module.Resources.Add(new EmbeddedResource("TestApp.MyForm.resources", new byte[] { 1, 2, 3 }));
+
+            var report = new AuditReport { CanLoad = true };
+            QualityAuditor.AuditManifestResourcesIntegrity(module, report);
+
+            Assert.Empty(report.Errors);
+        }
     }
 }

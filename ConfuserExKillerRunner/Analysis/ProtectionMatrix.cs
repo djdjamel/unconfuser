@@ -75,7 +75,9 @@ namespace ConfuserExKillerRunner.Analysis
             bool compressorUnpacked = false,
             IEnumerable<string> unevaluatedProtections = null,
             bool symbolsRenamed = false,
-            bool antiIldasmStripped = false)
+            bool antiIldasmStripped = false,
+            bool antiDebugStripped = false,
+            bool ilVerificationIndeterminate = false)
         {
             var result = new ProtectionMatrixResult();
             var unevaluatedSet = unevaluatedProtections != null
@@ -195,14 +197,14 @@ namespace ConfuserExKillerRunner.Analysis
             result.Items.Add(antiDump);
 
             // 4. Anti-Debug
-            bool antiDebugDetected = HasAntiDebugSignatures(module);
+            bool antiDebugDetected = antiDebugStripped || HasAntiDebugSignatures(module);
             var antiDebug = new ProtectionItem
             {
                 Name = "Anti-Debug",
-                Mode = "P/Invoke & API Checks",
+                Mode = "Managed Watchdog & Win32 P/Invoke",
                 Detected = antiDebugDetected
             };
-            if (isUnevaluated("Anti-Debug", "P/Invoke & API Checks"))
+            if (isUnevaluated("Anti-Debug", "Managed Watchdog & Win32 P/Invoke") || isUnevaluated("Anti-Debug", "P/Invoke & API Checks"))
             {
                 antiDebug.Detected = false;
                 antiDebug.Status = ProtectionSupportStatus.NotEvaluated;
@@ -217,9 +219,11 @@ namespace ConfuserExKillerRunner.Analysis
             }
             else
             {
-                antiDebug.Status = cleanerHooksStrippedCount > 0 ? ProtectionSupportStatus.SupportedStatic : ProtectionSupportStatus.PartiallyProcessed;
-                antiDebug.ResultSummary = cleanerHooksStrippedCount > 0 ? "Stripped" : "Detected";
-                antiDebug.Details = "Anti-debug P/Invokes and module initializer checks stripped by CleanerKiller.";
+                antiDebug.Status = (antiDebugStripped || cleanerHooksStrippedCount > 0) ? ProtectionSupportStatus.SupportedStatic : ProtectionSupportStatus.PartiallyProcessed;
+                antiDebug.ResultSummary = (antiDebugStripped || cleanerHooksStrippedCount > 0) ? "Neutralized" : "Detected";
+                antiDebug.Details = (antiDebugStripped || cleanerHooksStrippedCount > 0)
+                    ? "Anti-debug managed watchdog thread, profiler checks, and P/Invokes stripped by CleanerKiller."
+                    : "Anti-debug checks detected in module.";
             }
             result.Items.Add(antiDebug);
 
@@ -670,6 +674,12 @@ namespace ConfuserExKillerRunner.Analysis
                 result.OverallVerdict = "DEOBFUSCATION UNCONFIRMED (Unevaluated Protections)";
                 result.SummaryNotes = "One or more protections could not be conclusively evaluated (unsupported detectors). Deobfuscation cannot be verified as complete.";
             }
+            else if (ilVerificationIndeterminate)
+            {
+                result.IsComplete = true;
+                result.OverallVerdict = "DEOBFUSCATION COMPLETED (INDETERMINATE IL VERIFICATION)";
+                result.SummaryNotes = "All detected ConfuserEx protections were safely reversed, but external IL verification was indeterminate due to unresolved external assembly references. Runtime JIT verification required.";
+            }
             else
             {
                 result.IsComplete = true;
@@ -780,13 +790,36 @@ namespace ConfuserExKillerRunner.Analysis
         private static bool HasAntiDebugSignatures(ModuleDef module)
         {
             if (module == null || module.GlobalType == null) return false;
+
             foreach (var method in module.GlobalType.Methods)
             {
                 if (method.IsPinvokeImpl && method.ImplMap != null)
                 {
                     string name = method.ImplMap.Name.String;
-                    if (name == "IsDebuggerPresent" || name == "CheckRemoteDebuggerPresent")
+                    if (name == "IsDebuggerPresent" || name == "CheckRemoteDebuggerPresent" ||
+                        name == "NtSetInformationThread" || name == "OutputDebugStringA" || name == "OutputDebugStringW")
                         return true;
+                }
+
+                if (method.HasBody && method.Body.Instructions != null)
+                {
+                    foreach (var ins in method.Body.Instructions)
+                    {
+                        if (ins.OpCode == OpCodes.Ldstr && ins.Operand is string s &&
+                            s.IndexOf("ENABLE_PROFILING", StringComparison.OrdinalIgnoreCase) >= 0)
+                            return true;
+
+                        if (ins.Operand is IMethod called)
+                        {
+                            string fn = called.FullName;
+                            if (fn.IndexOf("IsAttached", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                fn.IndexOf("IsLogging", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                fn.IndexOf("FailFast", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                fn.IndexOf("IsDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                fn.IndexOf("CheckRemoteDebuggerPresent", StringComparison.OrdinalIgnoreCase) >= 0)
+                                return true;
+                        }
+                    }
                 }
             }
             return false;

@@ -338,6 +338,8 @@ namespace ConfuserExKillerRunner.Analysis
                             }
                         }
                     }
+
+                    AuditManifestResourcesIntegrity(module, report);
                 }
             }
             catch (Exception ex)
@@ -547,11 +549,8 @@ namespace ConfuserExKillerRunner.Analysis
             foreach (var line in errorLines)
             {
                 if (line.IndexOf("0x80070002", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    line.IndexOf("0x8007000B", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     line.IndexOf("en raison d'un assembly référencé manquant", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    line.IndexOf("due to missing referenced assembly", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    line.IndexOf("format incorrect", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    line.IndexOf("bad format", StringComparison.OrdinalIgnoreCase) >= 0)
+                    line.IndexOf("due to missing referenced assembly", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     missingDepErrors++;
                     report.Warnings.Add($"PEVerify /IL dependency warning: {line.Trim()}");
@@ -1204,6 +1203,47 @@ namespace ConfuserExKillerRunner.Analysis
         {
             return op == OpCodes.Ret || op == OpCodes.Throw || op == OpCodes.Rethrow ||
                    op == OpCodes.Br || op == OpCodes.Br_S || op == OpCodes.Jmp;
+        }
+
+        public static void AuditManifestResourcesIntegrity(ModuleDef module, AuditReport report)
+        {
+            if (module == null || report == null) return;
+
+            var manifestResources = new HashSet<string>(module.Resources.Select(r => r.Name.String), StringComparer.Ordinal);
+
+            foreach (var type in module.GetTypes())
+            {
+                if (!type.HasMethods) continue;
+                foreach (var method in type.Methods)
+                {
+                    if (!method.HasBody || method.Body.Instructions == null) continue;
+                    var instrs = method.Body.Instructions;
+                    for (int i = 0; i < instrs.Count; i++)
+                    {
+                        var ins = instrs[i];
+                        if (ins.OpCode == OpCodes.Newobj && ins.Operand is IMethod called &&
+                            called.DeclaringType != null &&
+                            (called.DeclaringType.FullName == "System.ComponentModel.ComponentResourceManager" ||
+                             called.DeclaringType.FullName == "System.Resources.ResourceManager"))
+                        {
+                            for (int j = Math.Max(0, i - 5); j < i; j++)
+                            {
+                                var prev = instrs[j];
+                                if (prev.OpCode == OpCodes.Ldtoken && prev.Operand is ITypeDefOrRef tokenType)
+                                {
+                                    string expectedRes = tokenType.FullName + ".resources";
+                                    if (!manifestResources.Contains(expectedRes))
+                                    {
+                                        string err = $"Missing Manifest Resource: Type '{type.FullName}' invokes ComponentResourceManager for '{tokenType.FullName}', but manifest resource stream '{expectedRes}' does not exist.";
+                                        report.Errors.Add(err);
+                                        report.Warnings.Add(err);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

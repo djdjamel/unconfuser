@@ -181,6 +181,7 @@ namespace ConfuserExKillerRunner
                 var swStage0 = Stopwatch.StartNew();
                 bool compressorWasUnpacked = false;
                 bool antiIldasmWasStripped = false;
+                bool antiDebugWasStripped = false;
                 try
                 {
                     bool isCompressorStub = false;
@@ -635,6 +636,7 @@ namespace ConfuserExKillerRunner
                         Console.WriteLine("[*] Step 3: Cleaning Protector Hooks...");
                         var cleanResult = CleanerKiller.StripProtectorHooks(module, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
                         if (cleanResult.AntiIldasmStripped) antiIldasmWasStripped = true;
+                        if (cleanResult.AntiDebugStripped) antiDebugWasStripped = true;
                         totalCleanerHooks += cleanResult.StrippedHooksCount + cleanResult.RemovedMethodsCount;
                         if (cleanResult.StrippedHooksCount > 0)
                             Console.WriteLine($"[+] CleanerKiller: Stripped {cleanResult.StrippedHooksCount} protector initializers from <Module>.cctor");
@@ -674,6 +676,8 @@ namespace ConfuserExKillerRunner
                         // Now that control-flow switches in <Module>..cctor are resolved, any protector initializers
                         // previously guarded by switch branches are exposed and can be safely neutralized before de4dot.
                         var cleanPostSwitch = CleanerKiller.StripProtectorHooks(module, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
+                        if (cleanPostSwitch.AntiIldasmStripped) antiIldasmWasStripped = true;
+                        if (cleanPostSwitch.AntiDebugStripped) antiDebugWasStripped = true;
                         if (cleanPostSwitch.StrippedHooksCount > 0)
                         {
                             totalCleanerHooks += cleanPostSwitch.StrippedHooksCount + cleanPostSwitch.RemovedMethodsCount;
@@ -692,13 +696,6 @@ namespace ConfuserExKillerRunner
                         Console.WriteLine("[!] Static mode: Skipping AST & IL rewriting on Anti-Tamper encrypted method bodies.");
                     }
 
-                var cctorPre = module.GlobalType?.FindStaticConstructor();
-                if (cctorPre != null && cctorPre.HasBody)
-                {
-                    Console.WriteLine($"[DEBUG] <Module>..cctor before de4dot ({cctorPre.Body.Instructions.Count} instrs):");
-                    foreach (var ins in cctorPre.Body.Instructions)
-                        Console.WriteLine($"  IL_{ins.Offset:X4}: {ins.OpCode} {ins.Operand}");
-                }
 
                 var swIntermediateWrite = Stopwatch.StartNew();
                 Console.WriteLine($"[*] Writing intermediate module: {cexkPath}");
@@ -763,6 +760,7 @@ namespace ConfuserExKillerRunner
             {
                 Console.ForegroundColor = ConsoleColor.DarkYellow;
                 Console.WriteLine("[!] de4dot-cex not found (searched CLI --de4dot, DE4DOT_PATH, tools/, PATH).");
+                Console.WriteLine("    To automatically configure required tools, run: powershell -ExecutionPolicy Bypass -File scripts\\Setup-Tools.ps1");
                 Console.WriteLine("[!] Skipping external de4dot pass.");
                 Console.ResetColor();
             }
@@ -794,25 +792,17 @@ namespace ConfuserExKillerRunner
 
             using (var module2 = ModuleDefMD.Load(currentIntermediate))
             {
-                var cctorPostDe4dot = module2.GlobalType?.FindStaticConstructor();
-                if (cctorPostDe4dot != null && cctorPostDe4dot.HasBody)
-                {
-                    Console.WriteLine($"[DEBUG] <Module>..cctor after de4dot ({cctorPostDe4dot.Body.Instructions.Count} instrs):");
-                    foreach (var ins in cctorPostDe4dot.Body.Instructions)
-                        Console.WriteLine($"  IL_{ins.Offset:X4}: {ins.OpCode} {ins.Operand}");
-                }
 
                 if (!staticAntiTamperDetected)
                 {
                     var cleanFinal = CleanerKiller.StripProtectorHooks(module2, resourcesDecrypted: resourcesDecrypted, constantsDecrypted: constantsDecrypted, antiTamperDecrypted: antiTamperDecrypted);
+                    var cctorPostDe4dot = module2.GlobalType?.FindStaticConstructor();
                     if (cctorPostDe4dot != null && cctorPostDe4dot.HasBody)
                     {
                         CleanerKiller.SanitizeModuleStaticConstructor(cctorPostDe4dot);
-                        Console.WriteLine($"[DEBUG] <Module>..cctor after Step 6 CleanerKiller ({cctorPostDe4dot.Body.Instructions.Count} instrs):");
-                        foreach (var ins in cctorPostDe4dot.Body.Instructions)
-                            Console.WriteLine($"  IL_{ins.Offset:X4}: {ins.OpCode} {ins.Operand}");
                     }
                     if (cleanFinal.AntiIldasmStripped) antiIldasmWasStripped = true;
+                    if (cleanFinal.AntiDebugStripped) antiDebugWasStripped = true;
                     totalCleanerHooks += cleanFinal.StrippedHooksCount + cleanFinal.RemovedMethodsCount;
                     if (cleanFinal.HookRecords != null)
                     {
@@ -918,26 +908,7 @@ namespace ConfuserExKillerRunner
                 }
                 Console.ResetColor();
 
-                try
-                {
-                    using (var candMod = ModuleDefMD.Load(candidatePath))
-                    {
-                        var candCctor = candMod.GlobalType?.FindStaticConstructor();
-                        if (candCctor != null && candCctor.HasBody)
-                        {
-                            Console.WriteLine($"[DEBUG] Disassembly of candidate <Module>..cctor ({candCctor.Body.Instructions.Count} instructions):");
-                            for (int i = 0; i < candCctor.Body.Instructions.Count; i++)
-                            {
-                                var ci = candCctor.Body.Instructions[i];
-                                Console.WriteLine($"  IL_{ci.Offset:X4}: {ci.OpCode} {ci.Operand}");
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[DEBUG] Could not disassemble candidate: {ex.Message}");
-                }
+
             }
             foreach (var hook in activePreservedHooks)
             {
@@ -968,10 +939,8 @@ namespace ConfuserExKillerRunner
 
             if (auditReport.Status == "FAILED" && (!staticAntiTamperDetected || regressions.Count > 0))
             {
-                string failedPreservePath = finalOutputPath + ".failed_candidate.dll";
-                try { File.Copy(candidatePath, failedPreservePath, overwrite: true); } catch { }
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"[!] Deobfuscation audit reported FAILED. Candidate preserved at: {failedPreservePath}");
+                Console.WriteLine($"[!] Deobfuscation audit reported FAILED ({auditReport.Errors.Count} error(s)). Output candidate rejected.");
                 Console.ResetColor();
 
                 if (!string.IsNullOrEmpty(jsonReportPath))
@@ -1113,6 +1082,10 @@ namespace ConfuserExKillerRunner
                 {
                     Console.ForegroundColor = ConsoleColor.Yellow;
                     Console.WriteLine($"[!] Structural integrity audit completed with {auditReport.Warnings.Count} warning(s) (Candidate Promoted; External IL: {auditReport.ILVerificationStatus}). Output saved to: {finalOutputPath}");
+                    if (isIndeterminate)
+                    {
+                        Console.WriteLine("[!] WARNING: Verification is indeterminate (missing dependencies). Runtime JIT validation required.");
+                    }
                     Console.ResetColor();
                 }
             }
@@ -1157,7 +1130,9 @@ namespace ConfuserExKillerRunner
                         compressorUnpacked: compressorWasUnpacked,
                         unevaluatedProtections: unevaluated,
                         symbolsRenamed: de4dotSucceeded || restoreSemanticNames,
-                        antiIldasmStripped: antiIldasmWasStripped);
+                        antiIldasmStripped: antiIldasmWasStripped,
+                        antiDebugStripped: antiDebugWasStripped,
+                        ilVerificationIndeterminate: isIndeterminate);
 
                     stepTimings["Stage8_ProtectionMatrix_Evaluation"] = swMatrix.ElapsedMilliseconds;
                     Console.WriteLine(ProtectionMatrix.FormatReport(matrix));

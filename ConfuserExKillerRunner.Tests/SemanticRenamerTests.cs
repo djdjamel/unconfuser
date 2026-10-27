@@ -195,6 +195,89 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(resClass.FullName, (string)ldstrIns.Operand);
             Assert.Equal(resClass.FullName + ".resources", embRes.Name.String);
         }
+
+        [Fact]
+        public void Execute_MatchesMangledResourceWithControlPrefix_ToForm()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var formType = new TypeDefUser("TestApp", "CreanceForm", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(formType);
+
+            // Add control field: btnSaveAndClose
+            var btnField = new FieldDefUser("btnSaveAndClose",
+                new FieldSig(module.CorLibTypes.Object),
+                FieldAttributes.Private);
+            formType.Fields.Add(btnField);
+
+            // Generate resource with key "btnSaveAndClose.ImageOptions.Image"
+            byte[] resBytes;
+            using (var ms = new MemoryStream())
+            {
+                using (var rw = new System.Resources.ResourceWriter(ms))
+                {
+                    rw.AddResource("btnSaveAndClose.ImageOptions.Image", new byte[] { 0x89, 0x50, 0x4E, 0x47 });
+                    rw.Generate();
+                }
+                resBytes = ms.ToArray();
+            }
+
+            var mangledRes = new EmbeddedResource("z1|y3Z5?#ZF4Hj9&r\\e=gbi|!.resources", resBytes);
+            module.Resources.Add(mangledRes);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("TestApp.CreanceForm.resources", mangledRes.Name.String);
+            Assert.True(result.ResourcesRenamed >= 1);
+        }
+
+        [Fact]
+        public void Execute_AssociatesEmptyResource_ToFormCallingComponentResourceManager()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var formType = new TypeDefUser("", "CVM_FACTURE_LIST", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(formType);
+
+            // Add InitializeComponent with: ldtoken CVM_FACTURE_LIST, call GetTypeFromHandle, newobj ComponentResourceManager
+            var initMethod = new MethodDefUser("InitializeComponent", MethodSig.CreateInstance(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var crmTypeRef = new TypeRefUser(module, "System.ComponentModel", "ComponentResourceManager", module.CorLibTypes.AssemblyRef);
+            var crmCtor = new MemberRefUser(module, ".ctor",
+                MethodSig.CreateInstance(module.CorLibTypes.Void,
+                    new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                crmTypeRef);
+            var getTypeFromHandle = new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef).ToTypeSig(),
+                    new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef));
+
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, formType));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getTypeFromHandle));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Newobj, crmCtor));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            formType.Methods.Add(initMethod);
+
+            // Generate empty resource stream
+            byte[] emptyResBytes;
+            using (var ms = new MemoryStream())
+            {
+                using (var rw = new System.Resources.ResourceWriter(ms))
+                {
+                    rw.Generate();
+                }
+                emptyResBytes = ms.ToArray();
+            }
+
+            var mangledRes = new EmbeddedResource("empty#mangled#123.resources", emptyResBytes);
+            module.Resources.Add(mangledRes);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("CVM_FACTURE_LIST.resources", mangledRes.Name.String);
+            Assert.True(result.ResourcesRenamed >= 1);
+        }
     }
 }
 

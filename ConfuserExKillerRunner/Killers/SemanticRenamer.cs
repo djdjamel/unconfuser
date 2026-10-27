@@ -241,12 +241,17 @@ namespace ConfuserExKillerRunner.Killers
 
             if (mangledResources.Count == 0) return;
 
-            var resourceKeysMap = new Dictionary<EmbeddedResource, HashSet<string>>();
+            // Map each non-empty resource to (fullKeys, ctrlPrefixes), and collect empty resources
+            var resourceKeysMap = new Dictionary<EmbeddedResource, (HashSet<string> fullKeys, HashSet<string> ctrlPrefixes)>();
+            var emptyResources = new List<EmbeddedResource>();
+
             foreach (var res in mangledResources)
             {
                 try
                 {
-                    var keys = new HashSet<string>(StringComparer.Ordinal);
+                    var fullKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var ctrlPrefixes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
                     using (var stream = res.GetResourceStream())
                     using (var reader = new System.Resources.ResourceReader(stream))
                     {
@@ -254,17 +259,44 @@ namespace ConfuserExKillerRunner.Killers
                         while (enumerator.MoveNext())
                         {
                             if (enumerator.Key is string k)
-                                keys.Add(k);
+                            {
+                                fullKeys.Add(k);
+                                int dotIdx = k.IndexOf('.');
+                                if (dotIdx > 0)
+                                {
+                                    string prefix = k.Substring(0, dotIdx);
+                                    if (!prefix.Equals("$this", StringComparison.OrdinalIgnoreCase))
+                                        ctrlPrefixes.Add(prefix);
+                                }
+                                else
+                                {
+                                    ctrlPrefixes.Add(k);
+                                }
+                            }
                         }
                     }
-                    if (keys.Count > 0)
-                        resourceKeysMap[res] = keys;
+
+                    if (fullKeys.Count > 0)
+                        resourceKeysMap[res] = (fullKeys, ctrlPrefixes);
+                    else
+                        emptyResources.Add(res);
                 }
-                catch { }
+                catch
+                {
+                    emptyResources.Add(res);
+                }
             }
 
-            if (resourceKeysMap.Count == 0) return;
+            // Identify all types that instantiate ComponentResourceManager or ResourceManager(typeof(T))
+            var typesWithCrm = new HashSet<TypeDef>();
+            foreach (var t in module.GetTypes())
+            {
+                if (t.IsGlobalModuleType || t.DeclaringType != null) continue;
+                if (TypeInstantiatesComponentResourceManager(t))
+                    typesWithCrm.Add(t);
+            }
 
+            // Phase A: Match non-empty mangled resources against types using control prefixes, fields, and string literals
             foreach (var type in module.GetTypes())
             {
                 if (type.IsGlobalModuleType || type.DeclaringType != null) continue;
@@ -274,14 +306,23 @@ namespace ConfuserExKillerRunner.Killers
                 if (module.Resources.Any(r => r.Name.Equals(expectedResName)))
                     continue;
 
-                var typeStrings = new HashSet<string>(StringComparer.Ordinal);
+                // Build candidate identifiers for type: fields + ldstr literals + type name
+                var typeIdentifiers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                typeIdentifiers.Add(type.Name.String);
+
+                foreach (var f in type.Fields)
+                {
+                    if (!string.IsNullOrEmpty(f.Name?.String))
+                        typeIdentifiers.Add(f.Name.String);
+                }
+
                 foreach (var m in type.Methods)
                 {
                     if (!m.HasBody || m.Body.Instructions == null) continue;
                     foreach (var ins in m.Body.Instructions)
                     {
-                        if (ins.OpCode == OpCodes.Ldstr && ins.Operand is string s)
-                            typeStrings.Add(s);
+                        if (ins.OpCode == OpCodes.Ldstr && ins.Operand is string s && !string.IsNullOrWhiteSpace(s))
+                            typeIdentifiers.Add(s);
                     }
                 }
 
@@ -291,8 +332,20 @@ namespace ConfuserExKillerRunner.Killers
                 foreach (var kvp in resourceKeysMap)
                 {
                     var res = kvp.Key;
-                    var resKeys = kvp.Value;
-                    int matches = resKeys.Count(k => typeStrings.Contains(k));
+                    var (fullKeys, ctrlPrefixes) = kvp.Value;
+
+                    int matches = 0;
+                    foreach (var cp in ctrlPrefixes)
+                    {
+                        if (typeIdentifiers.Contains(cp))
+                            matches++;
+                    }
+                    foreach (var fk in fullKeys)
+                    {
+                        if (typeIdentifiers.Contains(fk))
+                            matches++;
+                    }
+
                     if (matches > 0 && matches > maxMatches)
                     {
                         maxMatches = matches;
@@ -300,7 +353,7 @@ namespace ConfuserExKillerRunner.Killers
                     }
                 }
 
-                if (bestRes != null && maxMatches >= Math.Min(2, resourceKeysMap[bestRes].Count))
+                if (bestRes != null && maxMatches >= 1)
                 {
                     string oldResName = bestRes.Name.String;
                     bestRes.Name = expectedResName;
@@ -310,6 +363,71 @@ namespace ConfuserExKillerRunner.Killers
                         Tool.Logger.LogInfo($"[SemanticRenamer] Synced mangled resource: {oldResName} -> {expectedResName} (matches: {maxMatches})");
                 }
             }
+
+            // Phase B: For any remaining forms/types that call ComponentResourceManager(typeof(T)) but still lack a resource stream,
+            // allocate an unused empty resource or create a minimal valid empty resource stream.
+            foreach (var type in typesWithCrm)
+            {
+                string expectedResName = type.FullName + ".resources";
+                if (module.Resources.Any(r => r.Name.Equals(expectedResName)))
+                    continue;
+
+                if (emptyResources.Count > 0)
+                {
+                    var emptyRes = emptyResources[0];
+                    emptyResources.RemoveAt(0);
+                    string oldResName = emptyRes.Name.String;
+                    emptyRes.Name = expectedResName;
+                    result.ResourcesRenamed++;
+                    if (verbose)
+                        Tool.Logger.LogInfo($"[SemanticRenamer] Associated empty resource for CRM type: {oldResName} -> {expectedResName}");
+                }
+                else
+                {
+                    using (var ms = new System.IO.MemoryStream())
+                    {
+                        using (var writer = new System.Resources.ResourceWriter(ms))
+                        {
+                            writer.Generate();
+                        }
+                        var newRes = new EmbeddedResource(expectedResName, ms.ToArray());
+                        module.Resources.Add(newRes);
+                        result.ResourcesRenamed++;
+                        if (verbose)
+                            Tool.Logger.LogInfo($"[SemanticRenamer] Created empty resource for CRM type: {expectedResName}");
+                    }
+                }
+            }
+        }
+
+        private static bool TypeInstantiatesComponentResourceManager(TypeDef type)
+        {
+            if (type == null || !type.HasMethods) return false;
+            foreach (var method in type.Methods)
+            {
+                if (!method.HasBody || method.Body.Instructions == null) continue;
+                var instrs = method.Body.Instructions;
+                for (int i = 0; i < instrs.Count; i++)
+                {
+                    var ins = instrs[i];
+                    if (ins.OpCode == OpCodes.Newobj && ins.Operand is IMethod called &&
+                        called.DeclaringType != null &&
+                        (called.DeclaringType.FullName == "System.ComponentModel.ComponentResourceManager" ||
+                         called.DeclaringType.FullName == "System.Resources.ResourceManager"))
+                    {
+                        for (int j = Math.Max(0, i - 5); j < i; j++)
+                        {
+                            var prev = instrs[j];
+                            if (prev.OpCode == OpCodes.Ldtoken && prev.Operand is ITypeDefOrRef tokenType &&
+                                (tokenType.Name == type.Name || tokenType.FullName == type.FullName))
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
         }
 
         #endregion
