@@ -1,4 +1,5 @@
 using System;
+using ConfuserExKillerRunner.Analysis;
 using ConfuserExKillerRunner.Killers;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
@@ -3445,5 +3446,434 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
             Assert.Contains(stubMethod, globalType.Methods);
         }
+
+        #region SanitizeModuleStaticConstructor Tests (Phase 2)
+
+        [Fact]
+        public void SanitizeModuleStaticConstructor_UserStaticMethodCall_IsPreserved()
+        {
+            // Case 1: Call to known static application method must be preserved
+            var module = new ModuleDefUser("TestMod");
+            var userType = new TypeDefUser("AppNamespace", "AppConfig", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+
+            var userMethod = new MethodDefUser("InitializeLogging", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody { Instructions = { Instruction.Create(OpCodes.Ret) } }
+            };
+            userType.Methods.Add(userMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            module.GlobalType.Methods.Add(cctor);
+
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, userMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Pop)); // Induces structural defect
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            var result = new CleanerResult();
+            CleanerKiller.SanitizeModuleStaticConstructor(cctor, result);
+
+            // User call must remain intact
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(userMethod, cctor.Body.Instructions[0].Operand);
+            Assert.Equal(0, result.StrippedHooksCount);
+        }
+
+        [Fact]
+        public void SanitizeModuleStaticConstructor_UserInstanceMethodCall_IsPreserved()
+        {
+            // Case 2: Call to known instance application method must be preserved
+            var module = new ModuleDefUser("TestMod");
+            var userType = new TypeDefUser("AppNamespace", "ServiceHost", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+
+            var userInstanceMethod = new MethodDefUser("Start", MethodSig.CreateInstance(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Public)
+            {
+                Body = new CilBody { Instructions = { Instruction.Create(OpCodes.Ret) } }
+            };
+            userType.Methods.Add(userInstanceMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            module.GlobalType.Methods.Add(cctor);
+
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, userInstanceMethod)); // Unbalanced instance call
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            var result = new CleanerResult();
+            CleanerKiller.SanitizeModuleStaticConstructor(cctor, result);
+
+            // Instance user call must NEVER be neutralized
+            Assert.Equal(OpCodes.Callvirt, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(userInstanceMethod, cctor.Body.Instructions[0].Operand);
+            Assert.Equal(0, result.StrippedHooksCount);
+        }
+
+        [Fact]
+        public void SanitizeModuleStaticConstructor_UnresolvableExternalRef_IsPreserved()
+        {
+            // Case 3: Missing external assembly reference must be preserved
+            var module = new ModuleDefUser("TestMod");
+            var missingAsmRef = new AssemblyRefUser("ExternalDependency", new Version(2, 0, 0, 0));
+            var missingTypeRef = new TypeRefUser(module, "ExternalLib", "Initializer", missingAsmRef);
+            var missingMethodRef = new MemberRefUser(module, "InitModule", MethodSig.CreateStatic(module.CorLibTypes.Void), missingTypeRef);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            module.GlobalType.Methods.Add(cctor);
+
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, missingMethodRef));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Pop)); // Structural defect
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            var result = new CleanerResult();
+            CleanerKiller.SanitizeModuleStaticConstructor(cctor, result);
+
+            // External call must be preserved
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(missingMethodRef, cctor.Body.Instructions[0].Operand);
+            Assert.Equal(0, result.StrippedHooksCount);
+        }
+
+        [Fact]
+        public void SanitizeModuleStaticConstructor_UnresolvableMemberRef_IsPreserved()
+        {
+            // Case 4: Unresolvable MemberRef on local type must be preserved
+            var module = new ModuleDefUser("TestMod");
+            var userType = new TypeDefUser("AppNamespace", "AppBootstrap", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+            var unresolvableRef = new MemberRefUser(module, "GhostMethod", MethodSig.CreateStatic(module.CorLibTypes.Void), userType);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            module.GlobalType.Methods.Add(cctor);
+
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, unresolvableRef));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Pop)); // Structural defect
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            var result = new CleanerResult();
+            CleanerKiller.SanitizeModuleStaticConstructor(cctor, result);
+
+            // Unresolvable MemberRef must be preserved
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(unresolvableRef, cctor.Body.Instructions[0].Operand);
+            Assert.Equal(0, result.StrippedHooksCount);
+        }
+
+        [Fact]
+        public void SanitizeModuleStaticConstructor_UnknownSignatureOnModule_IsPreserved()
+        {
+            // Case 5: Target on <Module> with application behavior (not a protector) must be preserved
+            var module = new ModuleDefUser("TestMod");
+            var appHelperOnModule = new MethodDefUser("ComputeChecksum", MethodSig.CreateStatic(module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Private | MethodAttributes.Static)
+            {
+                Body = new CilBody
+                {
+                    Instructions =
+                    {
+                        Instruction.Create(OpCodes.Ldc_I4, 12345),
+                        Instruction.Create(OpCodes.Ret)
+                    }
+                }
+            };
+            module.GlobalType.Methods.Add(appHelperOnModule);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            module.GlobalType.Methods.Add(cctor);
+
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, appHelperOnModule)); // Pushes int, causes non-zero stack at ret
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            var result = new CleanerResult();
+            CleanerKiller.SanitizeModuleStaticConstructor(cctor, result);
+
+            // Helper must NOT be classified as protector or stripped
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(appHelperOnModule, cctor.Body.Instructions[0].Operand);
+            Assert.Equal(0, result.StrippedHooksCount);
+        }
+
+        [Fact]
+        public void SanitizeModuleStaticConstructor_UnambiguousProtectorHook_IsSanitized()
+        {
+            // Case 6: Unambiguously recognized protector hook causing structural invalidity is sanitized
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Canonical protector stub
+            var protectorStub = new MethodDefUser("ConfuserStub", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+            protectorStub.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            protectorStub.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            protectorStub.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            protectorStub.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(protectorStub);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            globalType.Methods.Add(cctor);
+
+            // Call to protector stub is present with null operand defect elsewhere or missing argument
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, protectorStub));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            // Force an orphaned stack underflow by prepending pop
+            cctor.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Pop));
+
+            var result = new CleanerResult();
+            CleanerKiller.SanitizeModuleStaticConstructor(cctor, result);
+
+            // Since pop underflows, neutralizing protectorStub alone doesn't fix pop underflow, so it rolls back
+            Assert.Equal(OpCodes.Pop, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[1].OpCode);
+        }
+
+        [Fact]
+        public void SanitizeModuleStaticConstructor_ProtectorStubUnderflow_FixedAndSanitized()
+        {
+            // Case 6b: Protector stub call with non-void return whose consumer was stripped leaves stack at ret = 1
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            var stubMethod = new MethodDefUser("IntPtrStub", MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(stubMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            globalType.Methods.Add(cctor);
+
+            // cctor calls IntPtrStub and does NOT pop -> stack depth at ret is 1 for void method (structural defect!)
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, stubMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            Assert.False(QualityAuditor.IsMethodStructurallyValid(cctor, out _));
+
+            var result = new CleanerResult();
+            CleanerKiller.SanitizeModuleStaticConstructor(cctor, result);
+
+            // Sanitizing recognized stub fixes stack depth at ret from 1 to 0!
+            Assert.True(QualityAuditor.IsMethodStructurallyValid(cctor, out _));
+            Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
+            Assert.Null(cctor.Body.Instructions[0].Operand);
+            Assert.Equal(1, result.StrippedHooksCount);
+        }
+
+        [Fact]
+        public void SanitizeModuleStaticConstructor_MethodNamedLikeHook_ButApplicationBehavior_IsPreserved()
+        {
+            // Case 7: Method named "AntiTamper_Init" with application code must be preserved
+            var module = new ModuleDefUser("TestMod");
+            var fakeHook = new MethodDefUser("AntiTamper_Init", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Private | MethodAttributes.Static)
+            {
+                Body = new CilBody
+                {
+                    Instructions =
+                    {
+                        Instruction.Create(OpCodes.Ldstr, "App Started"),
+                        Instruction.Create(OpCodes.Pop),
+                        Instruction.Create(OpCodes.Ret)
+                    }
+                }
+            };
+            module.GlobalType.Methods.Add(fakeHook);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            module.GlobalType.Methods.Add(cctor);
+
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, fakeHook));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Pop)); // Induce structural defect
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            var result = new CleanerResult();
+            CleanerKiller.SanitizeModuleStaticConstructor(cctor, result);
+
+            // Must NOT be neutralized based on name alone!
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(fakeHook, cctor.Body.Instructions[0].Operand);
+            Assert.Equal(0, result.StrippedHooksCount);
+        }
+
+        [Fact]
+        public void SanitizeModuleStaticConstructor_ConstructorWithBranches_PreservesControlFlowIntegrity()
+        {
+            // Case 8: cctor containing branches preserves CFG integrity
+            var module = new ModuleDefUser("TestMod");
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            module.GlobalType.Methods.Add(cctor);
+
+            var retTarget = Instruction.Create(OpCodes.Ret);
+            var branchInst = Instruction.Create(OpCodes.Brtrue, retTarget);
+
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1));
+            cctor.Body.Instructions.Add(branchInst);
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Nop));
+            cctor.Body.Instructions.Add(retTarget);
+
+            // Valid CFG initially
+            Assert.True(QualityAuditor.IsMethodStructurallyValid(cctor, out _));
+
+            CleanerKiller.SanitizeModuleStaticConstructor(cctor);
+
+            // Must remain structurally valid with branch target unchanged
+            Assert.True(QualityAuditor.IsMethodStructurallyValid(cctor, out _));
+            Assert.Equal(retTarget, branchInst.Operand);
+        }
+
+        [Fact]
+        public void SanitizeModuleStaticConstructor_ConstructorWithExceptionHandlers_PreservesEHIntegrity()
+        {
+            // Case 9: cctor containing exception handler clauses preserves EH integrity
+            var module = new ModuleDefUser("TestMod");
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            module.GlobalType.Methods.Add(cctor);
+
+            var tryStart = Instruction.Create(OpCodes.Nop);
+            var tryEnd = Instruction.Create(OpCodes.Leave_S, (Instruction)null);
+            var handlerStart = Instruction.Create(OpCodes.Pop);
+            var handlerEnd = Instruction.Create(OpCodes.Leave_S, (Instruction)null);
+            var retInst = Instruction.Create(OpCodes.Ret);
+
+            tryEnd.Operand = retInst;
+            handlerEnd.Operand = retInst;
+
+            cctor.Body.Instructions.Add(tryStart);
+            cctor.Body.Instructions.Add(tryEnd);
+            cctor.Body.Instructions.Add(handlerStart);
+            cctor.Body.Instructions.Add(handlerEnd);
+            cctor.Body.Instructions.Add(retInst);
+
+            cctor.Body.ExceptionHandlers.Add(new ExceptionHandler(ExceptionHandlerType.Catch)
+            {
+                TryStart = tryStart,
+                TryEnd = handlerStart,
+                HandlerStart = handlerStart,
+                HandlerEnd = retInst,
+                CatchType = module.CorLibTypes.Object.TypeDefOrRef
+            });
+
+            Assert.True(QualityAuditor.IsMethodStructurallyValid(cctor, out _));
+
+            CleanerKiller.SanitizeModuleStaticConstructor(cctor);
+
+            // EH clause bounds and method validity must be 100% preserved
+            Assert.True(QualityAuditor.IsMethodStructurallyValid(cctor, out _));
+            Assert.Single(cctor.Body.ExceptionHandlers);
+            Assert.Equal(tryStart, cctor.Body.ExceptionHandlers[0].TryStart);
+        }
+
+        [Fact]
+        public void SanitizeModuleStaticConstructor_ValidationFailureAfterCorrection_RollsBackToOriginal()
+        {
+            // Case 10: Validation failure after correction triggers atomic rollback
+            var module = new ModuleDefUser("TestMod");
+            var globalType = module.GlobalType;
+
+            // Stub that returns IntPtr
+            var stubMethod = new MethodDefUser("IntPtrStub", MethodSig.CreateStatic(module.CorLibTypes.IntPtr),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            stubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(stubMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            globalType.Methods.Add(cctor);
+
+            // cctor has stub call, PLUS an unfixable stack underflow before it
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Pop)); // Underflow at IL_0000
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, stubMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            var result = new CleanerResult();
+            CleanerKiller.SanitizeModuleStaticConstructor(cctor, result);
+
+            // Because neutralizing stubMethod still leaves the underflow pop at IL_0000,
+            // QualityAuditor fails and the method MUST be completely restored to its original instructions!
+            Assert.Equal(OpCodes.Pop, cctor.Body.Instructions[0].OpCode);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[1].OpCode);
+            Assert.Equal(stubMethod, cctor.Body.Instructions[1].Operand);
+            Assert.Equal(0, result.StrippedHooksCount);
+        }
+
+        #endregion
     }
 }

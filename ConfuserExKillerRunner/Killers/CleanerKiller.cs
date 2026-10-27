@@ -317,122 +317,136 @@ namespace ConfuserExKillerRunner.Killers
             return result;
         }
 
+        /// <summary>
+        /// Strictly determines whether a call instruction targets a positively identified ConfuserEx protector hook.
+        /// Unresolved external references, non-global types, or methods without positive structural protector patterns
+        /// are NEVER classified as protector calls.
+        /// </summary>
+        public static bool IsRecognizedProtectorCall(Instruction inst, out MethodDef targetMethodDef, out string hookType)
+        {
+            targetMethodDef = null;
+            hookType = null;
+            if (inst == null || (inst.OpCode != OpCodes.Call && inst.OpCode != OpCodes.Callvirt))
+                return false;
+
+            if (!(inst.Operand is IMethod calledMethod))
+                return false;
+
+            // Rule 1: Target must be resolvable. Unresolved MemberRef or external reference MUST NEVER be neutralized.
+            targetMethodDef = calledMethod.ResolveMethodDef() ?? (calledMethod as MethodDef);
+            if (targetMethodDef == null)
+                return false;
+
+            // Rule 2: ConfuserEx protector methods are defined on the global <Module> type.
+            if (targetMethodDef.DeclaringType == null || !targetMethodDef.DeclaringType.IsGlobalModuleType)
+                return false;
+
+            // Rule 3: Positive identification required. Method names alone are NEVER sufficient proof.
+            if (IsExactStubProtectorCall(targetMethodDef))
+            {
+                hookType = "Protector-Stub";
+                return true;
+            }
+
+            // Positive structural classification (Anti-Dump, Anti-Tamper, Anti-Debug, Resource-Resolver, Constant-Buffer)
+            string classification = ClassifyProtectorMethod(targetMethodDef, resourcesDecrypted: true, constantsDecrypted: true, antiTamperDecrypted: true);
+            if (!string.IsNullOrEmpty(classification))
+            {
+                hookType = classification;
+                return true;
+            }
+
+            return false;
+        }
+
         public static void SanitizeModuleStaticConstructor(MethodDef cctor, CleanerResult result = null)
         {
             if (cctor == null || !cctor.HasBody || cctor.Body.Instructions == null || cctor.Body.Instructions.Count == 0)
                 return;
 
+            // If the constructor is already structurally valid across all CFG paths, do not touch anything.
             if (QualityAuditor.IsMethodStructurallyValid(cctor, out _))
                 return;
 
             var instructions = cctor.Body.Instructions;
-            int simulatedDepth = 0;
-            var underflowCalls = new List<Instruction>();
 
+            // Find only calls that are positively verified ConfuserEx protector hooks.
+            // Never touch user methods, instance methods, or unresolved MemberRefs!
+            var candidateCalls = new List<(Instruction CallInst, MethodDef TargetDef, string HookType)>();
             for (int i = 0; i < instructions.Count; i++)
             {
                 var inst = instructions[i];
-                if (inst == null) continue;
-
-                if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
+                if (IsRecognizedProtectorCall(inst, out var targetDef, out var hookType))
                 {
-                    if (inst.Operand is IMethod calledMethod)
-                    {
-                        var sig = calledMethod.MethodSig;
-                        int pops = sig?.Params?.Count ?? 0;
-                        if (sig != null && sig.HasThis) pops++;
-                        int pushes = (sig?.RetType != null && sig.RetType.ElementType != ElementType.Void) ? 1 : 0;
-
-                        if (simulatedDepth < pops)
-                        {
-                            underflowCalls.Add(inst);
-                        }
-                        else
-                        {
-                            simulatedDepth = simulatedDepth - pops + pushes;
-                        }
-                    }
-                }
-                else if (inst.OpCode == OpCodes.Nop)
-                {
-                }
-                else if (inst.OpCode == OpCodes.Ret)
-                {
-                }
-                else
-                {
-                    inst.CalculateStackUsage(out int pushes, out int pops);
-                    if (simulatedDepth < pops)
-                        simulatedDepth = 0;
-                    else
-                        simulatedDepth = simulatedDepth - pops + pushes;
+                    candidateCalls.Add((inst, targetDef, hookType));
                 }
             }
 
-            if (underflowCalls.Count > 0)
+            // Rule: If no positively identified protector calls exist, retain all instructions intact!
+            // Do NOT guess or blindly sanitize unknown application initializers.
+            if (candidateCalls.Count == 0)
             {
-                var backup = instructions.Select(ins => (Inst: ins, Op: ins.OpCode, Opnd: ins.Operand)).ToList();
+                Logger.LogWarning("[CleanerKiller] <Module>.cctor is structurally invalid, but contains no recognized ConfuserEx protector hooks. Preserving all instructions to prevent breaking application logic.");
+                return;
+            }
 
-                foreach (var badCall in underflowCalls)
-                {
-                    badCall.OpCode = OpCodes.Nop;
-                    badCall.Operand = null;
-                }
+            // Snapshot original opcodes and operands for strict atomic rollback
+            var backup = instructions.Select(ins => (Inst: ins, Op: ins.OpCode, Opnd: ins.Operand)).ToList();
+
+            // Attempt 1: Neutralize only the positively identified protector calls
+            foreach (var cand in candidateCalls)
+            {
+                cand.CallInst.OpCode = OpCodes.Nop;
+                cand.CallInst.Operand = null;
+            }
+
+            if (QualityAuditor.IsMethodStructurallyValid(cctor, out _))
+            {
+                if (result != null)
+                    result.StrippedHooksCount += candidateCalls.Count;
+                string msg = $"Sanitized {candidateCalls.Count} recognized protector hook call(s) ({string.Join(", ", candidateCalls.Select(c => c.HookType))}) in <Module>.cctor";
+                Logger.LogInfo($"[CleanerKiller] {msg}");
+                result?.StrippedDetails.Add(msg);
+                return;
+            }
+
+            // Attempt 2: If neutralizing all together didn't achieve validity, try each recognized hook individually
+            foreach (var b in backup)
+            {
+                b.Inst.OpCode = b.Op;
+                b.Inst.Operand = b.Opnd;
+            }
+
+            for (int i = 0; i < candidateCalls.Count; i++)
+            {
+                var cand = candidateCalls[i];
+                cand.CallInst.OpCode = OpCodes.Nop;
+                cand.CallInst.Operand = null;
 
                 if (QualityAuditor.IsMethodStructurallyValid(cctor, out _))
                 {
                     if (result != null)
-                        result.StrippedHooksCount += underflowCalls.Count;
-                    string msg = $"Sanitized {underflowCalls.Count} stack-underflowing orphaned call(s) in <Module>.cctor";
+                        result.StrippedHooksCount++;
+                    string msg = $"Sanitized recognized {cand.HookType} hook call to {cand.TargetDef.Name} in <Module>.cctor";
                     Logger.LogInfo($"[CleanerKiller] {msg}");
                     result?.StrippedDetails.Add(msg);
                     return;
                 }
-                else
-                {
-                    foreach (var b in backup)
-                    {
-                        b.Inst.OpCode = b.Op;
-                        b.Inst.Operand = b.Opnd;
-                    }
-                }
+
+                // Restore
+                cand.CallInst.OpCode = backup.First(b => b.Inst == cand.CallInst).Op;
+                cand.CallInst.Operand = backup.First(b => b.Inst == cand.CallInst).Opnd;
             }
 
-            // Fallback trial: try neutralizing each call individually
-            for (int i = 0; i < instructions.Count; i++)
+            // Strict Rollback: If no recognized hook neutralization rendered the constructor structurally valid,
+            // restore everything and retain the original method body.
+            foreach (var b in backup)
             {
-                var inst = instructions[i];
-                if (inst.OpCode == OpCodes.Call || inst.OpCode == OpCodes.Callvirt)
-                {
-                    // SAFETY: Only allow neutralizing calls where target is defined on <Module>
-                    // and is a protector method. NEVER neutralize calls to user methods or framework classes!
-                    if (inst.Operand is IMethod calledMethod)
-                    {
-                        var targetDef = calledMethod.ResolveMethodDef() ?? (calledMethod as MethodDef);
-                        if (targetDef != null && targetDef.DeclaringType != null && !targetDef.DeclaringType.IsGlobalModuleType)
-                            continue;
-                    }
-
-                    var origOp = inst.OpCode;
-                    var origOperand = inst.Operand;
-
-                    inst.OpCode = OpCodes.Nop;
-                    inst.Operand = null;
-
-                    if (QualityAuditor.IsMethodStructurallyValid(cctor, out _))
-                    {
-                        if (result != null)
-                            result.StrippedHooksCount++;
-                        string msg = $"Sanitized orphaned call {origOperand} in <Module>.cctor";
-                        Logger.LogInfo($"[CleanerKiller] {msg}");
-                        result?.StrippedDetails.Add(msg);
-                        return;
-                    }
-
-                    inst.OpCode = origOp;
-                    inst.Operand = origOperand;
-                }
+                b.Inst.OpCode = b.Op;
+                b.Inst.Operand = b.Opnd;
             }
+
+            Logger.LogWarning("[CleanerKiller] Rollback in <Module>.cctor: neutralization of recognized protector hooks did not resolve structural defects. Original instructions restored.");
         }
 
         private static string ClassifyProtectorMethod(MethodDef method, bool resourcesDecrypted, bool constantsDecrypted, bool antiTamperDecrypted, CleanerResult result = null)
