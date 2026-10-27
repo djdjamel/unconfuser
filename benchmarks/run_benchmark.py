@@ -558,6 +558,7 @@ def run_all_benchmarks(
                     expected_baseline,
                     baseline_dll_path=real_target_module,
                     is_synthetic=False,
+                    timeout_sec=60,
                 )
                 results.append(res)
             except Exception as ex:
