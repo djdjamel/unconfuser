@@ -25,8 +25,11 @@ build/
 *.cexk.dll
 *.cexk-cleaned.dll
 *_final.dll
+*_clean.dll
+*_clean.exe
 *.orig.dll
 *.candidate.*
+tests/fixtures/
 benchmarks/fixtures/*
 !benchmarks/fixtures/real_confuserex/
 !benchmarks/fixtures/real_confuserex/**

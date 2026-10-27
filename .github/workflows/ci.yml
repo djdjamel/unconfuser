@@ -45,6 +45,9 @@ jobs:
     - name: Generate Synthetic Deobfuscation Fixtures
       run: dotnet .\benchmarks\FixtureGenerator\bin\Release\net8.0-windows\FixtureGenerator.dll --input benchmarks\BenignSample\bin\Release\net8.0\BenignSample.dll --output-dir benchmarks\fixtures
 
+    - name: Generate Behavioral Verification Fixtures
+      run: powershell -ExecutionPolicy Bypass -File scripts/Generate-VerificationFixtures.ps1
+
     - name: Provision ConfuserEx Toolchain
       run: python benchmarks/provision_confuserex.py
 
@@ -53,6 +56,9 @@ jobs:
 
     - name: Run C# Unit & Integration Tests
       run: dotnet test unconfuser.sln -c Release --no-build --verbosity normal
+
+    - name: Verify Benign Deobfuscated Output Safely
+      run: powershell -ExecutionPolicy Bypass -File scripts/Verify-DeobfuscatedBinary.ps1 -Target benchmarks/BenignSample/bin/Release/net48/BenignSample.exe -ReportJson benchmarks/verify_benign_report.json -CommitHash "${{ github.sha }}"
 
     - name: Run Deobfuscation Benchmark Suite
       if: success() || failure()
@@ -74,5 +80,6 @@ jobs:
         path: |
           benchmarks/benchmark_report.md
           benchmarks/benchmark_report.json
+          benchmarks/verify_benign_report.json
 
 
