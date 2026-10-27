@@ -246,10 +246,11 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
-        public void RealConfuserExAntiTamper_StaticExecution_BypassesEncryptedILWithoutCorrupting()
+        public void RealConfuserExAntiTamper_StaticExecution_StructurallyInvalidCandidate_IsRejectedAndNeverPromoted()
         {
             string fixturePath = GetFixturePath(Path.Combine("benchmarks", "fixtures", "real_confuserex_antitamper", "BenignSample.exe"));
             string outPath = Path.Combine(_testDir, "real_at_static.exe");
+            string reportPath = Path.Combine(_testDir, "real_at_static_report.json");
 
             int exitCode = Program.Main(new[]
             {
@@ -257,16 +258,18 @@ namespace ConfuserExKillerRunner.Tests
                 "-o", outPath,
                 "--no-de4dot",
                 "--no-netdetect",
-                "--strict-exit-codes"
+                "--strict-exit-codes",
+                "--json-report", reportPath
             });
 
-            // Static mode skips AntiTamper decryption and returns exit code 2
-            Assert.Equal(2, exitCode);
-            Assert.True(File.Exists(outPath));
+            // Structurally invalid static candidate (undecrypted encrypted IL) MUST be rejected with exit code 1
+            Assert.Equal(1, exitCode);
+            Assert.False(File.Exists(outPath));
+            Assert.True(File.Exists(reportPath));
 
-            using var module = ModuleDefMD.Load(outPath);
-            Assert.NotNull(module);
-            Assert.True(module.Types.Count > 0);
+            string json = File.ReadAllText(reportPath);
+            Assert.Contains("\"finalStatus\": \"FAILED\"", json);
+            Assert.Contains("\"exitCode\": 1", json);
         }
 
         [Fact]

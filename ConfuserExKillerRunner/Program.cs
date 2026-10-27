@@ -937,10 +937,15 @@ namespace ConfuserExKillerRunner
             }
             Console.WriteLine("===============================================================");
 
-            if (auditReport.Status == "FAILED" && (!staticAntiTamperDetected || regressions.Count > 0))
+            if (auditReport.Status == "FAILED")
             {
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine($"[!] Deobfuscation audit reported FAILED ({auditReport.Errors.Count} error(s)). Output candidate rejected.");
+                Console.WriteLine($"[*] Original input assembly preserved intact: {originalInputPath}");
+                if (File.Exists(finalOutputPath))
+                {
+                    Console.WriteLine($"[*] Existing output preserved intact: {finalOutputPath}");
+                }
                 Console.ResetColor();
 
                 if (!string.IsNullOrEmpty(jsonReportPath))
