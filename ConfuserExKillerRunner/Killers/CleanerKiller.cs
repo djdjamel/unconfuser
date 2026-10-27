@@ -1002,7 +1002,15 @@ namespace ConfuserExKillerRunner.Killers
             return false;
         }
 
-        private enum PeSymbolicKind
+        internal enum IntegerWidth
+        {
+            Unknown = 0,
+            Bit32 = 1,
+            Bit64 = 2,
+            Native = 3
+        }
+
+        internal enum PeSymbolicKind
         {
             None = 0,
             ModuleBase = 1,        // Proven origin from Marshal.GetHINSTANCE(...) (offset 0 from base)
@@ -1014,31 +1022,37 @@ namespace ConfuserExKillerRunner.Killers
             NumericOffset = 7      // Demonstrated numeric integer displacement
         }
 
-        private readonly struct PeSymbolicSlot : IEquatable<PeSymbolicSlot>
+        internal readonly struct PeSymbolicSlot : IEquatable<PeSymbolicSlot>
         {
             public readonly PeSymbolicKind Kind;
-            public readonly int? ConcreteValue;
+            public readonly long? ConcreteValue;
+            public readonly IntegerWidth Width;
 
-            public PeSymbolicSlot(PeSymbolicKind kind, int? concreteValue = null)
+            public PeSymbolicSlot(PeSymbolicKind kind, long? concreteValue = null, IntegerWidth width = IntegerWidth.Unknown)
             {
                 Kind = kind;
                 ConcreteValue = concreteValue;
+                Width = width;
             }
 
             public static readonly PeSymbolicSlot None = new(PeSymbolicKind.None);
-            public static readonly PeSymbolicSlot ModuleBase = new(PeSymbolicKind.ModuleBase, 0);
-            public static readonly PeSymbolicSlot PeHeaderOffset = new(PeSymbolicKind.PeHeaderOffset, 0x3C);
+            public static readonly PeSymbolicSlot ModuleBase = new(PeSymbolicKind.ModuleBase, null, IntegerWidth.Native);
+            public static readonly PeSymbolicSlot PeHeaderOffset = new(PeSymbolicKind.PeHeaderOffset, 0x3CL, IntegerWidth.Bit32);
             public static readonly PeSymbolicSlot PeHeaderField = new(PeSymbolicKind.PeHeaderField);
-            public static readonly PeSymbolicSlot Zero = new(PeSymbolicKind.Zero, 0);
+            public static readonly PeSymbolicSlot Zero = new(PeSymbolicKind.Zero, 0L, IntegerWidth.Bit32);
+            public static readonly PeSymbolicSlot Zero64 = new(PeSymbolicKind.Zero, 0L, IntegerWidth.Bit64);
             public static readonly PeSymbolicSlot NumericOffset = new(PeSymbolicKind.NumericOffset);
 
-            public bool Equals(PeSymbolicSlot other) => Kind == other.Kind && ConcreteValue == other.ConcreteValue;
+            public bool Equals(PeSymbolicSlot other) => Kind == other.Kind && ConcreteValue == other.ConcreteValue && Width == other.Width;
             public override bool Equals(object obj) => obj is PeSymbolicSlot other && Equals(other);
             public override int GetHashCode()
             {
                 unchecked
                 {
-                    return ((int)Kind * 397) ^ (ConcreteValue.HasValue ? ConcreteValue.Value : -1);
+                    int hash = (int)Kind * 397;
+                    hash = (hash * 397) ^ (ConcreteValue.HasValue ? ConcreteValue.Value.GetHashCode() : -1);
+                    hash = (hash * 397) ^ (int)Width;
+                    return hash;
                 }
             }
             public static bool operator ==(PeSymbolicSlot left, PeSymbolicSlot right) => left.Equals(right);
@@ -1051,32 +1065,36 @@ namespace ConfuserExKillerRunner.Killers
         // This displacement bound is used by the analyzer as a safe upper envelope for legitimate PE header structures.
         // It does not serve as a universal guarantee for non-standard PE files, but ensures that displacements
         // escaping beyond the first page cannot be misclassified as header manipulations.
-        private const int MaxPeHeaderDisplacement = 0x1000;
+        internal const int MaxPeHeaderDisplacement = 0x1000;
 
-        private static bool IsNumeric(PeSymbolicSlot v)
+        internal static bool IsNumeric(PeSymbolicSlot v)
         {
             return v.Kind == PeSymbolicKind.NumericOffset || v.Kind == PeSymbolicKind.Zero || v.Kind == PeSymbolicKind.PeHeaderOffset;
         }
 
-        private static bool IsAlignmentMask(int mask)
+        internal static bool IsAlignmentMask(long mask)
         {
-            return mask == -2 || mask == -4 || mask == -8 || mask == -16 || mask == -32 || mask == -64;
+            return mask == -2L || mask == -4L || mask == -8L || mask == -16L || mask == -32L || mask == -64L ||
+                   mask == 0xFFFFFFFEL || mask == 0xFFFFFFFCL || mask == 0xFFFFFFF8L || mask == 0xFFFFFFF0L || mask == 0xFFFFFFE0L || mask == 0xFFFFFFC0L ||
+                   mask == unchecked((long)0xFFFFFFFFFFFFFFFEL) || mask == unchecked((long)0xFFFFFFFFFFFFFFFCL) ||
+                   mask == unchecked((long)0xFFFFFFFFFFFFFFF8L) || mask == unchecked((long)0xFFFFFFFFFFFFFFF0L) ||
+                   mask == unchecked((long)0xFFFFFFFFFFFFFFE0L) || mask == unchecked((long)0xFFFFFFFFFFFFFFC0L);
         }
 
-        private static bool IsPeTarget(PeSymbolicSlot addr)
+        internal static bool IsPeTarget(PeSymbolicSlot addr)
         {
             return addr.Kind == PeSymbolicKind.ModuleBase ||
                    addr.Kind == PeSymbolicKind.PeDerivedAddress ||
                    addr.Kind == PeSymbolicKind.NtDerivedAddress;
         }
 
-        private static PeSymbolicSlot CreateNumericSlot(int val)
+        internal static PeSymbolicSlot CreateNumericSlot(long val, IntegerWidth width = IntegerWidth.Bit32)
         {
             if (val == 0)
-                return PeSymbolicSlot.Zero;
-            if (val == 0x3C || val == 60)
+                return width == IntegerWidth.Bit64 ? PeSymbolicSlot.Zero64 : PeSymbolicSlot.Zero;
+            if (val == 0x3C && (width == IntegerWidth.Bit32 || width == IntegerWidth.Unknown))
                 return PeSymbolicSlot.PeHeaderOffset;
-            return new PeSymbolicSlot(PeSymbolicKind.NumericOffset, val);
+            return new PeSymbolicSlot(PeSymbolicKind.NumericOffset, val, width);
         }
 
         private sealed class PeSymbolicState
@@ -1268,7 +1286,7 @@ namespace ConfuserExKillerRunner.Killers
             }
         }
 
-        private static void ExecuteSymbolicInstruction(
+        internal static void ExecuteSymbolicInstruction(
             Instruction inst,
             List<PeSymbolicSlot> stack,
             PeSymbolicSlot[] locals,
@@ -1288,12 +1306,118 @@ namespace ConfuserExKillerRunner.Killers
                 return;
             }
 
-            // 2. Type conversions / casts that preserve pointer tag
+            // 2. Type conversions / casts
             if (code == Code.Conv_I || code == Code.Conv_U || code == Code.Conv_I4 || code == Code.Conv_U4 ||
                 code == Code.Conv_I8 || code == Code.Conv_U8 ||
                 ((code == Code.Call || code == Code.Callvirt) && inst.Operand?.ToString().Contains("op_Explicit") == true))
             {
                 var val = PopStack(stack);
+                if (val.Kind == PeSymbolicKind.None)
+                {
+                    PushStack(stack, PeSymbolicSlot.None);
+                    return;
+                }
+
+                if (code == Code.Conv_I4)
+                {
+                    if (val.ConcreteValue.HasValue)
+                    {
+                        long res = (int)val.ConcreteValue.Value;
+                        PushStack(stack, CreateNumericSlot(res, IntegerWidth.Bit32));
+                    }
+                    else
+                    {
+                        PushStack(stack, new PeSymbolicSlot(val.Kind, null, IntegerWidth.Bit32));
+                    }
+                    return;
+                }
+                if (code == Code.Conv_U4)
+                {
+                    if (val.ConcreteValue.HasValue)
+                    {
+                        long res = (long)(uint)val.ConcreteValue.Value;
+                        PushStack(stack, CreateNumericSlot(res, IntegerWidth.Bit32));
+                    }
+                    else
+                    {
+                        PushStack(stack, new PeSymbolicSlot(val.Kind, null, IntegerWidth.Bit32));
+                    }
+                    return;
+                }
+                if (code == Code.Conv_I8)
+                {
+                    if (val.ConcreteValue.HasValue)
+                    {
+                        long res;
+                        if (val.Width == IntegerWidth.Bit32)
+                            res = (int)val.ConcreteValue.Value; // sign-extended
+                        else
+                            res = val.ConcreteValue.Value;
+                        PushStack(stack, CreateNumericSlot(res, IntegerWidth.Bit64));
+                    }
+                    else
+                    {
+                        PushStack(stack, new PeSymbolicSlot(val.Kind, null, IntegerWidth.Bit64));
+                    }
+                    return;
+                }
+                if (code == Code.Conv_U8)
+                {
+                    if (val.ConcreteValue.HasValue)
+                    {
+                        ulong uVal;
+                        if (val.Width == IntegerWidth.Bit32)
+                            uVal = (uint)val.ConcreteValue.Value; // zero-extended
+                        else
+                            uVal = (ulong)val.ConcreteValue.Value;
+                        PushStack(stack, CreateNumericSlot((long)uVal, IntegerWidth.Bit64));
+                    }
+                    else
+                    {
+                        PushStack(stack, new PeSymbolicSlot(val.Kind, null, IntegerWidth.Bit64));
+                    }
+                    return;
+                }
+                if (code == Code.Conv_I)
+                {
+                    bool is32 = IsGuaranteed32BitModule(module);
+                    bool is64 = IsGuaranteed64BitModule(module);
+                    if (val.ConcreteValue.HasValue)
+                    {
+                        if (is32)
+                            PushStack(stack, CreateNumericSlot((int)val.ConcreteValue.Value, IntegerWidth.Bit32));
+                        else if (is64)
+                            PushStack(stack, CreateNumericSlot(val.ConcreteValue.Value, IntegerWidth.Bit64));
+                        else
+                            PushStack(stack, new PeSymbolicSlot(val.Kind == PeSymbolicKind.Zero ? PeSymbolicKind.Zero : PeSymbolicKind.NumericOffset, null, IntegerWidth.Native));
+                    }
+                    else
+                    {
+                        PushStack(stack, new PeSymbolicSlot(val.Kind, null, IntegerWidth.Native));
+                    }
+                    return;
+                }
+                if (code == Code.Conv_U)
+                {
+                    bool is32 = IsGuaranteed32BitModule(module);
+                    bool is64 = IsGuaranteed64BitModule(module);
+                    if (val.ConcreteValue.HasValue)
+                    {
+                        if (is32)
+                            PushStack(stack, CreateNumericSlot((long)(uint)val.ConcreteValue.Value, IntegerWidth.Bit32));
+                        else if (is64)
+                            PushStack(stack, CreateNumericSlot(val.ConcreteValue.Value, IntegerWidth.Bit64));
+                        else
+                            PushStack(stack, new PeSymbolicSlot(val.Kind == PeSymbolicKind.Zero ? PeSymbolicKind.Zero : PeSymbolicKind.NumericOffset, null, IntegerWidth.Native));
+                    }
+                    else
+                    {
+                        PushStack(stack, new PeSymbolicSlot(val.Kind, null, IntegerWidth.Native));
+                    }
+                    return;
+                }
+
+                // General op_Explicit: preserve tag
                 PushStack(stack, val);
                 return;
             }
@@ -1302,7 +1426,7 @@ namespace ConfuserExKillerRunner.Killers
             if (inst.IsLdcI4())
             {
                 int val = inst.GetLdcI4Value();
-                PushStack(stack, CreateNumericSlot(val));
+                PushStack(stack, CreateNumericSlot(val, IntegerWidth.Bit32));
                 return;
             }
 
@@ -1310,14 +1434,11 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (inst.Operand is long lv)
                 {
-                    if (lv >= int.MinValue && lv <= int.MaxValue)
-                        PushStack(stack, CreateNumericSlot((int)lv));
-                    else
-                        PushStack(stack, new PeSymbolicSlot(PeSymbolicKind.NumericOffset, null));
+                    PushStack(stack, CreateNumericSlot(lv, IntegerWidth.Bit64));
                 }
                 else
                 {
-                    PushStack(stack, PeSymbolicSlot.NumericOffset);
+                    PushStack(stack, new PeSymbolicSlot(PeSymbolicKind.NumericOffset, null, IntegerWidth.Bit64));
                 }
                 return;
             }
@@ -1388,16 +1509,54 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var b = PopStack(stack);
                 var a = PopStack(stack);
-                if (a.Kind == PeSymbolicKind.Zero || b.Kind == PeSymbolicKind.Zero)
+                IntegerWidth width = (a.Width == IntegerWidth.Bit64 || b.Width == IntegerWidth.Bit64) ? IntegerWidth.Bit64 :
+                                     (a.Width == IntegerWidth.Native || b.Width == IntegerWidth.Native) ? IntegerWidth.Native : IntegerWidth.Bit32;
+
+                if (a.Kind == PeSymbolicKind.Zero || b.Kind == PeSymbolicKind.Zero ||
+                    (a.ConcreteValue.HasValue && a.ConcreteValue.Value == 0) ||
+                    (b.ConcreteValue.HasValue && b.ConcreteValue.Value == 0))
                 {
-                    PushStack(stack, PeSymbolicSlot.Zero);
+                    PushStack(stack, width == IntegerWidth.Bit64 ? PeSymbolicSlot.Zero64 : PeSymbolicSlot.Zero);
                 }
                 else if (IsNumeric(a) && IsNumeric(b))
                 {
                     if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
-                        PushStack(stack, CreateNumericSlot(unchecked(a.ConcreteValue.Value * b.ConcreteValue.Value)));
+                    {
+                        try
+                        {
+                            long res;
+                            if (code == Code.Mul)
+                            {
+                                if (width == IntegerWidth.Bit64)
+                                    res = unchecked(a.ConcreteValue.Value * b.ConcreteValue.Value);
+                                else
+                                    res = (long)unchecked((int)a.ConcreteValue.Value * (int)b.ConcreteValue.Value);
+                            }
+                            else if (code == Code.Mul_Ovf)
+                            {
+                                if (width == IntegerWidth.Bit64)
+                                    res = checked(a.ConcreteValue.Value * b.ConcreteValue.Value);
+                                else
+                                    res = checked((int)a.ConcreteValue.Value * (int)b.ConcreteValue.Value);
+                            }
+                            else // Mul_Ovf_Un
+                            {
+                                if (width == IntegerWidth.Bit64)
+                                    res = (long)checked((ulong)a.ConcreteValue.Value * (ulong)b.ConcreteValue.Value);
+                                else
+                                    res = (long)checked((uint)a.ConcreteValue.Value * (uint)b.ConcreteValue.Value);
+                            }
+                            PushStack(stack, CreateNumericSlot(res, width));
+                        }
+                        catch (OverflowException)
+                        {
+                            PushStack(stack, PeSymbolicSlot.None);
+                        }
+                    }
                     else
-                        PushStack(stack, PeSymbolicSlot.NumericOffset);
+                    {
+                        PushStack(stack, new PeSymbolicSlot(PeSymbolicKind.NumericOffset, null, width));
+                    }
                 }
                 else
                 {
@@ -1412,10 +1571,12 @@ namespace ConfuserExKillerRunner.Killers
                 var a = PopStack(stack);
                 if (IsNumeric(a) && IsNumeric(b))
                 {
+                    IntegerWidth width = (a.Width == IntegerWidth.Bit64 || b.Width == IntegerWidth.Bit64) ? IntegerWidth.Bit64 :
+                                         (a.Width == IntegerWidth.Native || b.Width == IntegerWidth.Native) ? IntegerWidth.Native : IntegerWidth.Bit32;
                     if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
-                        PushStack(stack, CreateNumericSlot(a.ConcreteValue.Value | b.ConcreteValue.Value));
+                        PushStack(stack, CreateNumericSlot(a.ConcreteValue.Value | b.ConcreteValue.Value, width));
                     else
-                        PushStack(stack, PeSymbolicSlot.NumericOffset);
+                        PushStack(stack, new PeSymbolicSlot(PeSymbolicKind.NumericOffset, null, width));
                 }
                 else
                 {
@@ -1428,21 +1589,22 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var b = PopStack(stack);
                 var a = PopStack(stack);
+                IntegerWidth width = (a.Width == IntegerWidth.Bit64 || b.Width == IntegerWidth.Bit64) ? IntegerWidth.Bit64 :
+                                     (a.Width == IntegerWidth.Native || b.Width == IntegerWidth.Native) ? IntegerWidth.Native : IntegerWidth.Bit32;
+
                 if (a.Kind == PeSymbolicKind.Zero && b.Kind == PeSymbolicKind.Zero)
                 {
-                    PushStack(stack, PeSymbolicSlot.Zero);
+                    PushStack(stack, width == IntegerWidth.Bit64 ? PeSymbolicSlot.Zero64 : PeSymbolicSlot.Zero);
                 }
                 else if (IsNumeric(a) && IsNumeric(b))
                 {
                     if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
-                        PushStack(stack, CreateNumericSlot(a.ConcreteValue.Value ^ b.ConcreteValue.Value));
+                        PushStack(stack, CreateNumericSlot(a.ConcreteValue.Value ^ b.ConcreteValue.Value, width));
                     else
-                        PushStack(stack, PeSymbolicSlot.NumericOffset);
+                        PushStack(stack, new PeSymbolicSlot(PeSymbolicKind.NumericOffset, null, width));
                 }
                 else
                 {
-                    // CRITICAL: Two unknown/abstract values (None) are NOT proven to be equal at runtime.
-                    // Xor of unknown operands strictly evaluates to None (never assumed to be Zero).
                     PushStack(stack, PeSymbolicSlot.None);
                 }
                 return;
@@ -1452,23 +1614,43 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var b = PopStack(stack);
                 var a = PopStack(stack);
-                if (a.Kind == PeSymbolicKind.Zero)
+                if (a.Kind == PeSymbolicKind.Zero || (a.ConcreteValue.HasValue && a.ConcreteValue.Value == 0))
                 {
-                    PushStack(stack, PeSymbolicSlot.Zero);
+                    PushStack(stack, a.Width == IntegerWidth.Bit64 ? PeSymbolicSlot.Zero64 : PeSymbolicSlot.Zero);
                 }
                 else if (IsNumeric(a) && IsNumeric(b))
                 {
                     if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
                     {
-                        int shift = b.ConcreteValue.Value & 0x1F;
-                        int res = code == Code.Shl ? (a.ConcreteValue.Value << shift) :
-                                  code == Code.Shr ? (a.ConcreteValue.Value >> shift) :
-                                  (int)((uint)a.ConcreteValue.Value >> shift);
-                        PushStack(stack, CreateNumericSlot(res));
+                        if (a.Width == IntegerWidth.Bit64)
+                        {
+                            int shift = (int)(b.ConcreteValue.Value & 0x3F);
+                            long res;
+                            if (code == Code.Shl)
+                                res = a.ConcreteValue.Value << shift;
+                            else if (code == Code.Shr)
+                                res = a.ConcreteValue.Value >> shift;
+                            else // Shr_Un
+                                res = (long)((ulong)a.ConcreteValue.Value >> shift);
+                            PushStack(stack, CreateNumericSlot(res, IntegerWidth.Bit64));
+                        }
+                        else
+                        {
+                            int shift = (int)(b.ConcreteValue.Value & 0x1F);
+                            int a32 = (int)a.ConcreteValue.Value;
+                            long res;
+                            if (code == Code.Shl)
+                                res = a32 << shift;
+                            else if (code == Code.Shr)
+                                res = a32 >> shift;
+                            else // Shr_Un
+                                res = (long)(uint)(a32 >> shift);
+                            PushStack(stack, CreateNumericSlot(res, IntegerWidth.Bit32));
+                        }
                     }
                     else
                     {
-                        PushStack(stack, PeSymbolicSlot.NumericOffset);
+                        PushStack(stack, new PeSymbolicSlot(PeSymbolicKind.NumericOffset, null, a.Width));
                     }
                 }
                 else
@@ -1482,13 +1664,17 @@ namespace ConfuserExKillerRunner.Killers
             {
                 var a = PopStack(stack);
                 if (a.Kind == PeSymbolicKind.Zero)
-                    PushStack(stack, PeSymbolicSlot.Zero);
+                    PushStack(stack, a);
                 else if (IsNumeric(a))
                 {
                     if (a.ConcreteValue.HasValue)
-                        PushStack(stack, CreateNumericSlot(unchecked(-a.ConcreteValue.Value)));
+                    {
+                        long res = a.Width == IntegerWidth.Bit64 ? unchecked(-a.ConcreteValue.Value) :
+                                   (long)unchecked(-(int)a.ConcreteValue.Value);
+                        PushStack(stack, CreateNumericSlot(res, a.Width));
+                    }
                     else
-                        PushStack(stack, PeSymbolicSlot.NumericOffset);
+                        PushStack(stack, new PeSymbolicSlot(PeSymbolicKind.NumericOffset, null, a.Width));
                 }
                 else
                     PushStack(stack, PeSymbolicSlot.None);
@@ -1501,9 +1687,13 @@ namespace ConfuserExKillerRunner.Killers
                 if (IsNumeric(a))
                 {
                     if (a.ConcreteValue.HasValue)
-                        PushStack(stack, CreateNumericSlot(~a.ConcreteValue.Value));
+                    {
+                        long res = a.Width == IntegerWidth.Bit64 ? ~a.ConcreteValue.Value :
+                                   (long)~(int)a.ConcreteValue.Value;
+                        PushStack(stack, CreateNumericSlot(res, a.Width));
+                    }
                     else
-                        PushStack(stack, PeSymbolicSlot.NumericOffset);
+                        PushStack(stack, new PeSymbolicSlot(PeSymbolicKind.NumericOffset, null, a.Width));
                 }
                 else
                     PushStack(stack, PeSymbolicSlot.None);
@@ -1590,14 +1780,14 @@ namespace ConfuserExKillerRunner.Killers
             for (int p = 0; p < pushesCount; p++) PushStack(stack, PeSymbolicSlot.None);
         }
 
-        private static PeSymbolicSlot CombineAdd(PeSymbolicSlot a, PeSymbolicSlot b)
+        internal static PeSymbolicSlot CombineAdd(PeSymbolicSlot a, PeSymbolicSlot b)
         {
             // Obvious arithmetic identity: X + 0 == X, 0 + X == X
-            if (b.Kind == PeSymbolicKind.Zero)
+            if (b.Kind == PeSymbolicKind.Zero || (b.Kind == PeSymbolicKind.NumericOffset && b.ConcreteValue.HasValue && b.ConcreteValue.Value == 0))
             {
                 return a;
             }
-            if (a.Kind == PeSymbolicKind.Zero)
+            if (a.Kind == PeSymbolicKind.Zero || (a.Kind == PeSymbolicKind.NumericOffset && a.ConcreteValue.HasValue && a.ConcreteValue.Value == 0))
             {
                 return b;
             }
@@ -1606,15 +1796,14 @@ namespace ConfuserExKillerRunner.Killers
             if ((a.Kind == PeSymbolicKind.ModuleBase && b.Kind == PeSymbolicKind.PeHeaderOffset) ||
                 (b.Kind == PeSymbolicKind.ModuleBase && a.Kind == PeSymbolicKind.PeHeaderOffset))
             {
-                return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, 0x3C);
+                return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, 0x3CL, IntegerWidth.Native);
             }
 
             // 2. Proven ModuleBase + PeHeaderField (specifically e_lfanew read from ModuleBase + 0x3C)
-            // Points to IMAGE_NT_HEADERS with relative cumulative displacement 0 from NT headers.
             if ((a.Kind == PeSymbolicKind.ModuleBase && b.Kind == PeSymbolicKind.PeHeaderField) ||
                 (b.Kind == PeSymbolicKind.ModuleBase && a.Kind == PeSymbolicKind.PeHeaderField))
             {
-                return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, 0);
+                return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, 0L, IntegerWidth.Native);
             }
 
             // 3. ModuleBase + Numeric displacement
@@ -1622,9 +1811,9 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (b.ConcreteValue.HasValue)
                 {
-                    int offset = b.ConcreteValue.Value;
+                    long offset = b.ConcreteValue.Value;
                     if (offset >= 0 && offset <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, offset);
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, offset, IntegerWidth.Native);
                 }
                 return PeSymbolicSlot.None;
             }
@@ -1632,24 +1821,21 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (a.ConcreteValue.HasValue)
                 {
-                    int offset = a.ConcreteValue.Value;
+                    long offset = a.ConcreteValue.Value;
                     if (offset >= 0 && offset <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, offset);
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, offset, IntegerWidth.Native);
                 }
                 return PeSymbolicSlot.None;
             }
 
             // 4. Cumulative offset calculation from already derived PE DOS/stub address:
-            // CRITICAL: The cumulative displacement from ModuleBase MUST be tracked and bounded
-            // within the PE header space (0 <= offset <= MaxPeHeaderDisplacement).
-            // If the position becomes unknown or exceeds bounds, provenance is lost!
             if (a.Kind == PeSymbolicKind.PeDerivedAddress && IsNumeric(b))
             {
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
                 {
-                    long cum = (long)a.ConcreteValue.Value + b.ConcreteValue.Value;
+                    long cum = a.ConcreteValue.Value + b.ConcreteValue.Value;
                     if (cum >= 0 && cum <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, (int)cum);
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, cum, a.Width);
                 }
                 return PeSymbolicSlot.None;
             }
@@ -1657,22 +1843,21 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (b.ConcreteValue.HasValue && a.ConcreteValue.HasValue)
                 {
-                    long cum = (long)b.ConcreteValue.Value + a.ConcreteValue.Value;
+                    long cum = b.ConcreteValue.Value + a.ConcreteValue.Value;
                     if (cum >= 0 && cum <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, (int)cum);
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, cum, b.Width);
                 }
                 return PeSymbolicSlot.None;
             }
 
             // 5. Cumulative offset calculation from NT headers:
-            // CRITICAL: Displacement from IMAGE_NT_HEADERS must remain within header bounds (|offset| <= MaxPeHeaderDisplacement).
             if (a.Kind == PeSymbolicKind.NtDerivedAddress && IsNumeric(b))
             {
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
                 {
-                    long cum = (long)a.ConcreteValue.Value + b.ConcreteValue.Value;
+                    long cum = a.ConcreteValue.Value + b.ConcreteValue.Value;
                     if (Math.Abs(cum) <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, (int)cum);
+                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, cum, a.Width);
                 }
                 return PeSymbolicSlot.None;
             }
@@ -1680,9 +1865,9 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (b.ConcreteValue.HasValue && a.ConcreteValue.HasValue)
                 {
-                    long cum = (long)b.ConcreteValue.Value + a.ConcreteValue.Value;
+                    long cum = b.ConcreteValue.Value + a.ConcreteValue.Value;
                     if (Math.Abs(cum) <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, (int)cum);
+                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, cum, b.Width);
                 }
                 return PeSymbolicSlot.None;
             }
@@ -1690,46 +1875,48 @@ namespace ConfuserExKillerRunner.Killers
             // 6. Numeric + Numeric -> Numeric
             if (IsNumeric(a) && IsNumeric(b))
             {
+                IntegerWidth width = (a.Width == IntegerWidth.Bit64 || b.Width == IntegerWidth.Bit64) ? IntegerWidth.Bit64 :
+                                     (a.Width == IntegerWidth.Native || b.Width == IntegerWidth.Native) ? IntegerWidth.Native : IntegerWidth.Bit32;
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
                 {
-                    return CreateNumericSlot(unchecked(a.ConcreteValue.Value + b.ConcreteValue.Value));
+                    long res = width == IntegerWidth.Bit64 ? unchecked(a.ConcreteValue.Value + b.ConcreteValue.Value) :
+                               (long)unchecked((int)a.ConcreteValue.Value + (int)b.ConcreteValue.Value);
+                    return CreateNumericSlot(res, width);
                 }
-                return PeSymbolicSlot.NumericOffset;
+                return new PeSymbolicSlot(PeSymbolicKind.NumericOffset, null, width);
             }
 
             return PeSymbolicSlot.None;
         }
 
-        private static PeSymbolicSlot CombineSub(PeSymbolicSlot a, PeSymbolicSlot b)
+        internal static PeSymbolicSlot CombineSub(PeSymbolicSlot a, PeSymbolicSlot b)
         {
             // Obvious arithmetic identity: X - 0 == X
-            if (b.Kind == PeSymbolicKind.Zero)
+            if (b.Kind == PeSymbolicKind.Zero || (b.Kind == PeSymbolicKind.NumericOffset && b.ConcreteValue.HasValue && b.ConcreteValue.Value == 0))
             {
                 return a;
             }
 
             // 1. PeDerivedAddress - NumericOffset
-            // Tracks cumulative displacement from ModuleBase. Must remain in [0, MaxPeHeaderDisplacement].
             if (a.Kind == PeSymbolicKind.PeDerivedAddress && IsNumeric(b))
             {
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
                 {
-                    long cum = (long)a.ConcreteValue.Value - b.ConcreteValue.Value;
+                    long cum = a.ConcreteValue.Value - b.ConcreteValue.Value;
                     if (cum >= 0 && cum <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, (int)cum);
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, cum, a.Width);
                 }
                 return PeSymbolicSlot.None;
             }
 
             // 2. NtDerivedAddress - NumericOffset
-            // Tracks cumulative displacement from NT headers. Must remain bounded.
             if (a.Kind == PeSymbolicKind.NtDerivedAddress && IsNumeric(b))
             {
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
                 {
-                    long cum = (long)a.ConcreteValue.Value - b.ConcreteValue.Value;
+                    long cum = a.ConcreteValue.Value - b.ConcreteValue.Value;
                     if (Math.Abs(cum) <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, (int)cum);
+                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, cum, a.Width);
                 }
                 return PeSymbolicSlot.None;
             }
@@ -1737,22 +1924,31 @@ namespace ConfuserExKillerRunner.Killers
             // 3. Numeric - Numeric -> Numeric
             if (IsNumeric(a) && IsNumeric(b))
             {
+                IntegerWidth width = (a.Width == IntegerWidth.Bit64 || b.Width == IntegerWidth.Bit64) ? IntegerWidth.Bit64 :
+                                     (a.Width == IntegerWidth.Native || b.Width == IntegerWidth.Native) ? IntegerWidth.Native : IntegerWidth.Bit32;
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
                 {
-                    return CreateNumericSlot(unchecked(a.ConcreteValue.Value - b.ConcreteValue.Value));
+                    long res = width == IntegerWidth.Bit64 ? unchecked(a.ConcreteValue.Value - b.ConcreteValue.Value) :
+                               (long)unchecked((int)a.ConcreteValue.Value - (int)b.ConcreteValue.Value);
+                    return CreateNumericSlot(res, width);
                 }
-                return PeSymbolicSlot.NumericOffset;
+                return new PeSymbolicSlot(PeSymbolicKind.NumericOffset, null, width);
             }
 
             return PeSymbolicSlot.None;
         }
 
-        private static PeSymbolicSlot CombineAnd(PeSymbolicSlot a, PeSymbolicSlot b)
+        internal static PeSymbolicSlot CombineAnd(PeSymbolicSlot a, PeSymbolicSlot b)
         {
-            // Obvious arithmetic identity: anything & 0 == 0
-            if (a.Kind == PeSymbolicKind.Zero || b.Kind == PeSymbolicKind.Zero)
+            // Rule: X & 0 = 0. Provenance of an address MUST NEVER survive a bitwise AND whose exact result is 0!
+            if (a.Kind == PeSymbolicKind.Zero || (a.Kind == PeSymbolicKind.NumericOffset && a.ConcreteValue.HasValue && a.ConcreteValue.Value == 0))
             {
-                return PeSymbolicSlot.Zero;
+                return a.Width == IntegerWidth.Bit64 ? PeSymbolicSlot.Zero64 : PeSymbolicSlot.Zero;
+            }
+
+            if (b.Kind == PeSymbolicKind.Zero || (b.Kind == PeSymbolicKind.NumericOffset && b.ConcreteValue.HasValue && b.ConcreteValue.Value == 0))
+            {
+                return b.Width == IntegerWidth.Bit64 ? PeSymbolicSlot.Zero64 : PeSymbolicSlot.Zero;
             }
 
             // ModuleBase & AlignmentMask -> ModuleBase
@@ -1766,14 +1962,13 @@ namespace ConfuserExKillerRunner.Killers
             }
 
             // Pointer alignment: PeDerivedAddress & AlignmentMask
-            // CRITICAL: Only legitimate pointer alignment masks (-2, -4, -8, -16, -32, -64) preserve provenance!
             if (a.Kind == PeSymbolicKind.PeDerivedAddress && b.ConcreteValue.HasValue && IsAlignmentMask(b.ConcreteValue.Value))
             {
                 if (a.ConcreteValue.HasValue)
                 {
-                    int masked = a.ConcreteValue.Value & b.ConcreteValue.Value;
+                    long masked = a.ConcreteValue.Value & b.ConcreteValue.Value;
                     if (masked >= 0 && masked <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, masked);
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, masked, a.Width);
                 }
                 return PeSymbolicSlot.None;
             }
@@ -1781,9 +1976,9 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (b.ConcreteValue.HasValue)
                 {
-                    int masked = b.ConcreteValue.Value & a.ConcreteValue.Value;
+                    long masked = b.ConcreteValue.Value & a.ConcreteValue.Value;
                     if (masked >= 0 && masked <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, masked);
+                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, masked, b.Width);
                 }
                 return PeSymbolicSlot.None;
             }
@@ -1793,9 +1988,9 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (a.ConcreteValue.HasValue)
                 {
-                    int masked = a.ConcreteValue.Value & b.ConcreteValue.Value;
+                    long masked = a.ConcreteValue.Value & b.ConcreteValue.Value;
                     if (Math.Abs(masked) <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, masked);
+                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, masked, a.Width);
                 }
                 return PeSymbolicSlot.None;
             }
@@ -1803,9 +1998,9 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (b.ConcreteValue.HasValue)
                 {
-                    int masked = b.ConcreteValue.Value & a.ConcreteValue.Value;
+                    long masked = b.ConcreteValue.Value & a.ConcreteValue.Value;
                     if (Math.Abs(masked) <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, masked);
+                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, masked, b.Width);
                 }
                 return PeSymbolicSlot.None;
             }
@@ -1813,14 +2008,46 @@ namespace ConfuserExKillerRunner.Killers
             // Numeric & Numeric
             if (IsNumeric(a) && IsNumeric(b))
             {
+                IntegerWidth width = (a.Width == IntegerWidth.Bit64 || b.Width == IntegerWidth.Bit64) ? IntegerWidth.Bit64 :
+                                     (a.Width == IntegerWidth.Native || b.Width == IntegerWidth.Native) ? IntegerWidth.Native : IntegerWidth.Bit32;
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
                 {
-                    return CreateNumericSlot(a.ConcreteValue.Value & b.ConcreteValue.Value);
+                    long res = a.ConcreteValue.Value & b.ConcreteValue.Value;
+                    return CreateNumericSlot(res, width);
                 }
-                return PeSymbolicSlot.NumericOffset;
+                return new PeSymbolicSlot(PeSymbolicKind.NumericOffset, null, width);
             }
 
             return PeSymbolicSlot.None;
+        }
+
+        internal static bool IsGuaranteed64BitModule(ModuleDef module)
+        {
+            if (module == null)
+                return false;
+
+            if (module.IsAMD64 || module.IsARM64 || module.IsIA64)
+                return true;
+
+            if (module.Machine == Machine.AMD64 ||
+                module.Machine == Machine.ARM64 ||
+                module.Machine == Machine.IA64)
+            {
+                return true;
+            }
+
+            if (!string.IsNullOrEmpty(module.Location) && File.Exists(module.Location))
+            {
+                try
+                {
+                    var arch = ArchitectureDetector.Detect(module.Location);
+                    if (arch.Architecture == TargetArchitecture.X64)
+                        return true;
+                }
+                catch { }
+            }
+
+            return false;
         }
 
         private static bool IsGuaranteed32BitModule(ModuleDef module)
