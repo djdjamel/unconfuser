@@ -635,7 +635,7 @@ namespace ConfuserExTools.ProxyKiller
 				return false;
 			}
 
-			var targetSig = targetMethod.MethodSig;
+			var targetSig = GetEffectiveMethodSig(targetMethod);
 			if (targetSig == null)
 			{
 				failureReason = "Cannot resolve target method signature";
@@ -803,7 +803,7 @@ namespace ConfuserExTools.ProxyKiller
 				return false;
 			}
 
-			var targetSig = targetMethod.MethodSig;
+			var targetSig = GetEffectiveMethodSig(targetMethod);
 			if (targetSig == null)
 			{
 				failureReason = "Cannot resolve target method signature";
@@ -845,7 +845,7 @@ namespace ConfuserExTools.ProxyKiller
 					return false;
 				}
 
-				for (int p = 1; p < paramCount; p++)
+				for (int p = 0; p < paramCount; p++)
 				{
 					if (!TypesMatch(method.Parameters[p].Type, targetSig.Params[p]))
 					{
@@ -927,6 +927,65 @@ namespace ConfuserExTools.ProxyKiller
 				}
 			}
 			return null;
+		}
+
+		private static TypeSig SubstituteGeneric(TypeSig sig, IList<TypeSig> typeGenArgs, IList<TypeSig> methodGenArgs)
+		{
+			if (sig == null) return null;
+			if (sig is GenericMVar mvar && methodGenArgs != null && mvar.Number < (uint)methodGenArgs.Count)
+				return methodGenArgs[(int)mvar.Number];
+			if (sig is GenericVar gvar && typeGenArgs != null && gvar.Number < (uint)typeGenArgs.Count)
+				return typeGenArgs[(int)gvar.Number];
+			if (sig is ByRefSig byRef)
+				return new ByRefSig(SubstituteGeneric(byRef.Next, typeGenArgs, methodGenArgs));
+			if (sig is PtrSig ptr)
+				return new PtrSig(SubstituteGeneric(ptr.Next, typeGenArgs, methodGenArgs));
+			if (sig is SZArraySig sz)
+				return new SZArraySig(SubstituteGeneric(sz.Next, typeGenArgs, methodGenArgs));
+			if (sig is ArraySig arr)
+				return new ArraySig(SubstituteGeneric(arr.Next, typeGenArgs, methodGenArgs), arr.Rank, arr.Sizes, arr.LowerBounds);
+			if (sig is GenericInstSig gis)
+			{
+				var newArgs = new List<TypeSig>(gis.GenericArguments.Count);
+				foreach (var arg in gis.GenericArguments)
+					newArgs.Add(SubstituteGeneric(arg, typeGenArgs, methodGenArgs));
+				return new GenericInstSig(gis.GenericType, newArgs);
+			}
+			return sig;
+		}
+
+		private static MethodSig GetEffectiveMethodSig(IMethod targetMethod)
+		{
+			if (targetMethod == null) return null;
+			var sig = targetMethod.MethodSig;
+			if (sig == null) return null;
+
+			IList<TypeSig> typeGenArgs = null;
+			IList<TypeSig> methodGenArgs = null;
+
+			if (targetMethod is MethodSpec ms && ms.GenericInstMethodSig != null)
+			{
+				methodGenArgs = ms.GenericInstMethodSig.GenericArguments;
+				if (ms.Method is MemberRef mr && mr.Class is TypeSpec ts && ts.TypeSig is GenericInstSig gis)
+				{
+					typeGenArgs = gis.GenericArguments;
+				}
+			}
+			else if (targetMethod is MemberRef mr2 && mr2.Class is TypeSpec ts2 && ts2.TypeSig is GenericInstSig gis2)
+			{
+				typeGenArgs = gis2.GenericArguments;
+			}
+
+			if (typeGenArgs == null && methodGenArgs == null)
+				return sig;
+
+			var newSig = sig.Clone();
+			newSig.RetType = SubstituteGeneric(newSig.RetType, typeGenArgs, methodGenArgs);
+			for (int i = 0; i < newSig.Params.Count; i++)
+			{
+				newSig.Params[i] = SubstituteGeneric(newSig.Params[i], typeGenArgs, methodGenArgs);
+			}
+			return newSig;
 		}
 
 		private static bool TypesMatch(TypeSig a, TypeSig b)

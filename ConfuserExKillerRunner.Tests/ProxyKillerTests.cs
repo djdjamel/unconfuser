@@ -794,5 +794,408 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(target, callProxyInst.Operand);
             Assert.DoesNotContain(proxy, hostType.Methods);
         }
+
+        #region Phase 4 — Robustness & Incompatible Signatures Regression Tests
+
+        [Fact]
+        public void TryAnalyzeInstanceProxy_TargetIsStaticMethod_WithMatchingParams_Recognized()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var hostType = new TypeDefUser("HostType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(hostType);
+
+            // Static target taking (HostType, int)
+            var staticTarget = new MethodDefUser("StaticTarget",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, hostType.ToTypeSig(), module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static);
+            hostType.Methods.Add(staticTarget);
+
+            // Instance proxy: this (HostType) is param 0, int is param 1
+            var proxy = new MethodDefUser("InstanceProxy_ToStatic",
+                MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, staticTarget));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            hostType.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeInstanceProxy(proxy, ignoreAccess: false, out var callInst, out var reason);
+            Assert.True(ok, reason);
+            Assert.NotNull(callInst);
+            Assert.Equal(staticTarget, callInst.Operand);
+            Assert.Equal(OpCodes.Call, callInst.OpCode);
+        }
+
+        [Fact]
+        public void TryAnalyzeInstanceProxy_TargetIsStaticMethod_MismatchParam0_Rejected()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var hostType = new TypeDefUser("HostType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(hostType);
+
+            // Static target taking (string, int), but proxy passes this (HostType) as param 0
+            var staticTarget = new MethodDefUser("StaticTarget",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.String, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static);
+            hostType.Methods.Add(staticTarget);
+
+            var proxy = new MethodDefUser("InstanceProxy_MismatchParam0",
+                MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, staticTarget));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            hostType.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeInstanceProxy(proxy, ignoreAccess: false, out var callInst, out var reason);
+            Assert.False(ok);
+            Assert.Contains("Parameter 0 type mismatch", reason);
+        }
+
+        [Fact]
+        public void TryAnalyzeClassicProxy_IncompatibleParameterType_Rejected()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            // Target expects string
+            var target = new MethodDefUser("Target", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.String));
+            type.Methods.Add(target);
+
+            // Proxy declares int
+            var proxy = new MethodDefUser("Proxy_BadType",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeClassicProxy(proxy, ignoreAccess: false, out _, out var reason);
+            Assert.False(ok);
+            Assert.Contains("type mismatch", reason);
+        }
+
+        [Fact]
+        public void TryAnalyzeClassicProxy_IncompatibleReturnType_Rejected()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            // Target returns string
+            var target = new MethodDefUser("Target", MethodSig.CreateStatic(module.CorLibTypes.String, module.CorLibTypes.Int32));
+            type.Methods.Add(target);
+
+            // Proxy returns int
+            var proxy = new MethodDefUser("Proxy_BadRet",
+                MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeClassicProxy(proxy, ignoreAccess: false, out _, out var reason);
+            Assert.False(ok);
+            Assert.Contains("Return type mismatch", reason);
+        }
+
+        [Fact]
+        public void TryAnalyzeClassicProxy_RefAndOutParameters_PreservedWhenMatching()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            var byRefInt = new ByRefSig(module.CorLibTypes.Int32);
+            var target = new MethodDefUser("TargetWithRef", MethodSig.CreateStatic(module.CorLibTypes.Void, byRefInt));
+            type.Methods.Add(target);
+
+            var proxy = new MethodDefUser("Proxy_Ref",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, byRefInt),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeClassicProxy(proxy, ignoreAccess: false, out var callInst, out var reason);
+            Assert.True(ok, reason);
+            Assert.NotNull(callInst);
+            Assert.Equal(target, callInst.Operand);
+        }
+
+        [Fact]
+        public void TryAnalyzeClassicProxy_RefAndOutParameters_RejectedWhenMismatch()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            var byRefInt = new ByRefSig(module.CorLibTypes.Int32);
+            var target = new MethodDefUser("TargetWithRef", MethodSig.CreateStatic(module.CorLibTypes.Void, byRefInt));
+            type.Methods.Add(target);
+
+            // Proxy passes regular int instead of ByRef int
+            var proxy = new MethodDefUser("Proxy_ByVal",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeClassicProxy(proxy, ignoreAccess: false, out _, out var reason);
+            Assert.False(ok);
+            Assert.Contains("type mismatch", reason);
+        }
+
+        [Fact]
+        public void TryAnalyzeClassicProxy_GenericMethodCall_RecognizedWhenTypesMatch()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            // Target generic method instantiation MethodSpec: Target<int>(int)
+            var genTarget = new MethodDefUser("GenericTarget",
+                MethodSig.CreateStatic(new GenericMVar(0), new GenericMVar(0)),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static);
+            genTarget.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+            type.Methods.Add(genTarget);
+
+            var methodSpec = new MethodSpecUser(genTarget, new GenericInstMethodSig(module.CorLibTypes.Int32));
+
+            var proxy = new MethodDefUser("Proxy_Generic",
+                MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, methodSpec));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeClassicProxy(proxy, ignoreAccess: false, out var callInst, out var reason);
+            Assert.True(ok, reason);
+            Assert.NotNull(callInst);
+            Assert.Equal(methodSpec, callInst.Operand);
+        }
+
+        [Fact]
+        public void TryAnalyzeClassicProxy_TargetSigNull_Unresolvable_Rejected()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            // Target MemberRef with null signature
+            var targetWithNullSig = new MemberRefUser(module, "Unresolvable", (MethodSig)null, type);
+
+            var proxy = new MethodDefUser("Proxy_NullSig",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, targetWithNullSig));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeClassicProxy(proxy, ignoreAccess: false, out _, out var reason);
+            Assert.False(ok);
+            Assert.Contains("Cannot resolve target method signature", reason);
+        }
+
+        [Fact]
+        public void TryAnalyzeClassicProxy_WithBranchInstruction_Rejected()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            var target = new MethodDefUser("Target", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32));
+            type.Methods.Add(target);
+
+            // Proxy containing a branch
+            var proxy = new MethodDefUser("Proxy_WithBranch",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var branchTarget = Instruction.Create(OpCodes.Ldarg_0);
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Br_S, branchTarget));
+            proxy.Body.Instructions.Add(branchTarget);
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeClassicProxy(proxy, ignoreAccess: false, out _, out var reason);
+            Assert.False(ok);
+        }
+
+        [Fact]
+        public void TryAnalyzeClassicProxy_WithExceptionHandler_Rejected()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            var target = new MethodDefUser("Target", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32));
+            type.Methods.Add(target);
+
+            var proxy = new MethodDefUser("Proxy_WithEH",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var tryStart = Instruction.Create(OpCodes.Ldarg_0);
+            var tryEnd = Instruction.Create(OpCodes.Call, target);
+            var handlerStart = Instruction.Create(OpCodes.Pop);
+            var handlerEnd = Instruction.Create(OpCodes.Ret);
+
+            proxy.Body.Instructions.Add(tryStart);
+            proxy.Body.Instructions.Add(tryEnd);
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Leave, handlerEnd));
+            proxy.Body.Instructions.Add(handlerStart);
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Leave, handlerEnd));
+            proxy.Body.Instructions.Add(handlerEnd);
+
+            proxy.Body.ExceptionHandlers.Add(new ExceptionHandler(ExceptionHandlerType.Catch)
+            {
+                TryStart = tryStart,
+                TryEnd = handlerStart,
+                HandlerStart = handlerStart,
+                HandlerEnd = handlerEnd,
+                CatchType = module.CorLibTypes.Object.TypeDefOrRef
+            });
+            type.Methods.Add(proxy);
+
+            bool ok = ProxyKillerImpl.TryAnalyzeClassicProxy(proxy, ignoreAccess: false, out _, out var reason);
+            Assert.False(ok);
+            Assert.Contains("contains exception handlers", reason);
+        }
+
+        [Fact]
+        public void TryAnalyzeClassicProxy_ApplicationMethodNotPrivateScope_RejectedWhenIgnoreAccessFalse()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var type = new TypeDefUser("TestType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            var target = new MethodDefUser("Target", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32));
+            type.Methods.Add(target);
+
+            // Public application wrapper method
+            var appMethod = new MethodDefUser("PublicWrapper",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            appMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            appMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target));
+            appMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(appMethod);
+
+            // Without ignoreAccess=true, public application methods MUST NEVER be classified as proxies!
+            bool ok = ProxyKillerImpl.TryAnalyzeClassicProxy(appMethod, ignoreAccess: false, out _, out var reason);
+            Assert.False(ok);
+            Assert.Contains("not PrivateScope", reason);
+        }
+
+        [Fact]
+        public void Execute_InliningRollsBackIfCallerBecomesStructurallyInvalid()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var hostType = new TypeDefUser("HostType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(hostType);
+
+            var target = new MethodDefUser("TargetMethod",
+                MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static);
+            hostType.Methods.Add(target);
+
+            var proxy = new MethodDefUser("Proxy_Target",
+                MethodSig.CreateStatic(module.CorLibTypes.Int32, module.CorLibTypes.Int32),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.PrivateScope | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target));
+            proxy.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            hostType.Methods.Add(proxy);
+
+            var userType = new TypeDefUser("UserType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(userType);
+
+            // Caller has a pre-existing structural defect (e.g. stack underflow at entry)
+            var defectiveCaller = new MethodDefUser("DefectiveCaller",
+                MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Public | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            defectiveCaller.Body.Instructions.Add(Instruction.Create(OpCodes.Pop)); // Underflow!
+            defectiveCaller.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1));
+            var callProxy = Instruction.Create(OpCodes.Call, proxy);
+            defectiveCaller.Body.Instructions.Add(callProxy);
+            defectiveCaller.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            defectiveCaller.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            userType.Methods.Add(defectiveCaller);
+
+            int restored = ProxyKillerImpl.Execute(module, ignoreAccess: false, removeProxyMethods: true);
+
+            // Because caller failed structural audit, the rewrite in defectiveCaller rolled back!
+            Assert.Equal(0, restored);
+            Assert.Equal(proxy, defectiveCaller.Body.Instructions[2].Operand);
+            Assert.Contains(proxy, hostType.Methods); // Proxy retained
+        }
+
+        #endregion
     }
 }
