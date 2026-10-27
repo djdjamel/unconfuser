@@ -261,7 +261,7 @@ namespace ConfuserExKillerRunner.Killers
                     var declType = m.DeclaringType;
                     if (declType != null && declType.Methods.Contains(m))
                     {
-                        if (!IsReferencedInModule(module, m))
+                        if (!IsReferencedInModule(module, m, methodsToRemove))
                         {
                             declType.Methods.Remove(m);
                             result.RemovedMethodsCount++;
@@ -281,11 +281,17 @@ namespace ConfuserExKillerRunner.Killers
                     var declType = sub.DeclaringType;
                     if (declType != null && declType.Methods.Contains(sub))
                     {
-                        if (!IsReferencedInModule(module, sub))
+                        if (!IsReferencedInModule(module, sub, methodsToRemove))
                         {
                             declType.Methods.Remove(sub);
                             result.RemovedMethodsCount++;
                             Logger.LogInfo($"[CleanerKiller] Removed unused subsidiary protector method {sub.Name} from {declType.Name}");
+                        }
+                        else
+                        {
+                            string msg = $"Retaining subsidiary method {sub.Name} in {declType.Name}: live references remain outside stripped hooks.";
+                            Logger.LogWarning($"[CleanerKiller] {msg}");
+                            result.RetainedHooksDetails.Add(msg);
                         }
                     }
                 }
@@ -299,8 +305,8 @@ namespace ConfuserExKillerRunner.Killers
                         string fn = m.ImplMap.Name?.String ?? m.Name.String;
                         if (IsProtectorPinvoke(fn))
                         {
-                            // Check if any other method still calls this pinvoke
-                            if (!IsReferencedInModule(module, m))
+                            // Check if any other method still calls this pinvoke, and never remove public P/Invokes
+                            if (!m.IsPublic && !IsReferencedInModule(module, m, methodsToRemove))
                                 pinvokesToRemove.Add(m);
                         }
                     }
@@ -676,6 +682,46 @@ namespace ConfuserExKillerRunner.Killers
                     });
                     return null;
                 }
+
+                // Check signature: ConfuserEx Anti-Debug hook takes 0 parameters and returns void
+                if (method.Parameters.Count > 0 || (method.ReturnType != null && method.ReturnType.ElementType != ElementType.Void))
+                {
+                    string msg = $"Retaining method {method.Name} in <Module>.cctor: signature has parameters or non-void return type (application diagnostic).";
+                    Logger.LogWarning($"[CleanerKiller] {msg}");
+                    result?.RetainedHooksDetails.Add(msg);
+                    result?.HookRecords.Add(new HookTraceRecord
+                    {
+                        HookId = $"Hook_Diagnostic_{method.Name}",
+                        HookType = "Application-Diagnostic",
+                        DeclaringType = method.DeclaringType?.FullName ?? "<Module>",
+                        MethodName = method.Name?.String ?? string.Empty,
+                        Action = "Retained",
+                        Reason = msg,
+                        Confidence = "HIGH"
+                    });
+                    return null;
+                }
+
+                // Check for confirmed ConfuserEx Anti-Debug behavior: termination (FailFast/Kill/ExitProcess) or watchdog thread
+                bool hasTerminationOrWatchdog = HasAntiDebugTerminationOrWatchdog(method);
+                if (!hasTerminationOrWatchdog)
+                {
+                    string msg = $"Retaining method {method.Name} in <Module>.cctor: contains debugger check but lacks confirmed ConfuserEx termination (FailFast/Kill) or watchdog thread pattern (application diagnostic).";
+                    Logger.LogWarning($"[CleanerKiller] {msg}");
+                    result?.RetainedHooksDetails.Add(msg);
+                    result?.HookRecords.Add(new HookTraceRecord
+                    {
+                        HookId = $"Hook_Diagnostic_{method.Name}",
+                        HookType = "Application-Diagnostic",
+                        DeclaringType = method.DeclaringType?.FullName ?? "<Module>",
+                        MethodName = method.Name?.String ?? string.Empty,
+                        Action = "Retained",
+                        Reason = msg,
+                        Confidence = "MEDIUM"
+                    });
+                    return null;
+                }
+
                 return "Anti-Debug";
             }
 
@@ -974,6 +1020,59 @@ namespace ConfuserExKillerRunner.Killers
                    string.Equals(name, "CheckRemoteDebuggerPresent", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(name, "OutputDebugStringA", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(name, "OutputDebugStringW", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool HasAntiDebugTerminationOrWatchdog(MethodDef method)
+        {
+            if (method == null || !method.HasBody || method.Body.Instructions == null)
+                return false;
+
+            bool hasTerminateCall = false;
+            bool hasWatchdogThread = false;
+
+            foreach (var inst in method.Body.Instructions)
+            {
+                if (inst.OpCode == OpCodes.Ldstr && inst.Operand is string s)
+                {
+                    if (s.IndexOf("ENABLE_PROFILING", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        s.IndexOf("COR_ENABLE_PROFILING", StringComparison.OrdinalIgnoreCase) >= 0)
+                        return true;
+                }
+
+                if (inst.Operand is IMethod called)
+                {
+                    string fn = called.FullName;
+                    string pinvokeName = null;
+                    var calledDef = called.ResolveMethodDef() ?? (called as MethodDef);
+                    if (calledDef != null && calledDef.IsPinvokeImpl && calledDef.ImplMap != null)
+                        pinvokeName = calledDef.ImplMap.Name?.String ?? calledDef.Name?.String;
+
+                    if (fn.IndexOf("FailFast", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        fn.IndexOf("Kill", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        string.Equals(pinvokeName, "ExitProcess", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(pinvokeName, "TerminateProcess", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasTerminateCall = true;
+                    }
+
+                    if (fn.IndexOf("Thread::Start", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        hasWatchdogThread = true;
+                    }
+                }
+
+                if (inst.OpCode == OpCodes.Ldftn && inst.Operand is IMethod delegated)
+                {
+                    var delDef = delegated.ResolveMethodDef() ?? (delegated as MethodDef);
+                    if (delDef != null && delDef.HasBody && delDef.DeclaringType != null && delDef.DeclaringType.IsGlobalModuleType)
+                    {
+                        if (HasAntiDebugTerminationOrWatchdog(delDef))
+                            hasWatchdogThread = true;
+                    }
+                }
+            }
+
+            return hasTerminateCall || hasWatchdogThread;
         }
 
         private static bool IsConfuserAntiDebugMethod(MethodDef method)
@@ -2420,20 +2519,55 @@ namespace ConfuserExKillerRunner.Killers
             return t >= s && t < e;
         }
 
-        internal static bool IsReferencedInModule(ModuleDef module, MethodDef target)
+        internal static bool IsReferencedInModule(ModuleDef module, MethodDef target, IEnumerable<MethodDef> excludedMethods = null)
         {
             if (module == null || target == null) return false;
+
+            // Rule 1: A public method on a normal (non-global) type or unmanaged export can be invoked from outside the module
+            if (target.IsPublic && (target.DeclaringType == null || !target.DeclaringType.IsGlobalModuleType))
+                return true;
+
+            // Rule 2: Module or Assembly entry point can never be deleted
+            if (module.EntryPoint == target || (module.Assembly?.ManifestModule != null && module.Assembly.ManifestModule.EntryPoint == target))
+                return true;
+
+            var excluded = excludedMethods != null ? new HashSet<MethodDef>(excludedMethods) : new HashSet<MethodDef>();
+            excluded.Add(target);
+
             foreach (var type in module.GetTypes())
             {
                 foreach (var method in type.Methods)
                 {
-                    if (!method.HasBody || method == target) continue;
+                    if (!method.HasBody || method.Body.Instructions == null || excluded.Contains(method))
+                        continue;
+
                     foreach (var inst in method.Body.Instructions)
                     {
-                        if (inst.Operand is IMethod called && (called.ResolveMethodDef() == target || called == target))
+                        // Check direct and indirect calls (call, callvirt, ldftn, ldvirtftn)
+                        if (inst.Operand is IMethod called)
+                        {
+                            var resolved = called.ResolveMethodDef() ?? (called as MethodDef);
+                            if (resolved == target || called == target)
+                                return true;
+                        }
+                        else if (inst.Operand is MethodDef md && md == target)
+                        {
                             return true;
-                        if (inst.Operand is MethodDef md && md == target)
+                        }
+
+                        // Check ldtoken Method
+                        if (inst.OpCode == OpCodes.Ldtoken && inst.Operand is IMethod tokenMethod)
+                        {
+                            var resolved = tokenMethod.ResolveMethodDef() ?? (tokenMethod as MethodDef);
+                            if (resolved == target || tokenMethod == target)
+                                return true;
+                        }
+
+                        // Check reflection string literals loading target method name (e.g. Type.GetMethod("methodName"))
+                        if (inst.OpCode == OpCodes.Ldstr && inst.Operand is string s && s == target.Name.String)
+                        {
                             return true;
+                        }
                     }
                 }
             }

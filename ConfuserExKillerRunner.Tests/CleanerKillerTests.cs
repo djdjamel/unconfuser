@@ -4234,5 +4234,286 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         #endregion
+
+        #region Phase 6 False Positive Anti-Debug & Anti-Dump Tests
+
+        [Fact]
+        public void StripProtectorHooks_ApplicationDiagnosticReturningBool_IsRetained()
+        {
+            var module = new ModuleDefUser("AppMod");
+            var globalType = module.GlobalType;
+
+            // Application method CheckDebugger returns bool and only calls Debugger.IsAttached (diagnostic)
+            var diagMethod = new MethodDefUser("CheckDebugger", MethodSig.CreateStatic(module.CorLibTypes.Boolean))
+            {
+                Body = new CilBody()
+            };
+            var isAttachedRef = new MemberRefUser(module, "get_IsAttached",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean),
+                new TypeRefUser(module, "System.Diagnostics", "Debugger", module.CorLibTypes.AssemblyRef));
+            diagMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, isAttachedRef));
+            diagMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(diagMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, diagMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Diagnostic method returning bool must be RETAINED and NOT stripped
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Contains(diagMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_ApplicationDiagnosticVoidWithoutTermination_IsRetained()
+        {
+            var module = new ModuleDefUser("AppMod");
+            var globalType = module.GlobalType;
+
+            // Void method checking Debugger.IsLogging but without FailFast or Kill
+            var diagMethod = new MethodDefUser("LogDebuggerState", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var isLoggingRef = new MemberRefUser(module, "IsLogging",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean),
+                new TypeRefUser(module, "System.Diagnostics", "Debugger", module.CorLibTypes.AssemblyRef));
+            diagMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, isLoggingRef));
+            diagMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            diagMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(diagMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, diagMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Without termination or watchdog thread, it is an application diagnostic: RETAINED
+            Assert.Equal(0, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Call, cctor.Body.Instructions[0].OpCode);
+            Assert.Contains(diagMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_ConfirmedConfuserAntiDebugWithFailFast_IsStripped()
+        {
+            var module = new ModuleDefUser("AppMod");
+            var globalType = module.GlobalType;
+
+            // ConfuserEx Anti-Debug pattern: checks Debugger.IsAttached AND calls FailFast
+            var antiDebugMethod = new MethodDefUser("ConfuserAntiDebug", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var isAttachedRef = new MemberRefUser(module, "get_IsAttached",
+                MethodSig.CreateStatic(module.CorLibTypes.Boolean),
+                new TypeRefUser(module, "System.Diagnostics", "Debugger", module.CorLibTypes.AssemblyRef));
+            var failFastRef = new MemberRefUser(module, "FailFast",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.String),
+                new TypeRefUser(module, "System", "Environment", module.CorLibTypes.AssemblyRef));
+
+            var retIns = Instruction.Create(OpCodes.Ret);
+            antiDebugMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, isAttachedRef));
+            antiDebugMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Brfalse_S, retIns));
+            antiDebugMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            antiDebugMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, failFastRef));
+            antiDebugMethod.Body.Instructions.Add(retIns);
+            globalType.Methods.Add(antiDebugMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, antiDebugMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Confirmed ConfuserEx Anti-Debug: stripped!
+            Assert.Equal(1, result.StrippedHooksCount);
+            Assert.True(result.AntiDebugStripped);
+            Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
+            Assert.DoesNotContain(antiDebugMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_ConfirmedConfuserAntiDebugWithWatchdogThread_IsStripped()
+        {
+            var module = new ModuleDefUser("AppMod");
+            var globalType = module.GlobalType;
+
+            // Worker thread method that checks ENABLE_PROFILING
+            var workerMethod = new MethodDefUser("WatchdogWorker", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            workerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "ENABLE_PROFILING"));
+            workerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            workerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(workerMethod);
+
+            // Main hook method that starts the thread
+            var antiDebugMethod = new MethodDefUser("ConfuserAntiDebugThread", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            var threadStartCtor = new MemberRefUser(module, ".ctor",
+                MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.Object, module.CorLibTypes.IntPtr),
+                new TypeRefUser(module, "System.Threading", "ThreadStart", module.CorLibTypes.AssemblyRef));
+            var threadType = new TypeRefUser(module, "System.Threading", "Thread", module.CorLibTypes.AssemblyRef);
+            var threadCtor = new MemberRefUser(module, ".ctor",
+                MethodSig.CreateInstance(module.CorLibTypes.Void, new TypeRefUser(module, "System.Threading", "ThreadStart", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                threadType);
+            var threadStartMethod = new MemberRefUser(module, "Start",
+                MethodSig.CreateInstance(module.CorLibTypes.Void),
+                threadType);
+
+            antiDebugMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            antiDebugMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldftn, workerMethod));
+            antiDebugMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Newobj, threadStartCtor));
+            antiDebugMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Newobj, threadCtor));
+            antiDebugMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, threadStartMethod));
+            antiDebugMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(antiDebugMethod);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, antiDebugMethod));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            Assert.Equal(1, result.StrippedHooksCount);
+            Assert.True(result.AntiDebugStripped);
+            Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
+            Assert.DoesNotContain(antiDebugMethod, globalType.Methods);
+            Assert.DoesNotContain(workerMethod, globalType.Methods);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_MethodReferencedByDelegate_IsNotDeletedFromModule()
+        {
+            var module = new ModuleDefUser("AppMod");
+            var globalType = module.GlobalType;
+
+            // Protector hook that matches exact stub
+            var stub = new MethodDefUser("ExactStub", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+            stub.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            stub.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            stub.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            stub.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(stub);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, stub));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            // An application method holds a delegate reference (ldftn stub)
+            var appType = new TypeDefUser("AppNamespace", "AppClass", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(appType);
+            var appMethod = new MethodDefUser("UseDelegate", MethodSig.CreateStatic(module.CorLibTypes.Void)) { Body = new CilBody() };
+            appMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldftn, stub));
+            appMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            appMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            appType.Methods.Add(appMethod);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Hook call in cctor was stripped to nop
+            Assert.Equal(1, result.StrippedHooksCount);
+            Assert.Equal(OpCodes.Nop, cctor.Body.Instructions[0].OpCode);
+            // But because appMethod references it via ldftn, the method itself MUST NOT be deleted from globalType
+            Assert.Contains(stub, globalType.Methods);
+            Assert.Equal(0, result.RemovedMethodsCount);
+        }
+
+        [Fact]
+        public void StripProtectorHooks_MethodReferencedByReflectionString_IsNotDeletedFromModule()
+        {
+            var module = new ModuleDefUser("AppMod");
+            var globalType = module.GlobalType;
+
+            var stub = new MethodDefUser("ExactStubWithReflect", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static)
+            {
+                Body = new CilBody()
+            };
+            var getHinstanceRef = new MemberRefUser(module, "GetHINSTANCE",
+                MethodSig.CreateStatic(module.CorLibTypes.IntPtr, new TypeRefUser(module, "System.Reflection", "Module", module.CorLibTypes.AssemblyRef).ToTypeSig()),
+                new TypeRefUser(module, "System.Runtime.InteropServices", "Marshal", module.CorLibTypes.AssemblyRef));
+            stub.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            stub.Body.Instructions.Add(Instruction.Create(OpCodes.Call, getHinstanceRef));
+            stub.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            stub.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(stub);
+
+            var cctor = new MethodDefUser(".cctor", MethodSig.CreateStatic(module.CorLibTypes.Void),
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName)
+            {
+                Body = new CilBody()
+            };
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, stub));
+            cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            globalType.Methods.Add(cctor);
+
+            // An application method references the method name via ldstr (reflection)
+            var appType = new TypeDefUser("AppNamespace", "AppClass", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(appType);
+            var appMethod = new MethodDefUser("ReflectCall", MethodSig.CreateStatic(module.CorLibTypes.Void)) { Body = new CilBody() };
+            appMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "ExactStubWithReflect"));
+            appMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            appMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            appType.Methods.Add(appMethod);
+
+            var result = CleanerKiller.StripProtectorHooks(module);
+
+            // Call in cctor stripped, but method preserved due to reflection string reference
+            Assert.Equal(1, result.StrippedHooksCount);
+            Assert.Contains(stub, globalType.Methods);
+            Assert.Equal(0, result.RemovedMethodsCount);
+        }
+
+        #endregion
     }
 }
