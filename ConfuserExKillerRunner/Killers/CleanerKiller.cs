@@ -1743,7 +1743,7 @@ namespace ConfuserExKillerRunner.Killers
                             else if (code == Code.Shr)
                                 res = a32 >> shift;
                             else // Shr_Un
-                                res = (long)(uint)(a32 >> shift);
+                                res = (long)((uint)a32 >> shift);
                             PushStack(stack, CreateNumericSlot(res, IntegerWidth.Bit32));
                         }
                     }

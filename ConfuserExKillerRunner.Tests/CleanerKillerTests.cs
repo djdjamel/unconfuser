@@ -4012,6 +4012,51 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
+        public void PeSymbolic_ShrUn_LogicalShiftOnNegative32BitValue()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var stack = new List<CleanerKiller.PeSymbolicSlot>();
+            var locals = Array.Empty<CleanerKiller.PeSymbolicSlot>();
+            bool zeroing = false;
+
+            CleanerKiller.ExecuteSymbolicInstruction(Instruction.Create(OpCodes.Ldc_I4, -16), stack, locals, ref zeroing, module);
+            CleanerKiller.ExecuteSymbolicInstruction(Instruction.Create(OpCodes.Ldc_I4, 2), stack, locals, ref zeroing, module);
+            CleanerKiller.ExecuteSymbolicInstruction(Instruction.Create(OpCodes.Shr_Un), stack, locals, ref zeroing, module);
+
+            Assert.Single(stack);
+            var res = stack[0];
+            long expected = (long)(unchecked((uint)-16) >> 2); // 1073741820L (0x3FFFFFFC), NOT arithmetic 4294967292L
+            Assert.Equal(1073741820L, res.ConcreteValue);
+            Assert.Equal(expected, res.ConcreteValue);
+            Assert.Equal(CleanerKiller.IntegerWidth.Bit32, res.Width);
+        }
+
+        [Fact]
+        public void PeSymbolic_ShrUn_32Bit_DistinguishesLogicalFromArithmetic()
+        {
+            var module = new ModuleDefUser("TestMod");
+            var stack = new List<CleanerKiller.PeSymbolicSlot>();
+            var locals = Array.Empty<CleanerKiller.PeSymbolicSlot>();
+            bool zeroing = false;
+
+            // Shr (arithmetic): -16 >> 2 == -4
+            CleanerKiller.ExecuteSymbolicInstruction(Instruction.Create(OpCodes.Ldc_I4, -16), stack, locals, ref zeroing, module);
+            CleanerKiller.ExecuteSymbolicInstruction(Instruction.Create(OpCodes.Ldc_I4, 2), stack, locals, ref zeroing, module);
+            CleanerKiller.ExecuteSymbolicInstruction(Instruction.Create(OpCodes.Shr), stack, locals, ref zeroing, module);
+            var resShr = stack[0];
+            Assert.Equal(-4L, resShr.ConcreteValue);
+
+            stack.Clear();
+            // Shr_Un (logical): unchecked((uint)-16) >> 2 == 1073741820
+            CleanerKiller.ExecuteSymbolicInstruction(Instruction.Create(OpCodes.Ldc_I4, -16), stack, locals, ref zeroing, module);
+            CleanerKiller.ExecuteSymbolicInstruction(Instruction.Create(OpCodes.Ldc_I4, 2), stack, locals, ref zeroing, module);
+            CleanerKiller.ExecuteSymbolicInstruction(Instruction.Create(OpCodes.Shr_Un), stack, locals, ref zeroing, module);
+            var resShrUn = stack[0];
+            Assert.Equal(1073741820L, resShrUn.ConcreteValue);
+            Assert.NotEqual(resShr.ConcreteValue, resShrUn.ConcreteValue);
+        }
+
+        [Fact]
         public void PeSymbolic_ConvI8_SignExtendsNegative32BitInteger()
         {
             var module = new ModuleDefUser("TestMod");
