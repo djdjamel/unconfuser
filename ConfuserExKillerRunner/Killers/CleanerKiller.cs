@@ -1932,9 +1932,19 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
                 {
-                    long cum = a.ConcreteValue.Value + b.ConcreteValue.Value;
-                    if (cum >= 0 && cum <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, cum, a.Width);
+                    try
+                    {
+                        checked
+                        {
+                            long cum = a.ConcreteValue.Value + b.ConcreteValue.Value;
+                            if (cum >= 0 && cum <= MaxPeHeaderDisplacement)
+                                return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, cum, a.Width);
+                        }
+                    }
+                    catch (OverflowException)
+                    {
+                        return PeSymbolicSlot.None;
+                    }
                 }
                 return PeSymbolicSlot.None;
             }
@@ -1942,9 +1952,19 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (b.ConcreteValue.HasValue && a.ConcreteValue.HasValue)
                 {
-                    long cum = b.ConcreteValue.Value + a.ConcreteValue.Value;
-                    if (cum >= 0 && cum <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, cum, b.Width);
+                    try
+                    {
+                        checked
+                        {
+                            long cum = b.ConcreteValue.Value + a.ConcreteValue.Value;
+                            if (cum >= 0 && cum <= MaxPeHeaderDisplacement)
+                                return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, cum, b.Width);
+                        }
+                    }
+                    catch (OverflowException)
+                    {
+                        return PeSymbolicSlot.None;
+                    }
                 }
                 return PeSymbolicSlot.None;
             }
@@ -1954,9 +1974,19 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
                 {
-                    long cum = a.ConcreteValue.Value + b.ConcreteValue.Value;
-                    if (Math.Abs(cum) <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, cum, a.Width);
+                    try
+                    {
+                        checked
+                        {
+                            long cum = a.ConcreteValue.Value + b.ConcreteValue.Value;
+                            if (cum >= -MaxPeHeaderDisplacement && cum <= MaxPeHeaderDisplacement)
+                                return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, cum, a.Width);
+                        }
+                    }
+                    catch (OverflowException)
+                    {
+                        return PeSymbolicSlot.None;
+                    }
                 }
                 return PeSymbolicSlot.None;
             }
@@ -1964,9 +1994,19 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (b.ConcreteValue.HasValue && a.ConcreteValue.HasValue)
                 {
-                    long cum = b.ConcreteValue.Value + a.ConcreteValue.Value;
-                    if (Math.Abs(cum) <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, cum, b.Width);
+                    try
+                    {
+                        checked
+                        {
+                            long cum = b.ConcreteValue.Value + a.ConcreteValue.Value;
+                            if (cum >= -MaxPeHeaderDisplacement && cum <= MaxPeHeaderDisplacement)
+                                return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, cum, b.Width);
+                        }
+                    }
+                    catch (OverflowException)
+                    {
+                        return PeSymbolicSlot.None;
+                    }
                 }
                 return PeSymbolicSlot.None;
             }
@@ -2001,9 +2041,19 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
                 {
-                    long cum = a.ConcreteValue.Value - b.ConcreteValue.Value;
-                    if (cum >= 0 && cum <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, cum, a.Width);
+                    try
+                    {
+                        checked
+                        {
+                            long cum = a.ConcreteValue.Value - b.ConcreteValue.Value;
+                            if (cum >= 0 && cum <= MaxPeHeaderDisplacement)
+                                return new PeSymbolicSlot(PeSymbolicKind.PeDerivedAddress, cum, a.Width);
+                        }
+                    }
+                    catch (OverflowException)
+                    {
+                        return PeSymbolicSlot.None;
+                    }
                 }
                 return PeSymbolicSlot.None;
             }
@@ -2013,9 +2063,19 @@ namespace ConfuserExKillerRunner.Killers
             {
                 if (a.ConcreteValue.HasValue && b.ConcreteValue.HasValue)
                 {
-                    long cum = a.ConcreteValue.Value - b.ConcreteValue.Value;
-                    if (Math.Abs(cum) <= MaxPeHeaderDisplacement)
-                        return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, cum, a.Width);
+                    try
+                    {
+                        checked
+                        {
+                            long cum = a.ConcreteValue.Value - b.ConcreteValue.Value;
+                            if (cum >= -MaxPeHeaderDisplacement && cum <= MaxPeHeaderDisplacement)
+                                return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, cum, a.Width);
+                        }
+                    }
+                    catch (OverflowException)
+                    {
+                        return PeSymbolicSlot.None;
+                    }
                 }
                 return PeSymbolicSlot.None;
             }
@@ -2088,7 +2148,7 @@ namespace ConfuserExKillerRunner.Killers
                 if (a.ConcreteValue.HasValue)
                 {
                     long masked = a.ConcreteValue.Value & b.ConcreteValue.Value;
-                    if (Math.Abs(masked) <= MaxPeHeaderDisplacement)
+                    if (masked >= -MaxPeHeaderDisplacement && masked <= MaxPeHeaderDisplacement)
                         return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, masked, a.Width);
                 }
                 return PeSymbolicSlot.None;
@@ -2098,7 +2158,7 @@ namespace ConfuserExKillerRunner.Killers
                 if (b.ConcreteValue.HasValue)
                 {
                     long masked = b.ConcreteValue.Value & a.ConcreteValue.Value;
-                    if (Math.Abs(masked) <= MaxPeHeaderDisplacement)
+                    if (masked >= -MaxPeHeaderDisplacement && masked <= MaxPeHeaderDisplacement)
                         return new PeSymbolicSlot(PeSymbolicKind.NtDerivedAddress, masked, b.Width);
                 }
                 return PeSymbolicSlot.None;

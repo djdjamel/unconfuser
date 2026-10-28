@@ -4559,6 +4559,57 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(0, result.RemovedMethodsCount);
         }
 
+        [Fact]
+        public void CombineSub_WithExtremeValuesAndLongMinValue_DoesNotThrowAndReturnsNone()
+        {
+            var ntSlot = new CleanerKiller.PeSymbolicSlot(CleanerKiller.PeSymbolicKind.NtDerivedAddress, 0L, CleanerKiller.IntegerWidth.Bit64);
+            var minValSlot = new CleanerKiller.PeSymbolicSlot(CleanerKiller.PeSymbolicKind.NumericOffset, long.MinValue, CleanerKiller.IntegerWidth.Bit64);
+            var maxValSlot = new CleanerKiller.PeSymbolicSlot(CleanerKiller.PeSymbolicKind.NumericOffset, long.MaxValue, CleanerKiller.IntegerWidth.Bit64);
+
+            // 0 - long.MinValue causes OverflowException if checked, or long.MinValue if unchecked (Math.Abs throws)
+            // MUST safely return None without throwing:
+            var resMin = CleanerKiller.CombineSub(ntSlot, minValSlot);
+            Assert.Equal(CleanerKiller.PeSymbolicKind.None, resMin.Kind);
+
+            // 0 - long.MaxValue yields -long.MaxValue, which exceeds MaxPeHeaderDisplacement
+            var resMax = CleanerKiller.CombineSub(ntSlot, maxValSlot);
+            Assert.Equal(CleanerKiller.PeSymbolicKind.None, resMax.Kind);
+
+            // Subtraction underflow: long.MinValue - 1
+            var underflowSlot = new CleanerKiller.PeSymbolicSlot(CleanerKiller.PeSymbolicKind.NtDerivedAddress, long.MinValue, CleanerKiller.IntegerWidth.Bit64);
+            var oneSlot = new CleanerKiller.PeSymbolicSlot(CleanerKiller.PeSymbolicKind.NumericOffset, 1L, CleanerKiller.IntegerWidth.Bit64);
+            var resUnderflow = CleanerKiller.CombineSub(underflowSlot, oneSlot);
+            Assert.Equal(CleanerKiller.PeSymbolicKind.None, resUnderflow.Kind);
+        }
+
+        [Fact]
+        public void CombineAdd_WithExtremeValuesAndLongMinValue_DoesNotThrowAndReturnsNone()
+        {
+            var maxSlot = new CleanerKiller.PeSymbolicSlot(CleanerKiller.PeSymbolicKind.NtDerivedAddress, long.MaxValue, CleanerKiller.IntegerWidth.Bit64);
+            var oneSlot = new CleanerKiller.PeSymbolicSlot(CleanerKiller.PeSymbolicKind.NumericOffset, 1L, CleanerKiller.IntegerWidth.Bit64);
+
+            // long.MaxValue + 1 causes overflow
+            var resOverflow = CleanerKiller.CombineAdd(maxSlot, oneSlot);
+            Assert.Equal(CleanerKiller.PeSymbolicKind.None, resOverflow.Kind);
+
+            // NtDerivedAddress(0) + long.MinValue -> out of displacement range -> None
+            var ntZero = new CleanerKiller.PeSymbolicSlot(CleanerKiller.PeSymbolicKind.NtDerivedAddress, 0L, CleanerKiller.IntegerWidth.Bit64);
+            var minSlot = new CleanerKiller.PeSymbolicSlot(CleanerKiller.PeSymbolicKind.NumericOffset, long.MinValue, CleanerKiller.IntegerWidth.Bit64);
+            var resMin = CleanerKiller.CombineAdd(ntZero, minSlot);
+            Assert.Equal(CleanerKiller.PeSymbolicKind.None, resMin.Kind);
+        }
+
+        [Fact]
+        public void CombineAnd_WithLongMinValue_DoesNotThrowAndReturnsNone()
+        {
+            // Alignment mask on long.MinValue
+            var minSlot = new CleanerKiller.PeSymbolicSlot(CleanerKiller.PeSymbolicKind.NtDerivedAddress, long.MinValue, CleanerKiller.IntegerWidth.Bit64);
+            var maskSlot = new CleanerKiller.PeSymbolicSlot(CleanerKiller.PeSymbolicKind.NumericOffset, ~15L, CleanerKiller.IntegerWidth.Bit64);
+
+            var res = CleanerKiller.CombineAnd(minSlot, maskSlot);
+            Assert.Equal(CleanerKiller.PeSymbolicKind.None, res.Kind);
+        }
+
         #endregion
     }
 }

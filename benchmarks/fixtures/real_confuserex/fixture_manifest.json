@@ -10,7 +10,7 @@
   },
   "source_module": {
     "name": "BenignSample.exe",
-    "sha256": "f40dcf9fd892075efd9e3d6b37bfbe098f6afa8b79d6b0406905c2c129b34c71",
+    "sha256": "33bf3cd2f921270c157f7313d096ef34111bfbcb47a4829fab9cb27af4f3f2a6",
     "size_bytes": 7680
   },
   "protection_profile": {
@@ -20,7 +20,7 @@
   },
   "fixture": {
     "filename": "BenignSample.exe",
-    "sha256": "e2a7ed7c882eb1ac1cd39421925964d46137de0dbcf58e40ab8a0bcbc0fe68f5",
+    "sha256": "516154920aba58175629d4129a81d67b4dcc9cba0b9d0d810ad1121960daa7af",
     "size_bytes": 43008
   },
   "source_code": {
