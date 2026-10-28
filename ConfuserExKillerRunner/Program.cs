@@ -465,6 +465,49 @@ namespace ConfuserExKillerRunner
 
                 bool resourcesDecrypted = false;
                 bool constantsDecrypted = false;
+                int preCleanStrippedCount = 0;
+
+                // Step 1.5: Pre-clean recognized lethal protector hooks from <Module>..cctor (exact stubs, anti-debug)
+                // so the assembly can be safely loaded into isolated reflection worker processes.
+                if (allowExecution)
+                {
+                    try
+                    {
+                        using (var preMod = ModuleDefMD.Load(bytesToLoad))
+                        {
+                            var preClean = CleanerKiller.StripProtectorHooks(
+                                preMod,
+                                resourcesDecrypted: false,
+                                constantsDecrypted: false,
+                                antiTamperDecrypted: antiTamperDecrypted
+                            );
+                            if (preClean.StrippedHooksCount > 0 || preClean.RemovedMethodsCount > 0)
+                            {
+                                using (var ms = new MemoryStream())
+                                {
+                                    var wopts = new ModuleWriterOptions(preMod) { Logger = DummyLogger.NoThrowInstance };
+                                    preMod.Write(ms, wopts);
+                                    bytesToLoad = ms.ToArray();
+                                }
+                                preCleanStrippedCount = preClean.StrippedHooksCount;
+                                totalCleanerHooks += preClean.StrippedHooksCount + preClean.RemovedMethodsCount;
+                                if (preClean.AntiDebugStripped) antiDebugWasStripped = true;
+                                if (preClean.AntiIldasmStripped) antiIldasmWasStripped = true;
+                                if (preClean.RetainedHooksDetails != null && preClean.RetainedHooksDetails.Count > 0)
+                                    preservedHooks.AddRange(preClean.RetainedHooksDetails);
+                                if (preClean.HookRecords != null)
+                                {
+                                    foreach (var hr in preClean.HookRecords)
+                                        hookRegistry[hr.HookId] = hr;
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Tool.Logger.LogWarning($"[PreClean] Pre-cleaning pass skipped: {ex.Message}");
+                    }
+                }
 
                 // Step 2: Dynamic passes via isolated worker (FieldRVA, Constants)
                 var swStage2 = Stopwatch.StartNew();
@@ -638,8 +681,9 @@ namespace ConfuserExKillerRunner
                         if (cleanResult.AntiIldasmStripped) antiIldasmWasStripped = true;
                         if (cleanResult.AntiDebugStripped) antiDebugWasStripped = true;
                         totalCleanerHooks += cleanResult.StrippedHooksCount + cleanResult.RemovedMethodsCount;
-                        if (cleanResult.StrippedHooksCount > 0)
-                            Console.WriteLine($"[+] CleanerKiller: Stripped {cleanResult.StrippedHooksCount} protector initializers from <Module>.cctor");
+                        int totalHooksStripped = cleanResult.StrippedHooksCount + preCleanStrippedCount;
+                        if (totalHooksStripped > 0)
+                            Console.WriteLine($"[+] CleanerKiller: Stripped {totalHooksStripped} protector initializers from <Module>.cctor");
                         if (cleanResult.HookRecords != null)
                         {
                             foreach (var hr in cleanResult.HookRecords)

@@ -50,7 +50,7 @@ Every ConfuserEx protection is classified under one of the following formal stat
 ### 3.1 Constants Protection
 - **Transformations Handled:** Static constant array extraction, string decryption routines, stack-evaluated arithmetic keys, and dynamic worker key execution.
 - **Prerequisites:** Clean PE metadata; unencrypted IL body or decrypted Anti-Tamper payload; for dynamic mode, valid isolated worker environment.
-- **Known Limitations:** Native x86 decryption thunks embedded in unmanaged sections cannot be emulated; dynamic constants in combined fixtures remain partial if hook ordering prevents clean module load.
+- **Known Limitations:** Native x86 decryption thunks embedded in unmanaged sections cannot be emulated; multi-protection hook ordering bottlenecks are eliminated via pre-cleaning passes on module initializers.
 - **Regression Tests:** `ConstantKillerTests.cs`, `tests/test_deobfuscation_benchmark.py::test_deobfuscation_synthetic_pipeline_case[Constants]`.
 - **Fixtures Used:** `fixture_constants.dll`, `benchmarks/fixtures/real_confuserex/BenignSample.exe`.
 - **Verified Result:** 25/25 constants decrypted on real ConfuserEx fixture; 3/3 decrypted on synthetic fixture.

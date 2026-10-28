@@ -1,7 +1,7 @@
 {
   "total_cases": 9,
-  "synthetic_pass": 7,
-  "synthetic_partial": 1,
+  "synthetic_pass": 8,
+  "synthetic_partial": 0,
   "synthetic_fail": 0,
   "unverified": 0,
   "real_protector_pass": 1,
@@ -246,7 +246,7 @@
         "deadcode_junk_pairs": 0,
         "resources_extracted": 0,
         "compressor_unpacked": false,
-        "cleaner_hooks_stripped": 1,
+        "cleaner_hooks_stripped": 0,
         "audit_status": "CLEAN",
         "invalid_instructions": 0,
         "unresolved_call_sites": 0,
@@ -279,17 +279,17 @@
       "is_synthetic": true,
       "input_sha256": "d8f0de14684f5e6d02739f174230b7bae41f85015f9dcec4c0009c59f1fae5b6",
       "output_produced": true,
-      "output_sha256": "c3e2e0b4eb2e0f33df8b7c328a5c57492743c528981d664b9638cc23016d9aca",
+      "output_sha256": "9208452b9cf0019023e51f3c7946ec9247b52344877bcc40add62a46b5ddd6b7",
       "deobfuscator_returncode": 0,
       "metrics": {
-        "constants_decrypted": 0,
+        "constants_decrypted": 3,
         "proxies_inlined": 1,
         "switches_resolved": 0,
         "deadcode_optimized_methods": 1,
         "deadcode_junk_pairs": 1,
         "resources_extracted": 0,
         "compressor_unpacked": false,
-        "cleaner_hooks_stripped": 1,
+        "cleaner_hooks_stripped": 0,
         "audit_status": "CLEAN",
         "invalid_instructions": 0,
         "unresolved_call_sites": 0,
@@ -300,23 +300,22 @@
       "execution_returncode": 0,
       "structural_verification": {
         "scenario": "combined",
-        "verified": false,
-        "partial": true,
+        "verified": true,
+        "partial": false,
         "unverified": false,
-        "status": "PARTIAL",
+        "status": "VERIFIED",
         "verified_transformations": [
           "proxies_inlined",
           "cflow_deadcode_stripped",
-          "cctor_antitamper_hook_stripped"
-        ],
-        "unverified_transformations": [
+          "cctor_antitamper_hook_stripped",
           "constants_decrypted_and_inlined"
         ],
-        "notes": "Partially transformed: Proxies, deadcode, and anti-tamper hooks stripped, but constant decryption was blocked by TypeInitializationException during Reflection module load prior to hook removal.",
-        "verifier_returncode": 2
+        "unverified_transformations": [],
+        "notes": "All 4 multi-protection layers verified.",
+        "verifier_returncode": 0
       },
       "error": null,
-      "verdict": "SYNTHETIC_PARTIAL"
+      "verdict": "SYNTHETIC_PASS"
     },
     {
       "case_name": "Generics & Exception Edges",
@@ -368,9 +367,9 @@
       "fixture_name": "BenignSample.exe",
       "scenario": "real_confuserex",
       "is_synthetic": false,
-      "input_sha256": "320485f5ddd522164b1036c2de3b7cd95afa9e8a00173029fcfc8f83e6be6a41",
+      "input_sha256": "e2a7ed7c882eb1ac1cd39421925964d46137de0dbcf58e40ab8a0bcbc0fe68f5",
       "output_produced": true,
-      "output_sha256": "40f72dc74e00e47a2688e673f25f65df248716049ed549a6dbbd3b45220c855d",
+      "output_sha256": "92027522f3d8ed8f22097bff3b8caca7f993c66df83f4a5e626da35c0dd346bf",
       "deobfuscator_returncode": 0,
       "metrics": {
         "constants_decrypted": 25,

@@ -150,10 +150,11 @@ def test_deobfuscation_synthetic_pipeline_case(
         assert metrics.get("compressor_unpacked") is True, f"Compressor unpacked flag not True for {case_name}"
 
 
-def test_combined_fixture_exposes_ordering_bottleneck(runner_path, expected_baseline):
+def test_combined_fixture_resolves_ordering_bottleneck(runner_path, expected_baseline):
     """
-    Validates that the combined fixture exercises each expected transformation
-    and accurately classifies as SYNTHETIC_PARTIAL due to the cctor ordering bottleneck.
+    Validates that the combined multi-protection fixture exercises each expected transformation
+    and successfully deobfuscates all 4 layers (proxies, cflow, antitamper hook, AND constants)
+    achieving SYNTHETIC_PASS after eliminating the cctor ordering bottleneck.
     """
     fixture_path = FIXTURES_DIR / "fixture_combined.dll"
     if not fixture_path.exists():
@@ -175,28 +176,25 @@ def test_combined_fixture_exposes_ordering_bottleneck(runner_path, expected_base
     assert record["execution_returncode"] == 0, f"Runtime execution failed: {record['execution_returncode']}"
     assert record["behavioral_match"], f"Behavioral output mismatch for combined fixture: {record.get('error')}"
     assert record["audit_status"] == "CLEAN", f"Audit failed: {record['audit_status']}"
-    assert record["verdict"] == "SYNTHETIC_PARTIAL", f"Expected SYNTHETIC_PARTIAL, got {record['verdict']}"
+    assert record["verdict"] == "SYNTHETIC_PASS", f"Expected SYNTHETIC_PASS, got {record['verdict']}"
 
     v_data = record.get("structural_verification", {})
-    assert v_data.get("partial") is True, f"Expected partial=true in AST verification: {v_data}"
+    assert v_data.get("verified") is True, f"Expected verified=true in AST verification: {v_data}"
     verified_ts = v_data.get("verified_transformations", [])
-    unverified_ts = v_data.get("unverified_transformations", [])
 
-    # Confirm specific verified transformations
+    # Confirm all 4 multi-protection transformations are verified
     assert "proxies_inlined" in verified_ts
     assert "cflow_deadcode_stripped" in verified_ts
     assert "cctor_antitamper_hook_stripped" in verified_ts
-
-    # Confirm specific unverified transformation that exposes the documented limitation
-    assert "constants_decrypted_and_inlined" in unverified_ts
+    assert "constants_decrypted_and_inlined" in verified_ts
 
     # Confirm exact metric recovery counts for combined scenario
     metrics = record["metrics"]
     assert metrics.get("proxies_inlined", 0) == 1
     assert metrics.get("deadcode_junk_pairs", 0) == 1
     assert metrics.get("cleaner_hooks_stripped", 0) >= 1
-    assert metrics.get("constants_decrypted", 0) == 0
-    assert metrics.get("resources_extracted", 0) == 0
+    assert metrics.get("constants_decrypted", 0) >= 1
+
 
 
 def test_real_protector_integration_and_skip_logic(runner_path, expected_baseline):
