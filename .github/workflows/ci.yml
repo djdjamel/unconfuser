@@ -57,12 +57,14 @@ jobs:
     - name: Run C# Unit & Integration Tests
       run: dotnet test unconfuser.sln -c Release --no-build --verbosity normal
 
-    - name: Verify Benign Deobfuscated Output Safely
-      run: powershell -ExecutionPolicy Bypass -File scripts/Verify-DeobfuscatedBinary.ps1 -Target benchmarks/BenignSample/bin/Release/net48/BenignSample.exe -ReportJson benchmarks/verify_benign_report.json -CommitHash "${{ github.sha }}"
-
     - name: Run Deobfuscation Benchmark Suite
-      if: success() || failure()
       run: python benchmarks/run_benchmark.py
+
+    - name: Verify Real Deobfuscated Output Safely
+      run: powershell -ExecutionPolicy Bypass -File scripts/Verify-DeobfuscatedBinary.ps1 -Target benchmarks/fixtures/real_confuserex/BenignSample_clean.exe -ReportJson benchmarks/verify_deobfuscated_report.json -CommitHash "${{ github.sha }}"
+
+    - name: Verify Benign Baseline Reference Safely
+      run: powershell -ExecutionPolicy Bypass -File scripts/Verify-DeobfuscatedBinary.ps1 -Target benchmarks/BenignSample/bin/Release/net48/BenignSample.exe -ReportJson benchmarks/verify_benign_report.json -CommitHash "${{ github.sha }}"
 
     - name: Run Python Pytest Suite
       if: success() || failure()
@@ -81,5 +83,6 @@ jobs:
           benchmarks/benchmark_report.md
           benchmarks/benchmark_report.json
           benchmarks/verify_benign_report.json
+          benchmarks/verify_deobfuscated_report.json
 
 

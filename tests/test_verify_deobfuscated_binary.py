@@ -324,3 +324,34 @@ def test_report_json_schema_completeness():
     finally:
         if report_path.exists():
             report_path.unlink()
+
+
+def test_real_deobfuscated_pipeline_output_passes():
+    """Verify that the actual deobfuscated output produced from ConfuserEx passes all checks in the harness."""
+    deobf_path = WORKSPACE_ROOT / "benchmarks" / "fixtures" / "real_confuserex" / "BenignSample_clean.exe"
+    if not deobf_path.exists():
+        # Run benchmark runner to produce clean candidate if not already present
+        subprocess.run(["python", str(WORKSPACE_ROOT / "benchmarks" / "run_benchmark.py")], check=True, timeout=120)
+
+    assert deobf_path.exists(), f"Deobfuscated binary not found at {deobf_path}"
+
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+        report_path = Path(tmp.name)
+
+    try:
+        proc = run_verify(deobf_path, ["-ReportJson", str(report_path)])
+        assert proc.returncode == 0, f"Expected returncode 0, got {proc.returncode}. Output:\n{proc.stdout}"
+
+        with open(report_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        assert data["status"] == "PASS"
+        assert data["load_success"] is True
+        assert data["module_cctor_status"] == "SUCCESS"
+        assert data["jit_success"] > 0
+        assert data["jit_failed_corrupted_il"] == 0
+        assert data["jit_failed_missing_dependency"] == 0
+    finally:
+        if report_path.exists():
+            report_path.unlink()
+
