@@ -737,7 +737,7 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
-        public void NameProtection_SymbolsRenamed_EvaluatesVerifiedOnRealFixture()
+        public void NameProtection_SymbolsRenamed_EvaluatesSupportedStatic()
         {
             var module = CreateEmptyModule();
             var matrix = ProtectionMatrix.Evaluate(
@@ -757,7 +757,7 @@ namespace ConfuserExKillerRunner.Tests
 
             var item = matrix.Items.First(i => i.Name == "Name Protection");
             Assert.True(item.Detected);
-            Assert.Equal(ProtectionSupportStatus.VerifiedOnRealFixture, item.Status);
+            Assert.Equal(ProtectionSupportStatus.SupportedStatic, item.Status);
             Assert.Equal("Cleaned (Normalized)", item.ResultSummary);
         }
 

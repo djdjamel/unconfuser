@@ -170,7 +170,7 @@ namespace ConfuserExTools.ProxyKiller
 						}
 					}
 
-					// Safely prune proxy methods only if 100% of their references were rewritten
+					// Safely prune proxy methods only if 100% of their references were rewritten or unreferenced
 					if (removeProxyMethods)
 					{
 						int prunedCount = 0;
@@ -180,7 +180,7 @@ namespace ConfuserExTools.ProxyKiller
 							int totalRefs = proxyReferenceCounts[proxyMethod];
 							int rewrittenRefs = proxyRewrittenCounts[proxyMethod];
 
-							if (totalRefs > 0 && rewrittenRefs >= totalRefs)
+							if (totalRefs == 0 || rewrittenRefs >= totalRefs)
 							{
 								if (proxyMethod.DeclaringType != null && proxyMethod.DeclaringType.Methods.Contains(proxyMethod))
 								{
@@ -191,6 +191,21 @@ namespace ConfuserExTools.ProxyKiller
 							else if (totalRefs > rewrittenRefs)
 							{
 								Logger.LogWarning($"[0x{proxyMethod.MDToken.Raw:X8}] Retaining proxy method {proxyMethod.Name} ({totalRefs - rewrittenRefs} unrewritten references remain).");
+							}
+						}
+
+						var typesToCheck = proxyMethods.Keys
+							.Select(m => m.DeclaringType)
+							.Where(t => t != null && UTF8String.IsNullOrEmpty(t.Namespace) && !t.IsGlobalModuleType)
+							.Distinct()
+							.ToList();
+
+						foreach (var pt in typesToCheck)
+						{
+							bool onlyCtor = pt.Methods.All(m => m.IsConstructor);
+							if (onlyCtor && pt.Fields.Count == 0 && pt.Properties.Count == 0 && pt.Events.Count == 0)
+							{
+								module.Types.Remove(pt);
 							}
 						}
 					}

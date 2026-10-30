@@ -20,7 +20,7 @@
   },
   "fixture": {
     "filename": "BenignSample.exe",
-    "sha256": "3cb11d010a15970778006ed22cbdb0a767d1803e9f18f0a054e09e74101d3545",
+    "sha256": "725dd94a63c9a1826009c46b11ece4f505cfad0b1ca3248ce15d894b893ddd6a",
     "size_bytes": 43008
   },
   "source_code": {

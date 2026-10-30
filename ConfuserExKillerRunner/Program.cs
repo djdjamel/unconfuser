@@ -41,7 +41,7 @@ namespace ConfuserExKillerRunner
             bool skipNetDetect = false;
             string outputPath = null;
             string jsonReportPath = null;
-            bool strictExitCodes = false;
+            bool strictExitCodes = true;
             bool verbose = false;
             bool restoreSemanticNames = false;
             bool forcePromote = false;
@@ -93,6 +93,10 @@ namespace ConfuserExKillerRunner
                 else if (arg == "--strict-exit-codes")
                 {
                     strictExitCodes = true;
+                }
+                else if (arg == "--allow-partial-exit-zero" || arg == "--permissive-exit-codes")
+                {
+                    strictExitCodes = false;
                 }
                 else if (arg == "--restore-names" || arg == "--semantic-names")
                 {
@@ -375,6 +379,15 @@ namespace ConfuserExKillerRunner
                 int totalCleanerHooks = 0;
                 var preservedHooks = new List<string>();
                 var hookRegistry = new Dictionary<string, HookTraceRecord>(StringComparer.Ordinal);
+                bool initialRenamingDetected = false;
+                try
+                {
+                    using (var initProbeMod = ModuleDefMD.Load(bytesToLoad))
+                    {
+                        initialRenamingDetected = ProtectionMatrix.HasRenamingProtection(initProbeMod);
+                    }
+                }
+                catch { }
 
                 if (!initialLoadOk)
                 {
@@ -833,6 +846,7 @@ namespace ConfuserExKillerRunner
             string candidateExt = Path.GetExtension(finalOutputPath);
             string candidateBase = Path.GetFileNameWithoutExtension(finalOutputPath);
             string candidatePath = Path.Combine(executionTempDir, candidateBase + ".candidate." + Guid.NewGuid().ToString("N").Substring(0, 8) + candidateExt);
+            SemanticRenamerResult semResult = null;
 
             using (var module2 = ModuleDefMD.Load(currentIntermediate))
             {
@@ -870,7 +884,7 @@ namespace ConfuserExKillerRunner
                 {
                     var swSemantic = Stopwatch.StartNew();
                     Console.WriteLine("[*] Step 6.1: Running SemanticRenamer (Restoring Forms, Controls, Handlers, and Resources)...");
-                    var semResult = SemanticRenamer.Execute(module2, verbose);
+                    semResult = SemanticRenamer.Execute(module2, verbose);
                     Console.WriteLine($"[+] SemanticRenamer: {semResult.Message}");
                     FinalizeMethodBodies(module2);
                     stepTimings["Stage6_SemanticRenamer"] = swSemantic.ElapsedMilliseconds;
@@ -1178,10 +1192,13 @@ namespace ConfuserExKillerRunner
                         cleanerHooksStrippedCount: totalCleanerHooks,
                         compressorUnpacked: compressorWasUnpacked,
                         unevaluatedProtections: unevaluated,
-                        symbolsRenamed: de4dotSucceeded || restoreSemanticNames,
+                        symbolsRenamed: de4dotSucceeded || (semResult != null && (semResult.TypesRenamed > 0 || semResult.FieldsRenamed > 0 || semResult.MethodsRenamed > 0 || semResult.PropertiesRenamed > 0 || semResult.ResourcesRenamed > 0 || semResult.UnprintableNormalized > 0)),
                         antiIldasmStripped: antiIldasmWasStripped,
                         antiDebugStripped: antiDebugWasStripped,
-                        ilVerificationIndeterminate: isIndeterminate);
+                        ilVerificationIndeterminate: isIndeterminate,
+                        semanticNamesRestoredCount: semResult != null ? (semResult.TypesRenamed + semResult.FieldsRenamed + semResult.MethodsRenamed + semResult.PropertiesRenamed + semResult.ResourcesRenamed) : 0,
+                        unprintableNormalizedCount: semResult?.UnprintableNormalized ?? 0,
+                        initialRenamingDetected: initialRenamingDetected);
 
                     stepTimings["Stage8_ProtectionMatrix_Evaluation"] = swMatrix.ElapsedMilliseconds;
                     Console.WriteLine(ProtectionMatrix.FormatReport(matrix));
@@ -1211,10 +1228,10 @@ namespace ConfuserExKillerRunner
                 exitCode = 2;
                 finalStatus = "INDETERMINATE";
             }
-            else if (matrix != null && (matrix.HasRequiresDynamicSkipped || matrix.HasUnsupported || (strictExitCodes && (matrix.HasNotEvaluated || matrix.HasCodeProtectionsPartiallyProcessed || matrix.HasPartiallyProcessed))))
+            else if (matrix != null && (!matrix.IsComplete || matrix.HasRequiresDynamicSkipped || matrix.HasUnsupported || matrix.HasNotEvaluated || matrix.HasPartiallyProcessed))
             {
-                exitCode = 2;
-                finalStatus = "PARTIAL_SUCCESS";
+                exitCode = strictExitCodes ? 2 : 0;
+                finalStatus = matrix.HasNotEvaluated ? "UNCONFIRMED" : "PARTIAL_SUCCESS";
             }
             else
             {
@@ -1287,7 +1304,7 @@ namespace ConfuserExKillerRunner
                         PeakWorkingSetBytes = Process.GetCurrentProcess().PeakWorkingSet64,
                         ExceptionsAndRollbacks = exceptionsAndRollbacks,
                         FinalStatus = finalStatus,
-                        OverallVerdict = isIndeterminate ? "INDETERMINATE (IL Verification Inconclusive - Candidate Not Promoted)" : (matrix?.OverallVerdict ?? finalStatus),
+                        OverallVerdict = matrix?.OverallVerdict ?? (isIndeterminate ? "DEOBFUSCATION UNCONFIRMED (Indeterminate IL Verification)" : finalStatus),
                         ExitCode = exitCode,
                         SummaryNotes = summaryNotes
                     };
@@ -1376,16 +1393,17 @@ namespace ConfuserExKillerRunner
             Console.WriteLine("  --no-de4dot             Skip de4dot external process pass");
             Console.WriteLine("  --no-netdetect          Skip NetDetect pre/post obfuscation audit");
             Console.WriteLine("  --json-report, --report-json <path>  Generate structured versioned JSON audit report");
-            Console.WriteLine("  --strict-exit-codes     Return exit code 2 on any partial deobfuscation");
+            Console.WriteLine("  --strict-exit-codes     Return exit code 2 on any partial deobfuscation (default: enabled)");
+            Console.WriteLine("  --allow-partial-exit-zero Return exit code 0 on partial deobfuscation (report status remains PARTIAL_SUCCESS)");
             Console.WriteLine("  --restore-names, --semantic-names   Restore semantic symbol names (Forms, Controls, Event Handlers, Resources)");
             Console.WriteLine("  --force-promote, --force            Promote candidate to output path even if external dependencies cause indeterminate status");
             Console.WriteLine("  --verbose               Enable verbose console output");
             Console.WriteLine("  -h, --help              Show this help message");
             Console.WriteLine();
             Console.WriteLine("Exit Codes:");
-            Console.WriteLine("  0: Success - all requested protections resolved or fully clean output");
+            Console.WriteLine("  0: Success - complete, verified deobfuscation (or --allow-partial-exit-zero on partial)");
             Console.WriteLine("  1: Fatal Error - corrupt assembly, structural audit failed, or unhandled exception");
-            Console.WriteLine("  2: Partial Result - candidate promoted with known limitations (dynamic required, unsupported)");
+            Console.WriteLine("  2: Partial Result - candidate unverified/partial (dynamic required, unsupported, unevaluated, indeterminate)");
         }
 
         private static void FinalizeMethodBodies(ModuleDef module)

@@ -77,7 +77,10 @@ namespace ConfuserExKillerRunner.Analysis
             bool symbolsRenamed = false,
             bool antiIldasmStripped = false,
             bool antiDebugStripped = false,
-            bool ilVerificationIndeterminate = false)
+            bool ilVerificationIndeterminate = false,
+            int semanticNamesRestoredCount = 0,
+            int unprintableNormalizedCount = 0,
+            bool initialRenamingDetected = false)
         {
             var result = new ProtectionMatrixResult();
             var unevaluatedSet = unevaluatedProtections != null
@@ -604,7 +607,7 @@ namespace ConfuserExKillerRunner.Analysis
 
             // 15. Name Protection (Renaming)
             bool renamingRemains = HasRenamingProtection(module);
-            bool renamingDetected = symbolsRenamed || renamingRemains;
+            bool renamingDetected = initialRenamingDetected || renamingRemains || symbolsRenamed;
             var renameItem = new ProtectionItem
             {
                 Name = "Name Protection",
@@ -624,17 +627,35 @@ namespace ConfuserExKillerRunner.Analysis
                 renameItem.ResultSummary = "N/A";
                 renameItem.Details = "Symbols do not show unprintable or high-entropy ConfuserEx renaming patterns.";
             }
-            else if (symbolsRenamed && !renamingRemains)
-            {
-                renameItem.Status = ProtectionSupportStatus.VerifiedOnRealFixture;
-                renameItem.ResultSummary = "Cleaned (Normalized)";
-                renameItem.Details = "All unprintable and Unicode-mangled identifiers have been cleaned and normalized to valid C# symbols.";
-            }
-            else
+            else if (renamingRemains)
             {
                 renameItem.Status = ProtectionSupportStatus.PartiallyProcessed;
                 renameItem.ResultSummary = "Partially Processed";
-                renameItem.Details = "Symbol renaming detected; unprintable or mangled identifiers remain in internal/private scope.";
+                renameItem.Details = "Symbol renaming detected; unprintable or mangled identifiers remain in module scope.";
+            }
+            else
+            {
+                renameItem.Status = ProtectionSupportStatus.SupportedStatic;
+                if (semanticNamesRestoredCount > 0 && unprintableNormalizedCount > 0)
+                {
+                    renameItem.ResultSummary = $"Restored & Normalized ({semanticNamesRestoredCount} restored, {unprintableNormalizedCount} normalized)";
+                    renameItem.Details = "Semantic names restored from metadata/reflection and unprintable identifiers normalized.";
+                }
+                else if (semanticNamesRestoredCount > 0)
+                {
+                    renameItem.ResultSummary = $"Restored ({semanticNamesRestoredCount})";
+                    renameItem.Details = "Semantic names restored with confidence scoring based on metadata and reflection patterns.";
+                }
+                else if (unprintableNormalizedCount > 0)
+                {
+                    renameItem.ResultSummary = $"Normalized ({unprintableNormalizedCount})";
+                    renameItem.Details = "Unprintable and mangled identifiers technically normalized to valid C# symbols.";
+                }
+                else
+                {
+                    renameItem.ResultSummary = "Cleaned (Normalized)";
+                    renameItem.Details = "All unprintable and Unicode-mangled identifiers have been cleaned and normalized to valid C# symbols.";
+                }
             }
             result.Items.Add(renameItem);
 
@@ -676,9 +697,9 @@ namespace ConfuserExKillerRunner.Analysis
             }
             else if (ilVerificationIndeterminate)
             {
-                result.IsComplete = true;
-                result.OverallVerdict = "DEOBFUSCATION COMPLETED (INDETERMINATE IL VERIFICATION)";
-                result.SummaryNotes = "All detected ConfuserEx protections were safely reversed, but external IL verification was indeterminate due to unresolved external assembly references. Runtime JIT verification required.";
+                result.IsComplete = false;
+                result.OverallVerdict = "DEOBFUSCATION UNCONFIRMED (Indeterminate IL Verification)";
+                result.SummaryNotes = "All detected ConfuserEx protections were transformed, but external IL verification was indeterminate. Output was retained as unverified candidate and not promoted.";
             }
             else
             {
@@ -1043,17 +1064,56 @@ namespace ConfuserExKillerRunner.Analysis
         public static bool HasRenamingProtection(ModuleDef module)
         {
             if (module == null) return false;
+
+            // Check if there are types in named namespaces
+            var namedTypes = module.GetTypes().Where(t => !t.IsGlobalModuleType && !UTF8String.IsNullOrEmpty(t.Namespace)).ToList();
+            if (namedTypes.Count > 0)
+            {
+                // In assemblies with namespaces, ConfuserEx renaming either strips/mangles the namespace or mangles the type/method names.
+                // If user types in named namespaces exist and have completely clean names and methods, renaming was not applied to user code.
+                int obfuscatedInNamed = 0;
+                foreach (var t in namedTypes)
+                {
+                    if (IsConfuserExObfuscatedIdentifier(t.Name?.String))
+                        obfuscatedInNamed++;
+                    foreach (var m in t.Methods)
+                    {
+                        if (!m.IsConstructor && IsConfuserExObfuscatedIdentifier(m.Name?.String))
+                            obfuscatedInNamed++;
+                    }
+                    foreach (var f in t.Fields)
+                    {
+                        if (IsConfuserExObfuscatedIdentifier(f.Name?.String))
+                            obfuscatedInNamed++;
+                    }
+                }
+
+                if (obfuscatedInNamed > 0)
+                    return true;
+
+                // User types in namespaces are completely clean. ConfuserEx did not apply renaming to user code.
+                return false;
+            }
+
+            // Fallback for assemblies without namespaces:
+            // Ignore pure injected types in root namespace (ValueType structs, MulticastDelegates)
             int obfuscatedCount = 0;
             foreach (var t in module.GetTypes())
             {
                 if (t.IsGlobalModuleType || (t.DeclaringType != null && t.DeclaringType.IsGlobalModuleType))
                     continue;
-                if (!UTF8String.IsNullOrEmpty(t.Name))
-                {
-                    string s = t.Name.String;
-                    if (s != null && IsConfuserExObfuscatedIdentifier(s))
-                        obfuscatedCount++;
-                }
+
+                // Ignore pure injected constant data buffer structs (ValueType with no methods in root namespace)
+                if (t.BaseType != null && t.BaseType.FullName == "System.ValueType" && t.Methods.Count == 0 && UTF8String.IsNullOrEmpty(t.Namespace))
+                    continue;
+
+                // Ignore injected delegate types in root namespace
+                if (t.BaseType != null && (t.BaseType.FullName == "System.MulticastDelegate" || t.BaseType.FullName == "System.Delegate") && UTF8String.IsNullOrEmpty(t.Namespace))
+                    continue;
+
+                if (!UTF8String.IsNullOrEmpty(t.Name) && IsConfuserExObfuscatedIdentifier(t.Name.String))
+                    obfuscatedCount++;
+
                 foreach (var m in t.Methods)
                 {
                     if (!UTF8String.IsNullOrEmpty(m.Name) && !m.IsConstructor && IsConfuserExObfuscatedIdentifier(m.Name.String))
@@ -1064,8 +1124,10 @@ namespace ConfuserExKillerRunner.Analysis
                     if (!UTF8String.IsNullOrEmpty(f.Name) && IsConfuserExObfuscatedIdentifier(f.Name.String))
                         obfuscatedCount++;
                 }
+
                 if (obfuscatedCount > 3) return true;
             }
+
             return obfuscatedCount > 3;
         }
 
