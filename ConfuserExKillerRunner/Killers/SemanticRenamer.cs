@@ -27,6 +27,7 @@ namespace ConfuserExKillerRunner.Killers
         public RenameConfidence Confidence { get; set; }
         public string Justification { get; set; }
         public bool Applied { get; set; }
+        public string Evidence { get; set; }
 
         public override string ToString() =>
             $"[{Confidence}] {SymbolType} '{OriginalName}' -> '{NewName}' (Applied: {Applied}): {Justification}";
@@ -42,6 +43,43 @@ namespace ConfuserExKillerRunner.Killers
         public int UnprintableNormalized { get; set; }
         public string Message { get; set; }
         public List<RenameDecision> Decisions { get; set; } = new List<RenameDecision>();
+
+        public string GenerateMappingReport()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("=================================================================================");
+            sb.AppendLine("                           SEMANTIC RENAMING MAPPING REPORT                      ");
+            sb.AppendLine("=================================================================================");
+            sb.AppendLine($"Total Decisions: {Decisions.Count} (Applied: {Decisions.Count(d => d.Applied)}, Preserved/Ambiguous: {Decisions.Count(d => !d.Applied)})");
+            sb.AppendLine($"Summary: {TypesRenamed} types, {FieldsRenamed} fields, {MethodsRenamed} methods, {PropertiesRenamed} properties, {ResourcesRenamed} resources renamed. {UnprintableNormalized} normalized.");
+            sb.AppendLine(new string('-', 81));
+            sb.AppendLine(string.Format("{0,-18} {1,-10} {2,-30} -> {3}", "Confidence", "Type", "Original Name", "New Name / Status"));
+            sb.AppendLine(new string('-', 81));
+
+            foreach (var d in Decisions)
+            {
+                string target = d.Applied ? d.NewName : $"(Preserved: {d.Justification})";
+                string orig = d.OriginalName ?? "";
+                if (orig.Length > 28) orig = orig.Substring(0, 25) + "...";
+                sb.AppendLine(string.Format("{0,-18} {1,-10} {2,-30} -> {3}",
+                    $"[{d.Confidence}]",
+                    d.SymbolType,
+                    orig,
+                    target));
+            }
+            sb.AppendLine(new string('=', 81));
+            return sb.ToString();
+        }
+
+        public void SaveMappingReport(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return;
+            try
+            {
+                File.WriteAllText(filePath, GenerateMappingReport(), Encoding.UTF8);
+            }
+            catch { }
+        }
     }
 
     /// <summary>
@@ -86,37 +124,92 @@ namespace ConfuserExKillerRunner.Killers
                         if (ins.OpCode == OpCodes.Ldstr && ins.Operand is string s && !string.IsNullOrEmpty(s))
                         {
                             map.StringLiterals.Add(s);
+                        }
 
-                            // Look ahead for explicit reflection calls
-                            if (i + 1 < instrs.Count)
+                        if (ins.OpCode == OpCodes.Call || ins.OpCode == OpCodes.Callvirt)
+                        {
+                            if (ins.Operand is IMethod called)
                             {
-                                var next = instrs[i + 1];
-                                if ((next.OpCode == OpCodes.Call || next.OpCode == OpCodes.Callvirt) && next.Operand is IMethod called)
-                                {
-                                    string mName = called.Name;
-                                    string declType = called.DeclaringType?.FullName;
+                                string mName = called.Name;
+                                string declType = called.DeclaringType?.FullName;
 
-                                    if (declType == "System.Type")
+                                if (declType == "System.Type")
+                                {
+                                    if (mName == "GetType")
                                     {
-                                        if (mName == "GetType")
+                                        for (int j = i - 1; j >= Math.Max(0, i - 6); j--)
                                         {
-                                            map.ExplicitTypeNames.Add(s);
-                                            map.TypeGetTypeCalls.Add((ins, s));
-                                        }
-                                        else if (mName == "GetMethod" || mName == "GetProperty" || mName == "GetField" || mName == "GetEvent" || mName == "GetMember")
-                                        {
-                                            map.ExplicitMemberNames.Add(s);
+                                            if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
+                                            {
+                                                map.ExplicitTypeNames.Add(strVal);
+                                                map.TypeGetTypeCalls.Add((instrs[j], strVal));
+                                                break;
+                                            }
                                         }
                                     }
-                                    else if (declType == "System.Reflection.Assembly" && mName == "GetType")
+                                    else if (mName == "GetMethod" || mName == "GetProperty" || mName == "GetField" ||
+                                             mName == "GetEvent" || mName == "GetMember")
                                     {
-                                        map.ExplicitTypeNames.Add(s);
-                                        map.TypeGetTypeCalls.Add((ins, s));
+                                        for (int j = i - 1; j >= Math.Max(0, i - 8); j--)
+                                        {
+                                            if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
+                                            {
+                                                map.ExplicitMemberNames.Add(strVal);
+                                            }
+                                        }
                                     }
-                                    else if (declType == "System.Activator" && mName == "CreateInstance")
+                                    else if (mName == "GetNestedType")
                                     {
-                                        map.ExplicitTypeNames.Add(s);
-                                        map.TypeGetTypeCalls.Add((ins, s));
+                                        for (int j = i - 1; j >= Math.Max(0, i - 8); j--)
+                                        {
+                                            if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
+                                            {
+                                                map.ExplicitTypeNames.Add(strVal);
+                                            }
+                                        }
+                                    }
+                                }
+                                else if ((declType == "System.Reflection.Assembly" || declType == "System.Reflection.Module") && mName == "GetType")
+                                {
+                                    for (int j = i - 1; j >= Math.Max(0, i - 6); j--)
+                                    {
+                                        if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
+                                        {
+                                            map.ExplicitTypeNames.Add(strVal);
+                                            map.TypeGetTypeCalls.Add((instrs[j], strVal));
+                                            break;
+                                        }
+                                    }
+                                }
+                                else if (declType == "System.Activator" && mName == "CreateInstance")
+                                {
+                                    for (int j = i - 1; j >= Math.Max(0, i - 8); j--)
+                                    {
+                                        if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
+                                        {
+                                            map.ExplicitTypeNames.Add(strVal);
+                                        }
+                                    }
+                                }
+                                else if (declType == "System.Enum" && (mName == "Parse" || mName == "TryParse"))
+                                {
+                                    for (int j = i - 1; j >= Math.Max(0, i - 8); j--)
+                                    {
+                                        if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
+                                        {
+                                            map.ExplicitMemberNames.Add(strVal);
+                                        }
+                                    }
+                                }
+                                else if ((declType == "System.Windows.Forms.ControlBindingsCollection" ||
+                                          declType == "System.Windows.Forms.BindingsCollection") && mName == "Add")
+                                {
+                                    for (int j = i - 1; j >= Math.Max(0, i - 8); j--)
+                                    {
+                                        if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
+                                        {
+                                            map.ExplicitMemberNames.Add(strVal);
+                                        }
                                     }
                                 }
                             }
@@ -182,6 +275,10 @@ namespace ConfuserExKillerRunner.Killers
                 if (IsResourceWrapperClass(type))
                     continue;
 
+                // Safety rule: compiler-generated types must be preserved
+                if (IsCompilerGenerated(type))
+                    continue;
+
                 // Safety rule: if the type name is already clean and non-obfuscated, preserve it!
                 if (!IsObfuscatedOrGenericTypeName(type.Name))
                     continue;
@@ -192,43 +289,47 @@ namespace ConfuserExKillerRunner.Killers
                 string justification = null;
 
                 // Pattern 1: Look for self set_Name call in methods (e.g. InitializeComponent)
-                foreach (var method in type.Methods)
+                // Strict check: type must derive from Form/Control AND called method must be Control.set_Name
+                if (IsWinFormsControlOrForm(type))
                 {
-                    if (!method.HasBody || method.Body.Instructions == null)
-                        continue;
-
-                    var instrs = method.Body.Instructions;
-                    for (int i = 2; i < instrs.Count; i++)
+                    foreach (var method in type.Methods)
                     {
-                        var ins = instrs[i];
-                        if (ins.OpCode == OpCodes.Call || ins.OpCode == OpCodes.Callvirt)
+                        if (!method.HasBody || method.Body.Instructions == null)
+                            continue;
+
+                        var instrs = method.Body.Instructions;
+                        for (int i = 2; i < instrs.Count; i++)
                         {
-                            if (ins.Operand is IMethod calledM && calledM.Name == "set_Name")
+                            var ins = instrs[i];
+                            if (ins.OpCode == OpCodes.Call || ins.OpCode == OpCodes.Callvirt)
                             {
-                                var p1 = instrs[i - 1];
-                                var p2 = instrs[i - 2];
-                                if (p2.OpCode == OpCodes.Ldarg_0 && p1.OpCode == OpCodes.Ldstr && p1.Operand is string strVal)
+                                if (ins.Operand is IMethod calledM && IsControlSetName(calledM))
                                 {
-                                    strVal = strVal.Trim();
-                                    if (IsValidIdentifier(strVal))
+                                    var p1 = instrs[i - 1];
+                                    var p2 = instrs[i - 2];
+                                    if (p2.OpCode == OpCodes.Ldarg_0 && p1.OpCode == OpCodes.Ldstr && p1.Operand is string strVal)
                                     {
-                                        discoveredName = strVal;
-                                        confidence = RenameConfidence.StrongReference;
-                                        justification = $"Proven by Control.set_Name call in method '{method.Name}'";
-                                        break;
+                                        strVal = strVal.Trim();
+                                        if (IsValidIdentifier(strVal))
+                                        {
+                                            discoveredName = strVal;
+                                            confidence = RenameConfidence.StrongReference;
+                                            justification = $"Proven by Control.set_Name call in method '{method.Name}'";
+                                            break;
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    if (discoveredName != null)
-                        break;
+                        if (discoveredName != null)
+                            break;
+                    }
                 }
 
                 // Pattern 2: Check linked WinForm type in constructor:
                 // e.g. this.winForm = typeof(OrderDetailsForm);
-                if (discoveredName == null)
+                if (discoveredName == null && IsWinFormsControlOrForm(type))
                 {
                     var ctor = type.FindDefaultConstructor() ?? type.Methods.FirstOrDefault(m => m.IsConstructor);
                     if (ctor != null && ctor.HasBody)
@@ -357,26 +458,41 @@ namespace ConfuserExKillerRunner.Killers
             if (module.Resources.Any(r => r.Name.Equals(newResName)))
                 return;
 
-            // Search for resource matching oldFullName or oldName
-            var oldRes = module.Resources.FirstOrDefault(r =>
+            // Search for resource matching exactly oldFullName or oldName (never fuzzy Contains)
+            var matchingResources = module.Resources.Where(r =>
                 r.Name.Equals(oldFullName + ".resources") ||
-                r.Name.Equals(oldName + ".resources") ||
-                (!string.IsNullOrEmpty(oldName) && r.Name.String.Contains(oldName)));
+                r.Name.Equals(oldName + ".resources")).ToList();
 
-            if (oldRes != null && oldRes.Name != newResName)
+            if (matchingResources.Count == 1)
             {
-                string oldResName = oldRes.Name.String;
-                oldRes.Name = newResName;
-                result.ResourcesRenamed++;
+                var oldRes = matchingResources[0];
+                if (oldRes.Name != newResName)
+                {
+                    string oldResName = oldRes.Name.String;
+                    oldRes.Name = newResName;
+                    result.ResourcesRenamed++;
 
+                    result.Decisions.Add(new RenameDecision
+                    {
+                        OriginalName = oldResName,
+                        NewName = newResName,
+                        SymbolType = "Resource",
+                        Confidence = RenameConfidence.StrongReference,
+                        Justification = $"Synchronized manifest resource for renamed form '{type.FullName}'",
+                        Applied = true
+                    });
+                }
+            }
+            else if (matchingResources.Count > 1)
+            {
                 result.Decisions.Add(new RenameDecision
                 {
-                    OriginalName = oldResName,
+                    OriginalName = oldFullName,
                     NewName = newResName,
                     SymbolType = "Resource",
-                    Confidence = RenameConfidence.StrongReference,
-                    Justification = $"Synchronized manifest resource for renamed form '{type.FullName}'",
-                    Applied = true
+                    Confidence = RenameConfidence.Ambiguous,
+                    Justification = $"Multiple manifest resources match type '{type.FullName}'. Preserved without renaming.",
+                    Applied = false
                 });
             }
         }
@@ -725,7 +841,7 @@ namespace ConfuserExKillerRunner.Killers
                         // Pattern 1: ldarg.0; ldfld <field>; ldstr "btnSave"; callvirt set_Name
                         if (ins.OpCode == OpCodes.Callvirt || ins.OpCode == OpCodes.Call)
                         {
-                            if (ins.Operand is IMethod calledM && calledM.Name == "set_Name")
+                            if (ins.Operand is IMethod calledM && IsControlSetName(calledM))
                             {
                                 if (i >= 2 && instrs[i - 1].OpCode == OpCodes.Ldstr && instrs[i - 1].Operand is string ctrlName)
                                 {
@@ -744,8 +860,11 @@ namespace ConfuserExKillerRunner.Killers
 
                                         if (targetField != null && !fieldControlNames.ContainsKey(targetField))
                                         {
-                                            // Check reflection and public access protection
-                                            if (!targetField.IsPublic && !refMap.ExplicitMemberNames.Contains(targetField.Name.String))
+                                            // Check reflection, compiler-generated, and public/family access protection
+                                            if (!targetField.IsPublic && !targetField.IsFamily &&
+                                                !IsCompilerGenerated(targetField) &&
+                                                !refMap.ExplicitMemberNames.Contains(targetField.Name.String) &&
+                                                !refMap.StringLiterals.Contains(targetField.Name.String))
                                             {
                                                 fieldControlNames[targetField] = ctrlName;
                                             }
@@ -766,8 +885,10 @@ namespace ConfuserExKillerRunner.Killers
                                     (instrs[i - 2].OpCode == OpCodes.Ldftn) &&
                                     instrs[i - 2].Operand is MethodDef handlerMethod && handlerMethod.DeclaringType == type)
                                 {
-                                    // Protect public methods, virtual/override methods, and methods referenced by reflection
-                                    if (handlerMethod.IsPublic || handlerMethod.IsVirtual || handlerMethod.HasOverrides ||
+                                    // Protect public, protected, virtual, override, interface, P/Invoke, compiler generated, and reflection methods
+                                    if (handlerMethod.IsPublic || handlerMethod.IsFamily || handlerMethod.IsVirtual || handlerMethod.HasOverrides ||
+                                        handlerMethod.Overrides.Count > 0 || handlerMethod.IsPinvokeImpl ||
+                                        IsCompilerGenerated(handlerMethod) ||
                                         refMap.ExplicitMemberNames.Contains(handlerMethod.Name.String) ||
                                         refMap.StringLiterals.Contains(handlerMethod.Name.String))
                                     {
@@ -1028,10 +1149,25 @@ namespace ConfuserExKillerRunner.Killers
 
             if (matchedRes == null)
             {
-                matchedRes = module.Resources.OfType<EmbeddedResource>()
-                    .FirstOrDefault(r => r.Name.Equals(oldFullName + ".resources") ||
-                                         r.Name.Equals(oldName + ".resources") ||
-                                         (!string.IsNullOrEmpty(oldName) && r.Name.String.Contains(oldName)));
+                var candidateResources = module.Resources.OfType<EmbeddedResource>()
+                    .Where(r => r.Name.Equals(oldFullName + ".resources") ||
+                                r.Name.Equals(oldName + ".resources")).ToList();
+                if (candidateResources.Count == 1)
+                {
+                    matchedRes = candidateResources[0];
+                }
+                else if (candidateResources.Count > 1)
+                {
+                    result.Decisions.Add(new RenameDecision
+                    {
+                        OriginalName = oldFullName,
+                        NewName = expectedResName,
+                        SymbolType = "Resource",
+                        Confidence = RenameConfidence.Ambiguous,
+                        Justification = $"Multiple manifest resources match strongly-typed resource '{type.FullName}'. Preserved without renaming.",
+                        Applied = false
+                    });
+                }
             }
 
             if (matchedRes == null)
@@ -1248,6 +1384,16 @@ namespace ConfuserExKillerRunner.Killers
                 if (type.IsGlobalModuleType)
                     continue;
 
+                // API & Member Protection: Do NOT normalize public types, nested public types, protected types, compiler generated, or reflection-targeted
+                if (type.IsPublic || type.IsNestedPublic || type.IsNestedFamily || type.IsNestedFamilyOrAssembly)
+                    continue;
+
+                if (IsCompilerGenerated(type))
+                    continue;
+
+                if (refMap.ExplicitTypeNames.Contains(type.Name.String) || refMap.ExplicitTypeNames.Contains(type.FullName))
+                    continue;
+
                 // Normalize Type name
                 if (IsMangledIdentifier(type.Name.String))
                 {
@@ -1290,11 +1436,19 @@ namespace ConfuserExKillerRunner.Killers
                 // Normalize Fields
                 foreach (var field in type.Fields)
                 {
+                    if (field.IsPublic || field.IsFamily || field.IsFamilyOrAssembly)
+                        continue;
+                    if (field.IsSpecialName || field.IsRuntimeSpecialName)
+                        continue;
+                    if (IsCompilerGenerated(field))
+                        continue;
+                    if (refMap.ExplicitMemberNames.Contains(field.Name.String))
+                        continue;
+                    if (IsSerializationMember(field))
+                        continue;
+
                     if (IsMangledIdentifier(field.Name.String))
                     {
-                        if (refMap.ExplicitMemberNames.Contains(field.Name.String))
-                            continue;
-
                         string oldFName = field.Name.String;
                         field.Name = $"field_{field.Rid}";
                         result.UnprintableNormalized++;
@@ -1314,12 +1468,27 @@ namespace ConfuserExKillerRunner.Killers
                 // Normalize Methods
                 foreach (var method in type.Methods)
                 {
-                    if (method.IsConstructor || method.IsRuntimeSpecialName || method.Name == "Invoke" || method.Name == "BeginInvoke" || method.Name == "EndInvoke")
+                    if (method.IsConstructor || method.IsStaticConstructor || method.IsRuntimeSpecialName ||
+                        method.Name == "Invoke" || method.Name == "BeginInvoke" || method.Name == "EndInvoke")
                         continue;
 
-                    // Preserve virtual, override, and reflection-targeted methods
-                    if (method.IsVirtual || method.HasOverrides || refMap.ExplicitMemberNames.Contains(method.Name.String))
+                    // Preserve public, protected, virtual, override, interface, PInvoke, compiler-generated, reflection
+                    if (method.IsPublic || method.IsFamily || method.IsFamilyOrAssembly)
                         continue;
+                    if (method.IsVirtual || method.IsAbstract || method.HasOverrides || method.Overrides.Count > 0)
+                        continue;
+                    if (method.IsPinvokeImpl || method.IsNative)
+                        continue;
+                    if (IsCompilerGenerated(method))
+                        continue;
+                    if (refMap.ExplicitMemberNames.Contains(method.Name.String))
+                        continue;
+
+                    if ((method.Name.StartsWith("get_") || method.Name.StartsWith("set_")) &&
+                        refMap.ExplicitMemberNames.Contains(method.Name.String.Substring(4)))
+                    {
+                        continue;
+                    }
 
                     if (IsMangledIdentifier(method.Name.String))
                     {
@@ -1361,7 +1530,15 @@ namespace ConfuserExKillerRunner.Killers
                 // Normalize Properties
                 foreach (var prop in type.Properties)
                 {
+                    if (prop.IsSpecialName) continue;
+                    if (IsCompilerGenerated(prop)) continue;
                     if (refMap.ExplicitMemberNames.Contains(prop.Name.String))
+                        continue;
+
+                    var getter = prop.GetMethod;
+                    var setter = prop.SetMethod;
+                    if ((getter != null && (getter.IsPublic || getter.IsFamily)) ||
+                        (setter != null && (setter.IsPublic || setter.IsFamily)))
                         continue;
 
                     if (IsMangledIdentifier(prop.Name.String))
@@ -1385,7 +1562,13 @@ namespace ConfuserExKillerRunner.Killers
                 // Normalize Events
                 foreach (var ev in type.Events)
                 {
+                    if (ev.IsSpecialName) continue;
+                    if (IsCompilerGenerated(ev)) continue;
                     if (refMap.ExplicitMemberNames.Contains(ev.Name.String))
+                        continue;
+
+                    var addM = ev.AddMethod;
+                    if (addM != null && (addM.IsPublic || addM.IsFamily))
                         continue;
 
                     if (IsMangledIdentifier(ev.Name.String))
@@ -1412,21 +1595,121 @@ namespace ConfuserExKillerRunner.Killers
 
         #region Helpers
 
+        public static bool IsCompilerGeneratedIdentifier(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            if (name.StartsWith("<PrivateImplementationDetails>", StringComparison.Ordinal)) return true;
+            if (name.StartsWith("<>c", StringComparison.Ordinal)) return true;
+            if (name.StartsWith("<>z__", StringComparison.Ordinal)) return true;
+            if (name.StartsWith("CS$<>", StringComparison.Ordinal)) return true;
+            if (name.StartsWith("$ArrayType$", StringComparison.Ordinal)) return true;
+            if (name.StartsWith("<") && name.Contains(">")) return true;
+            return false;
+        }
+
+        public static bool IsCompilerGenerated(IHasCustomAttribute member)
+        {
+            if (member == null) return false;
+            if (member is IMemberDef md && IsCompilerGeneratedIdentifier(md.Name))
+                return true;
+            if (member.HasCustomAttributes)
+            {
+                foreach (var ca in member.CustomAttributes)
+                {
+                    string fn = ca.TypeFullName;
+                    if (fn == "System.Runtime.CompilerServices.CompilerGeneratedAttribute" ||
+                        fn == "System.Runtime.CompilerServices.AsyncStateMachineAttribute" ||
+                        fn == "System.Runtime.CompilerServices.IteratorStateMachineAttribute")
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        public static bool IsWinFormsControlOrForm(TypeDef type)
+        {
+            if (type == null) return false;
+            var curr = type.BaseType;
+            int depth = 0;
+            while (curr != null && depth++ < 20)
+            {
+                string fn = curr.FullName;
+                if (fn == "System.Windows.Forms.Control" ||
+                    fn == "System.Windows.Forms.Form" ||
+                    fn == "System.Windows.Forms.UserControl" ||
+                    fn == "System.Windows.Forms.ContainerControl" ||
+                    fn.StartsWith("DevExpress.XtraEditors.XtraForm") ||
+                    fn.StartsWith("DevExpress.XtraEditors.XtraUserControl") ||
+                    fn.StartsWith("DevExpress.XtraBars.Ribbon.RibbonForm"))
+                {
+                    return true;
+                }
+                if (fn == "System.Object") break;
+
+                var td = curr.ResolveTypeDef();
+                if (td == null) break;
+                curr = td.BaseType;
+            }
+            return false;
+        }
+
+        public static bool IsControlSetName(IMethod method)
+        {
+            if (method == null || method.Name != "set_Name") return false;
+            var dt = method.DeclaringType;
+            if (dt == null) return false;
+            string fn = dt.FullName;
+            if (fn == "System.Windows.Forms.Control" ||
+                fn == "System.Windows.Forms.Form" ||
+                fn == "System.Windows.Forms.UserControl" ||
+                fn.StartsWith("DevExpress.XtraEditors.") ||
+                fn.StartsWith("DevExpress.XtraBars."))
+            {
+                return true;
+            }
+            var td = (dt as TypeDef) ?? dt.ResolveTypeDef();
+            if (td != null && IsWinFormsControlOrForm(td))
+                return true;
+
+            return false;
+        }
+
+        private static bool IsSerializationMember(IHasCustomAttribute member)
+        {
+            if (member == null || !member.HasCustomAttributes) return false;
+            foreach (var ca in member.CustomAttributes)
+            {
+                string fn = ca.TypeFullName;
+                if (fn == "System.Runtime.Serialization.DataMemberAttribute" ||
+                    fn == "System.Xml.Serialization.XmlElementAttribute" ||
+                    fn == "System.Xml.Serialization.XmlAttributeAttribute" ||
+                    fn.EndsWith(".JsonPropertyAttribute"))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         public static bool IsMangledIdentifier(string name)
         {
             if (string.IsNullOrEmpty(name)) return false;
+            if (IsCompilerGeneratedIdentifier(name)) return false;
 
             foreach (char c in name)
             {
                 int code = (int)c;
-                // Zero-width and formatting unicode characters
+                // Zero-width and formatting unicode characters (ConfuserEx Unicode mode)
                 if (code >= 0x2000 && code <= 0x206F) return true;
                 if (code >= 0xFE00 && code <= 0xFEFF) return true;
                 if (char.IsControl(c) || char.GetUnicodeCategory(c) == UnicodeCategory.Format) return true;
-                // ConfuserEx unprintable/ASCII scrambled chars
-                if (c == '#' || c == '$' || c == '%' || c == '\'' || c == '\\' || c == '/' ||
+
+                // ConfuserEx unprintable/ASCII scrambled chars (strictly excluding <, >, and $)
+                if (c == '#' || c == '%' || c == '\'' || c == '\\' || c == '/' ||
                     c == '{' || c == '}' || c == '~' || c == '!' || c == '^' || c == '?' ||
-                    c == '*' || c == '|' || c == '<' || c == '>' || c == ';' || c == '=')
+                    c == '*' || c == '|' || c == ';' || c == '=')
                     return true;
             }
 

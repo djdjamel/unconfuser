@@ -886,6 +886,12 @@ namespace ConfuserExKillerRunner
                     Console.WriteLine("[*] Step 6.1: Running SemanticRenamer (Restoring Forms, Controls, Handlers, and Resources)...");
                     semResult = SemanticRenamer.Execute(module2, verbose);
                     Console.WriteLine($"[+] SemanticRenamer: {semResult.Message}");
+                    try
+                    {
+                        string mappingPath = Path.ChangeExtension(finalOutputPath, ".rename_map.txt");
+                        semResult.SaveMappingReport(mappingPath);
+                    }
+                    catch { }
                     FinalizeMethodBodies(module2);
                     stepTimings["Stage6_SemanticRenamer"] = swSemantic.ElapsedMilliseconds;
                 }

@@ -1133,15 +1133,7 @@ namespace ConfuserExKillerRunner.Analysis
 
         public static bool IsConfuserExObfuscatedIdentifier(string name)
         {
-            if (string.IsNullOrEmpty(name)) return false;
-            foreach (char c in name)
-            {
-                int code = (int)c;
-                if (code >= 0x2000 && code <= 0x206F) return true;
-                if (code >= 0xFE00 && code <= 0xFEFF) return true;
-                if (char.IsControl(c) || char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.Format) return true;
-            }
-            return false;
+            return ConfuserExKillerRunner.Killers.SemanticRenamer.IsMangledIdentifier(name);
         }
     }
 }

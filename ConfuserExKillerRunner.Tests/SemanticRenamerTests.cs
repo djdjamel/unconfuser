@@ -14,7 +14,7 @@ namespace ConfuserExKillerRunner.Tests
         public void Execute_RenamesFormBasedOnSetName()
         {
             var module = new ModuleDefUser("TestApp.dll");
-            var formType = new TypeDefUser("", "Class123", module.CorLibTypes.Object.TypeDefOrRef);
+            var formType = new TypeDefUser("", "Class123", new TypeRefUser(module, "System.Windows.Forms", "Form", module.CorLibTypes.AssemblyRef));
             module.Types.Add(formType);
 
             // Create a method with: ldarg.0, ldstr "MyCustomerForm", call set_Name
@@ -480,7 +480,7 @@ namespace ConfuserExKillerRunner.Tests
         public void Execute_TypeLoadedViaTypeGetType_UpdatesLdstrOperand()
         {
             var module = new ModuleDefUser("TestApp.dll");
-            var formType = new TypeDefUser("TestApp", "Class123", module.CorLibTypes.Object.TypeDefOrRef);
+            var formType = new TypeDefUser("TestApp", "Class123", new TypeRefUser(module, "System.Windows.Forms", "Form", module.CorLibTypes.AssemblyRef));
             module.Types.Add(formType);
 
             // Form InitializeComponent has set_Name("InvoiceReportForm")
@@ -519,7 +519,7 @@ namespace ConfuserExKillerRunner.Tests
         {
             var module = new ModuleDefUser("TestApp.dll");
             // Public type with name referenced in generic string literal (e.g. config/serialization)
-            var publicType = new TypeDefUser("TestApp", "Class555", module.CorLibTypes.Object.TypeDefOrRef);
+            var publicType = new TypeDefUser("TestApp", "Class555", new TypeRefUser(module, "System.Windows.Forms", "Form", module.CorLibTypes.AssemblyRef));
             publicType.Attributes = TypeAttributes.Public;
             module.Types.Add(publicType);
 
@@ -547,6 +547,474 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal("Class555", publicType.Name.String);
             Assert.Contains(result.Decisions, d => d.OriginalName.Contains("Class555") && !d.Applied);
         }
+
+        #region C10 Comprehensive Test Matrix
+
+        [Fact]
+        public void C10_01_CompilerGenerated_AngleBracketNames_Preserved()
+        {
+            Assert.False(SemanticRenamer.IsMangledIdentifier("<>c"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("<>c__DisplayClass0_0"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("<Main>d__0"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("<CustomerName>k__BackingField"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("<PrivateImplementationDetails>"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("<>b__0_1"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("CS$<>8__locals1"));
+        }
+
+        [Fact]
+        public void C10_02_CompilerGenerated_AsyncStateMachineClass_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var asyncType = new TypeDefUser("TestApp", "<DoWorkAsync>d__1", module.CorLibTypes.Object.TypeDefOrRef);
+            asyncType.Attributes = TypeAttributes.NotPublic | TypeAttributes.BeforeFieldInit;
+            module.Types.Add(asyncType);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("<DoWorkAsync>d__1", asyncType.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        public void C10_03_CompilerGenerated_IteratorStateMachineClass_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var iterType = new TypeDefUser("TestApp", "<GetEnumerator>d__0", module.CorLibTypes.Object.TypeDefOrRef);
+            iterType.Attributes = TypeAttributes.NotPublic | TypeAttributes.BeforeFieldInit;
+            module.Types.Add(iterType);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("<GetEnumerator>d__0", iterType.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        public void C10_04_CompilerGenerated_BackingFields_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var hostType = new TypeDefUser("TestApp", "CustomerModel", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(hostType);
+
+            var backingField = new FieldDefUser("<Age>k__BackingField", new FieldSig(module.CorLibTypes.Int32), FieldAttributes.Private);
+            hostType.Fields.Add(backingField);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("<Age>k__BackingField", backingField.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        public void C10_05_APIProtection_PublicTypes_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var pubType = new TypeDefUser("TestApp", "\u200B\u200CPublicClass", module.CorLibTypes.Object.TypeDefOrRef);
+            pubType.Attributes = TypeAttributes.Public;
+            module.Types.Add(pubType);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200CPublicClass", pubType.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        public void C10_06_APIProtection_PublicMethods_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var hostType = new TypeDefUser("TestApp", "MyService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(hostType);
+
+            var pubMethod = new MethodDefUser("\u200B\u200CDoPublicAction", MethodSig.CreateInstance(module.CorLibTypes.Void),
+                MethodAttributes.Public | MethodAttributes.HideBySig);
+            pubMethod.Body = new CilBody();
+            pubMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            hostType.Methods.Add(pubMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200CDoPublicAction", pubMethod.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        public void C10_07_APIProtection_OverridesAndInterfaceImplementations_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var hostType = new TypeDefUser("TestApp", "Repository", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(hostType);
+
+            // Method with explicit override
+            var explicitMethod = new MethodDefUser("\u200B\u200CInterfaceMethod", MethodSig.CreateInstance(module.CorLibTypes.Void),
+                MethodAttributes.Private | MethodAttributes.Final | MethodAttributes.Virtual | MethodAttributes.NewSlot | MethodAttributes.HideBySig);
+            explicitMethod.Body = new CilBody();
+            explicitMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+            var ifaceMethodRef = new MemberRefUser(module, "Save", MethodSig.CreateInstance(module.CorLibTypes.Void),
+                new TypeRefUser(module, "TestApp", "IRepository", module.CorLibTypes.AssemblyRef));
+            explicitMethod.Overrides.Add(new MethodOverride(explicitMethod, ifaceMethodRef));
+            hostType.Methods.Add(explicitMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200CInterfaceMethod", explicitMethod.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        public void C10_08_WinForms_LegitimateControlSetName_Renamed()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var formType = new TypeDefUser("TestApp", "Class101", new TypeRefUser(module, "System.Windows.Forms", "Form", module.CorLibTypes.AssemblyRef));
+            module.Types.Add(formType);
+
+            var initM = new MethodDefUser("InitializeComponent", MethodSig.CreateInstance(module.CorLibTypes.Void)) { Body = new CilBody() };
+            var setNameRef = new MemberRefUser(module, "set_Name",
+                MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String),
+                new TypeRefUser(module, "System.Windows.Forms", "Control", module.CorLibTypes.AssemblyRef));
+
+            initM.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            initM.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "PurchaseOrderForm"));
+            initM.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, setNameRef));
+            initM.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            formType.Methods.Add(initM);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal(1, result.TypesRenamed);
+            Assert.Equal("PurchaseOrderForm", formType.Name.String);
+        }
+
+        [Fact]
+        public void C10_09_WinForms_OrdinaryClassWithSetName_NegativeTest_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            // Ordinary class deriving from Object, not a Form or Control!
+            var personType = new TypeDefUser("TestApp", "Person", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(personType);
+
+            var setPropMethod = new MethodDefUser("set_Name", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String))
+            {
+                Body = new CilBody()
+            };
+            setPropMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            personType.Methods.Add(setPropMethod);
+
+            var initMethod = new MethodDefUser("Init", MethodSig.CreateInstance(module.CorLibTypes.Void)) { Body = new CilBody() };
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "JohnDoe"));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, setPropMethod));
+            initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            personType.Methods.Add(initMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // Person must NOT be renamed to JohnDoe!
+            Assert.Equal("Person", personType.Name.String);
+            Assert.Equal(0, result.TypesRenamed);
+        }
+
+        [Fact]
+        public void C10_10_ReflectionProtection_TypeGetMethodWithBindingFlags_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var targetType = new TypeDefUser("TestApp", "WorkerService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(targetType);
+
+            var secretMethod = new MethodDefUser("\u200B\u200CExecuteInternal", MethodSig.CreateInstance(module.CorLibTypes.Void),
+                MethodAttributes.Private | MethodAttributes.HideBySig);
+            secretMethod.Body = new CilBody();
+            secretMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            targetType.Methods.Add(secretMethod);
+
+            // Caller invokes typeof(WorkerService).GetMethod("\u200B\u200CExecuteInternal", BindingFlags.NonPublic | BindingFlags.Instance)
+            var callerType = new TypeDefUser("TestApp", "Caller", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var callerMethod = new MethodDefUser("Run", MethodSig.CreateStatic(module.CorLibTypes.Void)) { Body = new CilBody() };
+            var getMethodRef = new MemberRefUser(module, "GetMethod",
+                MethodSig.CreateInstance(new TypeRefUser(module, "System.Reflection", "MethodInfo", module.CorLibTypes.AssemblyRef).ToTypeSig(),
+                    module.CorLibTypes.String, module.CorLibTypes.Int32),
+                new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef));
+
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, targetType));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "\u200B\u200CExecuteInternal"));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_S, (sbyte)60)); // BindingFlags
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(callerMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200CExecuteInternal", secretMethod.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        public void C10_11_ReflectionProtection_EnumParse_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var enumType = new TypeDefUser("TestApp", "UserRole", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(enumType);
+
+            var adminField = new FieldDefUser("\u200B\u200CAdministrator", new FieldSig(module.CorLibTypes.Int32),
+                FieldAttributes.Public | FieldAttributes.Static | FieldAttributes.Literal);
+            enumType.Fields.Add(adminField);
+
+            var callerType = new TypeDefUser("TestApp", "Parser", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var parseM = new MethodDefUser("ParseRole", MethodSig.CreateStatic(module.CorLibTypes.Void)) { Body = new CilBody() };
+            var enumParseRef = new MemberRefUser(module, "Parse",
+                MethodSig.CreateStatic(module.CorLibTypes.Object,
+                    new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef).ToTypeSig(),
+                    module.CorLibTypes.String),
+                new TypeRefUser(module, "System", "Enum", module.CorLibTypes.AssemblyRef));
+
+            parseM.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, enumType));
+            parseM.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "\u200B\u200CAdministrator"));
+            parseM.Body.Instructions.Add(Instruction.Create(OpCodes.Call, enumParseRef));
+            parseM.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            parseM.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(parseM);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200CAdministrator", adminField.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        public void C10_12_ReflectionProtection_DataBindingsAdd_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var modelType = new TypeDefUser("TestApp", "CustomerInfo", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(modelType);
+
+            var getter = new MethodDefUser("get_\u200B\u200CPostalCode", MethodSig.CreateInstance(module.CorLibTypes.String)) { Body = new CilBody() };
+            getter.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            getter.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            modelType.Methods.Add(getter);
+            var prop = new PropertyDefUser("\u200B\u200CPostalCode", new PropertySig(true, module.CorLibTypes.String)) { GetMethod = getter };
+            modelType.Properties.Add(prop);
+
+            var callerType = new TypeDefUser("TestApp", "FormBinding", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var bindM = new MethodDefUser("BindControls", MethodSig.CreateInstance(module.CorLibTypes.Void)) { Body = new CilBody() };
+            var bindingsAddRef = new MemberRefUser(module, "Add",
+                MethodSig.CreateInstance(module.CorLibTypes.Void,
+                    module.CorLibTypes.String, module.CorLibTypes.Object, module.CorLibTypes.String),
+                new TypeRefUser(module, "System.Windows.Forms", "ControlBindingsCollection", module.CorLibTypes.AssemblyRef));
+
+            bindM.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            bindM.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "Text"));
+            bindM.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            bindM.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "\u200B\u200CPostalCode"));
+            bindM.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, bindingsAddRef));
+            bindM.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(bindM);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200CPostalCode", prop.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        public void C10_13_ReflectionProtection_DynamicUnresolvedNames_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var dynType = new TypeDefUser("TestApp", "Class999", new TypeRefUser(module, "System.Windows.Forms", "Form", module.CorLibTypes.AssemblyRef));
+            dynType.Attributes = TypeAttributes.Public;
+            module.Types.Add(dynType);
+
+            var initM = new MethodDefUser("InitializeComponent", MethodSig.CreateInstance(module.CorLibTypes.Void)) { Body = new CilBody() };
+            var setNameRef = new MemberRefUser(module, "set_Name",
+                MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String),
+                new TypeRefUser(module, "System.Windows.Forms", "Control", module.CorLibTypes.AssemblyRef));
+            initM.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            initM.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "PluginWindow"));
+            initM.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, setNameRef));
+            initM.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            dynType.Methods.Add(initM);
+
+            // App contains a string literal "Class999" without explicit Type.GetType (e.g. factory or dynamic lookup)
+            var hostType = new TypeDefUser("TestApp", "Host", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(hostType);
+            var m = new MethodDefUser("GetPluginName", MethodSig.CreateStatic(module.CorLibTypes.String)) { Body = new CilBody() };
+            m.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "Class999"));
+            m.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            hostType.Methods.Add(m);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("Class999", dynType.Name.String);
+            Assert.Contains(result.Decisions, d => d.Confidence == RenameConfidence.Ambiguous && !d.Applied);
+        }
+
+        [Fact]
+        public void C10_14_ResourceDisambiguation_NoSubstringCollision_ExactMatch()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var userForm = new TypeDefUser("TestApp", "ClassUser", new TypeRefUser(module, "System.Windows.Forms", "Form", module.CorLibTypes.AssemblyRef));
+            module.Types.Add(userForm);
+
+            var initM = new MethodDefUser("InitializeComponent", MethodSig.CreateInstance(module.CorLibTypes.Void)) { Body = new CilBody() };
+            var setNameRef = new MemberRefUser(module, "set_Name",
+                MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String),
+                new TypeRefUser(module, "System.Windows.Forms", "Control", module.CorLibTypes.AssemblyRef));
+            initM.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            initM.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "UserForm"));
+            initM.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, setNameRef));
+            initM.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            userForm.Methods.Add(initM);
+
+            // Existing resource has substring "User" but belongs to UserProfileForm:
+            // "TestApp.UserProfileForm.resources"
+            var otherRes = new EmbeddedResource("TestApp.UserProfileForm.resources", new byte[] { 1, 2, 3 });
+            module.Resources.Add(otherRes);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // otherRes must NOT be renamed to UserForm.resources on a substring match!
+            Assert.Equal("TestApp.UserProfileForm.resources", otherRes.Name.String);
+            Assert.Equal(0, result.ResourcesRenamed);
+        }
+
+        [Fact]
+        public void C10_15_ResourceDisambiguation_AmbiguousResources_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var formType = new TypeDefUser("TestApp", "FormA", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(formType);
+            formType.Fields.Add(new FieldDefUser("btn1", new FieldSig(module.CorLibTypes.Object), FieldAttributes.Private));
+
+            byte[] b1;
+            using (var ms = new MemoryStream())
+            {
+                using (var rw = new System.Resources.ResourceWriter(ms))
+                {
+                    rw.AddResource("btn1.Text", "OK");
+                    rw.Generate();
+                }
+                b1 = ms.ToArray();
+            }
+
+            var r1 = new EmbeddedResource("mangled#1.resources", b1);
+            var r2 = new EmbeddedResource("mangled#2.resources", b1);
+            module.Resources.Add(r1);
+            module.Resources.Add(r2);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("mangled#1.resources", r1.Name.String);
+            Assert.Equal("mangled#2.resources", r2.Name.String);
+            Assert.Contains(result.Decisions, d => d.Confidence == RenameConfidence.Ambiguous && !d.Applied);
+        }
+
+        [Fact]
+        public void C10_16_Detection_ASCIIControlChars_Detected()
+        {
+            // ASCII control character \u0001 or \u001F
+            string asciiMangled = "Test\u0001\u001FIdentifier";
+            Assert.True(SemanticRenamer.IsMangledIdentifier(asciiMangled));
+        }
+
+        [Fact]
+        public void C10_17_Detection_UnicodeZeroWidthAndFormatChars_Detected()
+        {
+            // Zero-width space \u200B and joiner \u200D
+            string unicodeMangled = "\u200B\u200DSubRoutine";
+            Assert.True(SemanticRenamer.IsMangledIdentifier(unicodeMangled));
+        }
+
+        [Fact]
+        public void C10_18_Metrics_NormalizedSymbolsNotAnnouncedAsRestored()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var type = new TypeDefUser("TestApp", "SafeContainer", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(type);
+
+            // Add private method with mangled unicode
+            var m = new MethodDefUser("\u200B\u200CInternalHelper", MethodSig.CreateInstance(module.CorLibTypes.Void),
+                MethodAttributes.Private | MethodAttributes.HideBySig);
+            m.Body = new CilBody();
+            m.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            type.Methods.Add(m);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // Normalized symbols MUST be in UnprintableNormalized, NOT MethodsRenamed (which represents semantic restoration)
+            Assert.Equal(0, result.MethodsRenamed);
+            Assert.True(result.UnprintableNormalized >= 1);
+            Assert.Contains("0 methods", result.Message);
+            Assert.Contains("normalized", result.Message);
+        }
+
+        [Fact]
+        public void C10_19_MappingReport_GeneratesExportableEvidence()
+        {
+            var result = new SemanticRenamerResult
+            {
+                TypesRenamed = 1,
+                UnprintableNormalized = 1
+            };
+            result.Decisions.Add(new RenameDecision
+            {
+                OriginalName = "Class123",
+                NewName = "MainForm",
+                SymbolType = "Type",
+                Confidence = RenameConfidence.StrongReference,
+                Justification = "Control.set_Name evidence",
+                Applied = true
+            });
+            result.Decisions.Add(new RenameDecision
+            {
+                OriginalName = "PublicApiType",
+                NewName = "PublicApiType",
+                SymbolType = "Type",
+                Confidence = RenameConfidence.Ambiguous,
+                Justification = "Public API preserved",
+                Applied = false
+            });
+
+            string report = result.GenerateMappingReport();
+
+            Assert.Contains("SEMANTIC RENAMING MAPPING REPORT", report);
+            Assert.Contains("[StrongReference]", report);
+            Assert.Contains("MainForm", report);
+            Assert.Contains("[Ambiguous]", report);
+            Assert.Contains("Public API preserved", report);
+        }
+
+        [Fact]
+        public void C10_20_APIProtection_PInvokeAndSerialization_Preserved()
+        {
+            var module = new ModuleDefUser("TestApp.dll");
+            var nativeHost = new TypeDefUser("TestApp", "NativeHost", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(nativeHost);
+
+            // P/Invoke method
+            var pinvokeMethod = new MethodDefUser("\u200B\u200CGetLastError", MethodSig.CreateStatic(module.CorLibTypes.Int32),
+                MethodAttributes.Private | MethodAttributes.PinvokeImpl | MethodAttributes.HideBySig);
+            nativeHost.Methods.Add(pinvokeMethod);
+
+            // Field with DataMemberAttribute
+            var serialField = new FieldDefUser("\u200B\u200CPayload", new FieldSig(module.CorLibTypes.String), FieldAttributes.Private);
+            var dataMemberCtor = new MemberRefUser(module, ".ctor", MethodSig.CreateInstance(module.CorLibTypes.Void),
+                new TypeRefUser(module, "System.Runtime.Serialization", "DataMemberAttribute", module.CorLibTypes.AssemblyRef));
+            serialField.CustomAttributes.Add(new CustomAttribute(dataMemberCtor));
+            nativeHost.Fields.Add(serialField);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200CGetLastError", pinvokeMethod.Name.String);
+            Assert.Equal("\u200B\u200CPayload", serialField.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        #endregion
     }
 }
 
