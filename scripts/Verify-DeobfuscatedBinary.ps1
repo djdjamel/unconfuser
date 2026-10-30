@@ -306,6 +306,9 @@ if (-not $WorkerMode) {
             if (-not ([System.Management.Automation.PSTypeName]'JobObjectIsolationHelper').Type) {
                 Add-Type -TypeDefinition @"
 using System;
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
 using System.Runtime.InteropServices;
 
 public static class JobObjectIsolationHelper {
@@ -323,6 +326,37 @@ public static class JobObjectIsolationHelper {
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool CreateProcess(
+        string lpApplicationName,
+        string lpCommandLine,
+        IntPtr lpProcessAttributes,
+        IntPtr lpThreadAttributes,
+        bool bInheritHandles,
+        uint dwCreationFlags,
+        IntPtr lpEnvironment,
+        string lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo,
+        out PROCESS_INFORMATION lpProcessInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint ResumeThread(IntPtr hThread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CreatePipe(out IntPtr hReadPipe, out IntPtr hWritePipe, ref SECURITY_ATTRIBUTES lpPipeAttributes, uint nSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetHandleInformation(IntPtr hObject, uint dwMask, uint dwFlags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct IO_COUNTERS {
@@ -353,6 +387,51 @@ public static class JobObjectIsolationHelper {
         public UIntPtr PeakJobMemoryLimit;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SECURITY_ATTRIBUTES {
+        public int nLength;
+        public IntPtr lpSecurityDescriptor;
+        public bool bInheritHandle;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct STARTUPINFO {
+        public int cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public int dwX;
+        public int dwY;
+        public int dwXSize;
+        public int dwYSize;
+        public int dwXCountChars;
+        public int dwYCountChars;
+        public int dwFillAttribute;
+        public int dwFlags;
+        public short wShowWindow;
+        public short cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROCESS_INFORMATION {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public int dwProcessId;
+        public int dwThreadId;
+    }
+
+    public const uint CREATE_SUSPENDED = 0x00000004;
+    public const uint CREATE_NO_WINDOW = 0x08000000;
+    public const int STARTF_USESTDHANDLES = 0x00000100;
+    public const uint HANDLE_FLAG_INHERIT = 0x00000001;
+    public const uint WAIT_OBJECT_0 = 0x00000000;
+    public const uint WAIT_TIMEOUT = 0x00000102;
+    public const uint WAIT_FAILED = 0xFFFFFFFF;
+
     public static IntPtr CreateJobWithLimits(ulong maxJobMemoryBytes, uint maxProcesses) {
         IntPtr job = CreateJobObject(IntPtr.Zero, null);
         if (job == IntPtr.Zero) return IntPtr.Zero;
@@ -373,11 +452,179 @@ public static class JobObjectIsolationHelper {
         IntPtr ptr = Marshal.AllocHGlobal(size);
         try {
             Marshal.StructureToPtr(info, ptr, false);
-            SetInformationJobObject(job, 9, ptr, (uint)size);
+            if (!SetInformationJobObject(job, 9, ptr, (uint)size)) {
+                CloseHandle(job);
+                return IntPtr.Zero;
+            }
         } finally {
             Marshal.FreeHGlobal(ptr);
         }
         return job;
+    }
+
+    public static bool ExecuteSuspendedInJob(
+        IntPtr hJob,
+        string exePath,
+        string cmdLine,
+        int timeoutMs,
+        out int exitCode,
+        out string stdOut,
+        out string stdErr,
+        out bool timedOut,
+        out string errorMessage)
+    {
+        exitCode = -1;
+        stdOut = "";
+        stdErr = "";
+        timedOut = false;
+        errorMessage = "";
+
+        if (hJob == IntPtr.Zero) {
+            errorMessage = "Invalid Job Object handle.";
+            return false;
+        }
+
+        var sa = new SECURITY_ATTRIBUTES();
+        sa.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+        sa.bInheritHandle = true;
+
+        IntPtr hOutRead = IntPtr.Zero, hOutWrite = IntPtr.Zero;
+        IntPtr hErrRead = IntPtr.Zero, hErrWrite = IntPtr.Zero;
+
+        if (!CreatePipe(out hOutRead, out hOutWrite, ref sa, 0) ||
+            !SetHandleInformation(hOutRead, HANDLE_FLAG_INHERIT, 0)) {
+            errorMessage = "Failed to create stdout pipe.";
+            if (hOutRead != IntPtr.Zero) CloseHandle(hOutRead);
+            if (hOutWrite != IntPtr.Zero) CloseHandle(hOutWrite);
+            return false;
+        }
+
+        if (!CreatePipe(out hErrRead, out hErrWrite, ref sa, 0) ||
+            !SetHandleInformation(hErrRead, HANDLE_FLAG_INHERIT, 0)) {
+            errorMessage = "Failed to create stderr pipe.";
+            CloseHandle(hOutRead);
+            CloseHandle(hOutWrite);
+            if (hErrRead != IntPtr.Zero) CloseHandle(hErrRead);
+            if (hErrWrite != IntPtr.Zero) CloseHandle(hErrWrite);
+            return false;
+        }
+
+        var si = new STARTUPINFO();
+        si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdOutput = hOutWrite;
+        si.hStdError = hErrWrite;
+
+        PROCESS_INFORMATION pi;
+        string fullCmd = "\"" + exePath + "\" " + cmdLine;
+        bool created = CreateProcess(null, fullCmd, IntPtr.Zero, IntPtr.Zero, true,
+            CREATE_SUSPENDED | CREATE_NO_WINDOW, IntPtr.Zero, null, ref si, out pi);
+
+        CloseHandle(hOutWrite);
+        CloseHandle(hErrWrite);
+
+        if (!created) {
+            int err = Marshal.GetLastWin32Error();
+            CloseHandle(hOutRead);
+            CloseHandle(hErrRead);
+            errorMessage = "CreateProcess failed with Win32 error " + err;
+            return false;
+        }
+
+        if (!AssignProcessToJobObject(hJob, pi.hProcess)) {
+            int assignErr = Marshal.GetLastWin32Error();
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            CloseHandle(hOutRead);
+            CloseHandle(hErrRead);
+            errorMessage = "Fail-closed: Process assignment to Job Object failed (Win32 error " + assignErr + "). Process terminated.";
+            return false;
+        }
+
+        uint resume = ResumeThread(pi.hThread);
+        if (resume == uint.MaxValue) {
+            int resErr = Marshal.GetLastWin32Error();
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            CloseHandle(hOutRead);
+            CloseHandle(hErrRead);
+            errorMessage = "Fail-closed: ResumeThread failed (Win32 error " + resErr + "). Process terminated.";
+            return false;
+        }
+
+        var sbOut = new StringBuilder();
+        var sbErr = new StringBuilder();
+
+        var outTask = Task.Run(() => {
+            try {
+                using (var fs = new FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(hOutRead, true), FileAccess.Read))
+                using (var r = new StreamReader(fs, Encoding.UTF8)) {
+                    string line;
+                    while ((line = r.ReadLine()) != null) {
+                        lock (sbOut) sbOut.AppendLine(line);
+                    }
+                }
+            } catch { }
+        });
+
+        var errTask = Task.Run(() => {
+            try {
+                using (var fs = new FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(hErrRead, true), FileAccess.Read))
+                using (var r = new StreamReader(fs, Encoding.UTF8)) {
+                    string line;
+                    while ((line = r.ReadLine()) != null) {
+                        lock (sbErr) sbErr.AppendLine(line);
+                    }
+                }
+            } catch { }
+        });
+
+        uint wait = WaitForSingleObject(pi.hProcess, (uint)Math.Max(100, timeoutMs));
+
+        if (wait == WAIT_TIMEOUT) {
+            TerminateJobObject(hJob, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            try { Task.WaitAll(new Task[] { outTask, errTask }, 1000); } catch { }
+            timedOut = true;
+            exitCode = -1;
+            stdOut = sbOut.ToString();
+            stdErr = sbErr.ToString();
+            return true;
+        }
+
+        if (wait == WAIT_FAILED) {
+            int waitErr = Marshal.GetLastWin32Error();
+            TerminateJobObject(hJob, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            try { Task.WaitAll(new Task[] { outTask, errTask }, 1000); } catch { }
+            errorMessage = "WaitForSingleObject failed with Win32 error " + waitErr;
+            exitCode = -1;
+            stdOut = sbOut.ToString();
+            stdErr = sbErr.ToString();
+            return false;
+        }
+
+        uint uExit = 0;
+        bool gotCode = GetExitCodeProcess(pi.hProcess, out uExit);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        try { Task.WaitAll(new Task[] { outTask, errTask }, 2000); } catch { }
+
+        stdOut = sbOut.ToString();
+        stdErr = sbErr.ToString();
+
+        if (!gotCode) {
+            errorMessage = "GetExitCodeProcess failed.";
+            exitCode = -1;
+            return false;
+        }
+
+        exitCode = (int)uExit;
+        return true;
     }
 }
 "@
@@ -388,96 +635,113 @@ public static class JobObjectIsolationHelper {
         }
     }
 
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $workerExe
-    $psi.Arguments = $workerArgs -join " "
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
+    # Fail-closed enforcement: if on Windows and Job Object failed to initialize, abort immediately
+    if ($isWin -and ($hJob -eq [IntPtr]::Zero)) {
+        Write-Host "[-] Fail-closed security: Failed to initialize Windows Job Object isolation." -ForegroundColor Red
+        $isoInitFailReport = @{
+            timestamp = $timestamp
+            commit_hash = $CommitHash
+            target = $targetFull
+            sha256 = $targetSha
+            status = "FAIL"
+            exit_code = 1
+            duration_ms = 0
+            bitness = 0
+            load_success = $false
+            load_error = "Fail-closed security: Failed to initialize Windows Job Object isolation."
+            module_cctor_status = "NOT_RUN"
+            module_cctor_error = $null
+            total_types = 0
+            types_discovered = 0
+            type_load_errors = @()
+            total_methods = 0
+            jit_success = 0
+            jit_skipped = 0
+            jit_failed_missing_dependency = 0
+            jit_failed_corrupted_il = 0
+            corrupted_il_failures = @()
+            dependency_failures = @()
+            forms_checked = 0
+            forms_success = 0
+            forms_failed = 0
+            form_failures = @()
+            summary = "Failed to initialize Windows Job Object isolation (fail-closed)"
+        }
+        Write-JsonReportFile $isoInitFailReport $ReportJson
+        exit 1
+    }
 
     # Sanitize environment: strip tokens, credentials, and secrets
     $sensitivePatterns = @("TOKEN", "SECRET", "KEY", "PASSWORD", "CREDENTIAL", "AUTH", "CONFUSEREX_")
-    foreach ($envKey in [System.Collections.ArrayList]($psi.EnvironmentVariables.Keys)) {
+    Get-ChildItem env: | ForEach-Object {
         foreach ($pat in $sensitivePatterns) {
-            if ($envKey -like "*$pat*") {
-                $psi.EnvironmentVariables.Remove($envKey)
+            if ($_.Name -like "*$pat*") {
+                Remove-Item "env:$($_.Name)" -ErrorAction SilentlyContinue
                 break
             }
         }
     }
 
-    $workerProc = [System.Diagnostics.Process]::Start($psi)
-
-    # Assign worker process to Job Object immediately
-    if ($hJob -ne [IntPtr]::Zero) {
-        try {
-            $assigned = [JobObjectIsolationHelper]::AssignProcessToJobObject($hJob, $workerProc.Handle)
-            if (-not $assigned) {
-                # Fail-closed enforcement on isolation failure
-                try { $workerProc.Kill() } catch { }
-                [JobObjectIsolationHelper]::CloseHandle($hJob) | Out-Null
-                Write-Host "[-] Fail-closed security: Failed to assign worker process to Windows Job Object." -ForegroundColor Red
-
-                $isoFailReport = @{
-                    timestamp = $timestamp
-                    commit_hash = $CommitHash
-                    target = $targetFull
-                    sha256 = $targetSha
-                    status = "FAIL"
-                    exit_code = 1
-                    duration_ms = 0
-                    bitness = if ($workerExe -like "*SysWOW64*") { 32 } else { 64 }
-                    load_success = $false
-                    load_error = "Fail-closed security: Failed to assign worker process to Windows Job Object."
-                    module_cctor_status = "NOT_RUN"
-                    module_cctor_error = $null
-                    total_types = 0
-                    types_discovered = 0
-                    type_load_errors = @()
-                    total_methods = 0
-                    jit_success = 0
-                    jit_skipped = 0
-                    jit_failed_missing_dependency = 0
-                    jit_failed_corrupted_il = 0
-                    corrupted_il_failures = @()
-                    dependency_failures = @()
-                    forms_checked = 0
-                    forms_success = 0
-                    forms_failed = 0
-                    form_failures = @()
-                    summary = "Worker Job Object isolation assignment failed (fail-closed)"
-                }
-                Write-JsonReportFile $isoFailReport $ReportJson
-                exit 1
-            }
-        } catch {
-            Write-Warning "Job Object assignment error: $_"
-        }
-    }
-
-    $stdoutTask = $workerProc.StandardOutput.ReadToEndAsync()
-    $stderrTask = $workerProc.StandardError.ReadToEndAsync()
-
     $timeoutMs = [Math]::Max(1000, $TimeoutSeconds * 1000)
-    $exited = $workerProc.WaitForExit($timeoutMs)
+    $workerExitCode = -1
+    $stdoutText = ""
+    $stderrText = ""
+    $isTimedOut = $false
+    $execErrMsg = ""
+
+    $execSuccess = [JobObjectIsolationHelper]::ExecuteSuspendedInJob(
+        $hJob,
+        $workerExe,
+        ($workerArgs -join " "),
+        $timeoutMs,
+        [ref]$workerExitCode,
+        [ref]$stdoutText,
+        [ref]$stderrText,
+        [ref]$isTimedOut,
+        [ref]$execErrMsg)
+
     $sw.Stop()
 
-    if (-not $exited) {
-        # Terminate Job Object to kill entire process tree including descendants
-        if ($hJob -ne [IntPtr]::Zero) {
-            try { [JobObjectIsolationHelper]::TerminateJobObject($hJob, 1) | Out-Null } catch { }
-        }
-        try {
-            Start-Process -FilePath "taskkill.exe" -ArgumentList "/F /T /PID $($workerProc.Id)" -NoNewWindow -Wait -ErrorAction SilentlyContinue
-        } catch { }
-        try {
-            if (-not $workerProc.HasExited) { $workerProc.Kill() }
-        } catch { }
-        if ($hJob -ne [IntPtr]::Zero) {
-            try { [JobObjectIsolationHelper]::CloseHandle($hJob) | Out-Null } catch { }
-        }
+    if ($hJob -ne [IntPtr]::Zero) {
+        try { [JobObjectIsolationHelper]::CloseHandle($hJob) | Out-Null } catch { }
+    }
 
+    if (-not $execSuccess -and -not $isTimedOut) {
+        Write-Host "[-] Fail-closed security: $execErrMsg" -ForegroundColor Red
+        $isoFailReport = @{
+            timestamp = $timestamp
+            commit_hash = $CommitHash
+            target = $targetFull
+            sha256 = $targetSha
+            status = "FAIL"
+            exit_code = 1
+            duration_ms = [int]$sw.ElapsedMilliseconds
+            bitness = if ($workerExe -like "*SysWOW64*") { 32 } else { 64 }
+            load_success = $false
+            load_error = "Fail-closed security: $execErrMsg"
+            module_cctor_status = "NOT_RUN"
+            module_cctor_error = $null
+            total_types = 0
+            types_discovered = 0
+            type_load_errors = @()
+            total_methods = 0
+            jit_success = 0
+            jit_skipped = 0
+            jit_failed_missing_dependency = 0
+            jit_failed_corrupted_il = 0
+            corrupted_il_failures = @()
+            dependency_failures = @()
+            forms_checked = 0
+            forms_success = 0
+            forms_failed = 0
+            form_failures = @()
+            summary = "Worker Job Object isolation assignment failed (fail-closed)"
+        }
+        Write-JsonReportFile $isoFailReport $ReportJson
+        exit 1
+    }
+
+    if ($isTimedOut) {
         Write-Host "[-] Verification worker process timed out after $TimeoutSeconds seconds. Process tree terminated." -ForegroundColor Red
 
         $timeoutReport = @{
@@ -513,15 +777,9 @@ public static class JobObjectIsolationHelper {
         exit 1
     }
 
-    if ($hJob -ne [IntPtr]::Zero) {
-        try { [JobObjectIsolationHelper]::CloseHandle($hJob) | Out-Null } catch { }
-    }
-
     # Worker finished
-    $stdoutText = $stdoutTask.Result
-    $stderrText = $stderrTask.Result
     if ($stdoutText) { Write-Host $stdoutText }
-    if ($stderrText -and $workerProc.ExitCode -ne 0) { Write-Host $stderrText -ForegroundColor Yellow }
+    if ($stderrText -and $workerExitCode -ne 0) { Write-Host $stderrText -ForegroundColor Yellow }
 
     # Fallback report if worker crashed before writing JSON
     if ($ReportJson -and (-not (Test-Path $ReportJson))) {
@@ -531,11 +789,11 @@ public static class JobObjectIsolationHelper {
             target = $targetFull
             sha256 = $targetSha
             status = "FAIL"
-            exit_code = $workerProc.ExitCode
+            exit_code = $workerExitCode
             duration_ms = [int]$sw.ElapsedMilliseconds
             bitness = if ($workerExe -like "*SysWOW64*") { 32 } else { 64 }
             load_success = $false
-            load_error = "Worker process terminated abnormally with exit code: $($workerProc.ExitCode)"
+            load_error = "Worker process terminated abnormally with exit code: $workerExitCode"
             module_cctor_status = "UNKNOWN"
             module_cctor_error = $stderrText
             total_types = 0
@@ -552,12 +810,12 @@ public static class JobObjectIsolationHelper {
             forms_success = 0
             forms_failed = 0
             form_failures = @()
-            summary = "Worker process crashed (ExitCode $($workerProc.ExitCode))"
+            summary = "Worker process crashed (ExitCode $workerExitCode)"
         }
         Write-JsonReportFile $crashReport $ReportJson
     }
 
-    exit $workerProc.ExitCode
+    exit $workerExitCode
 }
 
 # ==============================================================================

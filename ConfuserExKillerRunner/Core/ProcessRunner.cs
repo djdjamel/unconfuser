@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
+using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 using Tool;
 
@@ -125,6 +126,34 @@ namespace ConfuserExKillerRunner.Core
                 uint waitRes = JobObject.WaitForSingleObject(procInfo.hProcess, (uint)Math.Max(100, timeoutMs));
                 stopwatch.Stop();
 
+                if (waitRes == JobObject.WAIT_FAILED)
+                {
+                    int waitErr = Marshal.GetLastWin32Error();
+                    job.Terminate(1);
+                    try
+                    {
+                        using (var proc = Process.GetProcessById(procInfo.dwProcessId))
+                        {
+                            KillProcessTree(proc);
+                        }
+                    }
+                    catch { }
+
+                    JobObject.SafeCloseHandle(procInfo.hThread);
+                    JobObject.SafeCloseHandle(procInfo.hProcess);
+
+                    try { Task.WaitAll(new[] { outTask, errTask }, 1000); } catch { }
+
+                    return new ProcessResult
+                    {
+                        ExitCode = -1,
+                        StandardOutput = outputBuilder.ToString(),
+                        StandardError = (errorBuilder.ToString() + $"\n[!] WaitForSingleObject failed with Win32 error {waitErr}").Trim(),
+                        Duration = stopwatch.Elapsed,
+                        TimedOut = false
+                    };
+                }
+
                 if (waitRes == JobObject.WAIT_TIMEOUT)
                 {
                     job.Terminate(1);
@@ -152,12 +181,25 @@ namespace ConfuserExKillerRunner.Core
                     };
                 }
 
-                // Process completed normally
-                JobObject.GetExitCodeProcess(procInfo.hProcess, out uint exitCode);
+                // Process completed: verify exit code
+                bool gotExitCode = JobObject.GetExitCodeProcess(procInfo.hProcess, out uint exitCode);
+                int lastWin32Err = gotExitCode ? 0 : Marshal.GetLastWin32Error();
                 JobObject.SafeCloseHandle(procInfo.hThread);
                 JobObject.SafeCloseHandle(procInfo.hProcess);
 
                 try { Task.WaitAll(new[] { outTask, errTask }, 2000); } catch { }
+
+                if (!gotExitCode)
+                {
+                    return new ProcessResult
+                    {
+                        ExitCode = -1,
+                        StandardOutput = outputBuilder.ToString(),
+                        StandardError = (errorBuilder.ToString() + $"\n[!] GetExitCodeProcess failed with Win32 error {lastWin32Err}").Trim(),
+                        Duration = stopwatch.Elapsed,
+                        TimedOut = false
+                    };
+                }
 
                 return new ProcessResult
                 {

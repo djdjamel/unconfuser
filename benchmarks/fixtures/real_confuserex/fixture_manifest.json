@@ -30,8 +30,8 @@
   },
   "fixture": {
     "filename": "BenignSample.exe",
-    "sha256": "870503069780069655daae23bd4e19c96169147705cdfea42168d0335fb12da9",
-    "size_bytes": 43008
+    "sha256": "b7cccfe64fb7bca64451afbcf9526a5f87706904905b24b86f0c297119d03ca1",
+    "size_bytes": 43520
   },
   "generation_steps": [
     "Build BenignSample.exe under .NET Framework 4.8",

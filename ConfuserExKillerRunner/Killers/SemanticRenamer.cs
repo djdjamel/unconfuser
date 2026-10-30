@@ -91,6 +91,8 @@ namespace ConfuserExKillerRunner.Killers
     public static class SemanticRenamer
     {
         private static readonly Regex ValidIdentifierRegex = new Regex(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
+        private static readonly Regex DecodableRegex = new Regex(@"^_0[0-9a-fA-F]{3,}$", RegexOptions.Compiled);
+        private static readonly Regex HexHashRegex = new Regex(@"^[0-9a-fA-F]{32}$", RegexOptions.Compiled);
 
         private static readonly HashSet<string> GenericResourceWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -1693,6 +1695,102 @@ namespace ConfuserExKillerRunner.Killers
             return false;
         }
 
+        private static bool IsVowel(char c)
+        {
+            char lower = char.ToLowerInvariant(c);
+            return lower == 'a' || lower == 'e' || lower == 'i' || lower == 'o' || lower == 'u' || lower == 'y';
+        }
+
+        private static double ComputeShannonEntropy(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return 0.0;
+            var counts = new Dictionary<char, int>();
+            foreach (char c in s)
+            {
+                counts[c] = counts.TryGetValue(c, out int cnt) ? cnt + 1 : 1;
+            }
+            double entropy = 0.0;
+            double len = s.Length;
+            foreach (var kvp in counts)
+            {
+                double p = kvp.Value / len;
+                entropy -= p * Math.Log(p, 2.0);
+            }
+            return entropy;
+        }
+
+        public static bool IsHighEntropyOrRandomAscii(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            if (IsCompilerGeneratedIdentifier(name)) return false;
+
+            // ConfuserEx Decodable mode: e.g. _0001, _00a4
+            if (DecodableRegex.IsMatch(name)) return true;
+
+            // ConfuserEx MD5 Hash mode: 32-hex character identifier
+            if (HexHashRegex.IsMatch(name)) return true;
+
+            // Only inspect identifiers of sufficient length
+            if (name.Length < 8) return false;
+
+            // Must be standard alphanumeric + underscore
+            if (!ValidIdentifierRegex.IsMatch(name)) return false;
+
+            int vowels = 0;
+            int maxConsonantRun = 0;
+            int currentConsonantRun = 0;
+            int maxLowercaseRun = 0;
+            int currentLowercaseRun = 0;
+            int upperCount = 0;
+            int lowerCount = 0;
+
+            for (int i = 0; i < name.Length; i++)
+            {
+                char c = name[i];
+                if (char.IsLetter(c))
+                {
+                    if (char.IsUpper(c))
+                    {
+                        upperCount++;
+                        currentLowercaseRun = 0;
+                    }
+                    else
+                    {
+                        lowerCount++;
+                        currentLowercaseRun++;
+                        if (currentLowercaseRun > maxLowercaseRun)
+                            maxLowercaseRun = currentLowercaseRun;
+                    }
+
+                    if (IsVowel(c))
+                    {
+                        vowels++;
+                        currentConsonantRun = 0;
+                    }
+                    else
+                    {
+                        currentConsonantRun++;
+                        if (currentConsonantRun > maxConsonantRun)
+                            maxConsonantRun = currentConsonantRun;
+                    }
+                }
+            }
+
+            // ConfuserEx random letters mode: abnormal consonant cluster (>= 5 consecutive consonants)
+            if (maxConsonantRun >= 5)
+                return true;
+
+            // ConfuserEx random letters without vowels
+            if (vowels == 0)
+                return true;
+
+            // ConfuserEx alternating single-character casing (e.g. aBcDeFgH) where lowercase runs never exceed 1
+            if (upperCount >= 3 && lowerCount >= 3 && maxLowercaseRun <= 1)
+                return true;
+
+            return false;
+        }
+
         public static bool IsMangledIdentifier(string name)
         {
             if (string.IsNullOrEmpty(name)) return false;
@@ -1712,6 +1810,10 @@ namespace ConfuserExKillerRunner.Killers
                     c == '*' || c == '|' || c == ';' || c == '=')
                     return true;
             }
+
+            // ConfuserEx Decodable, MD5 hash, and high-entropy / Letters modes
+            if (IsHighEntropyOrRandomAscii(name))
+                return true;
 
             return false;
         }

@@ -1014,6 +1014,48 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal(0, result.UnprintableNormalized);
         }
 
+        [Fact]
+        public void C10_21_Detection_ConfuserExAsciiLetters_HighEntropy_Detected()
+        {
+            // ConfuserEx letters mode generates random sequences of letters with high entropy and consonant clusters
+            Assert.True(SemanticRenamer.IsMangledIdentifier("kPxQtzLjW"));
+            Assert.True(SemanticRenamer.IsMangledIdentifier("zXbVnQtr"));
+            Assert.True(SemanticRenamer.IsMangledIdentifier("rTmWvKpx"));
+            Assert.True(SemanticRenamer.IsMangledIdentifier("aBcDeFgHiJkL"));
+        }
+
+        [Fact]
+        public void C10_22_Detection_ConfuserExMD5Hash_Detected()
+        {
+            // ConfuserEx hash mode produces 32-character hexadecimal MD5 hashes
+            Assert.True(SemanticRenamer.IsMangledIdentifier("d41d8cd98f00b204e9800998ecf8427e"));
+            Assert.True(SemanticRenamer.IsMangledIdentifier("5ebe2294ecd0e0f08eab7690d2a6ee69"));
+        }
+
+        [Fact]
+        public void C10_23_Detection_ConfuserExDecodable_Detected()
+        {
+            // ConfuserEx decodable mode produces _0001, _00a4, etc.
+            Assert.True(SemanticRenamer.IsMangledIdentifier("_0001"));
+            Assert.True(SemanticRenamer.IsMangledIdentifier("_00a4f"));
+        }
+
+        [Fact]
+        public void C10_24_Detection_LegitimateCodeIdentifiers_NotMangled()
+        {
+            // Legitimate business and framework code identifiers must NEVER be classified as mangled
+            Assert.False(SemanticRenamer.IsMangledIdentifier("CustomerRepository"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("GetCustomerById"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("ComponentResourceManager"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("InitializeComponent"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("OnPropertyChanged"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("DataBindings"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("FormMain"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("ButtonSubmit"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("OrderProcessingService"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("ProcessCommandLineArguments"));
+        }
+
         #endregion
     }
 }
