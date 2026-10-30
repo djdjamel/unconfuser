@@ -468,9 +468,22 @@ namespace ConfuserExKillerRunner.Core
             }
 
             // Parent read ends should not be inherited by child; parent stdin write end should not be inherited
-            SetHandleInformation(hStdOutRead, HANDLE_FLAG_INHERIT, 0);
-            SetHandleInformation(hStdErrRead, HANDLE_FLAG_INHERIT, 0);
-            SetHandleInformation(hStdInWrite, HANDLE_FLAG_INHERIT, 0);
+            if (!SetHandleInformation(hStdOutRead, HANDLE_FLAG_INHERIT, 0) ||
+                !SetHandleInformation(hStdErrRead, HANDLE_FLAG_INHERIT, 0) ||
+                !SetHandleInformation(hStdInWrite, HANDLE_FLAG_INHERIT, 0))
+            {
+                int err = Marshal.GetLastWin32Error();
+                CloseHandle(hStdOutRead);
+                CloseHandle(hStdOutWrite);
+                CloseHandle(hStdErrRead);
+                CloseHandle(hStdErrWrite);
+                CloseHandle(hStdInRead);
+                CloseHandle(hStdInWrite);
+                hStdOutRead = IntPtr.Zero;
+                hStdErrRead = IntPtr.Zero;
+                errorMessage = $"SetHandleInformation failed with Win32 error {err}: {new Win32Exception(err).Message}";
+                return false;
+            }
 
             var si = new STARTUPINFO
             {

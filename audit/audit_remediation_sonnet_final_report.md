@@ -10,12 +10,12 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
 
 ### 1. État initial vs État final
 - **Commit initial de référence (HEAD de départ)** : `68f1812cf993b47124c919c76e8feb3be272075f`
-- **Commit final (HEAD d'arrivée)** : `cb70890` (et ajustements ciblés de revue)
-- **Nombre total de commits produits** : **7 commits isolés** (Phases A à F + rapport de synthèse)
+- **Commit final (HEAD d'arrivée)** : Branche `fix/antidump-constants-dependencies-antitamper-validation` (commits `cb70890`, `18efda5`, et finalisation des remarques de revue)
+- **Nombre total de commits produits** : **8 commits ciblés** (Phases A à F + durcissement de revue)
 - **Nombre de problèmes traités** : **42 points d'audit** (A1-A5, B1-B5, C1-C10, D1-D6, E1-E9, F1-F4 + points de revue ChatGPT A, B, C)
 - **Statut de compilation** : 0 erreur, 3 avertissements bénins d'alias (`ExtensionAttribute`), compatible .NET Framework 4.8, .NET 6.0-windows et .NET 8.0-windows.
-- **Statut des tests xUnit C#** : **465/465 passés (0 échec, 0 ignoré)**
-- **Statut des tests Python (pytest)** : **88/88 passés (0 échec)**
+- **Statut des tests xUnit C#** : **466/466 passés (0 échec, 0 ignoré)**
+- **Statut des tests Python** : **88 tests automatisés passés (0 échec)** : 64 tests unitaires/intégration sous `tests/` via `pytest`, et 24 contrôles de régression de détection ConfuserEx via `test_detector.py`.
 - **Statut des benchmarks** : **9/9 passés (8 SYNTHETIC_PASS, 1 REAL_PROTECTOR_PASS)**
 
 ### 2. Synthèse des 6 phases et de la revue complémentaire
@@ -62,13 +62,18 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
    - Nettoyage et indépendance culturelle du parseur de diagnostics PEVerify dans [QualityAuditor.cs](../ConfuserExKillerRunner/Analysis/QualityAuditor.cs) par expressions régulières compilées (`PeVerifyBannerRegex`, `PeVerifySuccessRegex`, `MissingDepRegex`).
 
 7. **Revue complémentaire — Durcissement final de sécurité & Renommage ASCII**
-   - **Point A (Confidentialité documentaire)** : Remplacement de tous les liens machine-spécifiques absolus par des liens GitHub relatifs (`../...`) et correction des chemins erronés (`Renaming/` -> `Killers/`).
+   - **Point A (Confidentialité documentaire & Alignement CLI)** :
+     - Remplacement de tous les liens machine-spécifiques absolus par des liens GitHub relatifs (`../...`) et correction des chemins erronés (`Renaming/` -> `Killers/`).
+     - Implémentation officielle du drapeau CLI `--export-mapping <path>` (`-m <path>`) dans [CommandLineOptions.cs](../ConfuserExKillerRunner/Core/CommandLineOptions.cs) et [Program.cs](../ConfuserExKillerRunner/Program.cs), permettant d'exporter le rapport de mapping à un emplacement personnalisé tout en conservant l'export automatique par défaut vers `<output>.rename_map.txt`.
+     - Clarification rigoureuse du décompte de tests dans les rapports : 64 tests de l'arborescence `tests/` exécutés via `pytest tests -v` et 24 tests d'assertions de signatures exécutés via `python test_detector.py` (totalisant 88 tests automatisés passés avec succès).
    - **Point B (Sécurité du harnais PowerShell et contrôles API Win32)** :
      - Élimination de la fenêtre de course dans [Verify-DeobfuscatedBinary.ps1](../scripts/Verify-DeobfuscatedBinary.ps1) : création du processus en état suspendu (`CREATE_SUSPENDED`), assignation au Job Object avant exécution, et fail-closed strict à l'initialisation du Job Object.
-     - Contrôle explicite des codes retour dans [JobObject.cs](../ConfuserExKillerRunner/Core/JobObject.cs) et [ProcessRunner.cs](../ConfuserExKillerRunner/Core/ProcessRunner.cs) : vérification de `ResumeThread` (`!= uint.MaxValue`), traitement explicite de `WAIT_FAILED` dans `WaitForSingleObject`, et vérification de `GetExitCodeProcess`.
-   - **Point C (Détection du renommage ASCII et modes ConfuserEx)** :
-     - Implémentation dans [SemanticRenamer.cs](../ConfuserExKillerRunner/Killers/SemanticRenamer.cs) de la détection des modes ConfuserEx : mode Hash (MD5 32 hex), mode Decodable (`_0001`), mode Letters / ASCII (consonant clusters $\ge 5$, 0 voyelles, alternance de casse 1-char) sans faux positifs sur les identifiants PascalCase/camelCase légitimes.
-     - Ajout de 4 tests unitaires positifs et négatifs (`C10_21` à `C10_24`).
+     - Contrôle rigoureux de `SetHandleInformation(hStdOutRead, ...)` dans [JobObject.cs](../ConfuserExKillerRunner/Core/JobObject.cs) : politique fail-closed immédiate fermant tous les handles et échouant si la configuration du flag d'héritage échoue.
+     - Validation explicite du code retour `WAIT_OBJECT_0` dans [ProcessRunner.cs](../ConfuserExKillerRunner/Core/ProcessRunner.cs) et [Verify-DeobfuscatedBinary.ps1](../scripts/Verify-DeobfuscatedBinary.ps1) avant lecture du code de sortie, traitant tout état inattendu comme un échec sécurisé.
+   - **Point C (Détection du renommage ASCII, acronymes techniques & Entropie de Shannon)** :
+     - Intégration active du calcul d'entropie de Shannon `ComputeShannonEntropy(name)` ($H \ge 2.8$) dans [SemanticRenamer.cs](../ConfuserExKillerRunner/Killers/SemanticRenamer.cs) pour identifier les motifs pseudo-aléatoires générés par ConfuserEx (`Letters`).
+     - Découpage par sous-mots/acronymes via expressions régulières PascalCase/CamelCase et analyse contextuelle de casse, neutralisant tout risque de faux positif sur les acronymes légitimes (`HTMLParser`, `HTMLDocument`, `XMLHttpRequest`, `JSONSerializer`, `HTTPServer`, `UTF8Encoding`, `IOHelper`, `SQLStatement`, `WCFServiceClient`, `ColorRGB`, `RGBColor`, etc.).
+     - Ajout de la suite de tests négatifs unitaires `C10_25_Detection_TechnicalAcronyms_NotMangled` (466 tests xUnit totaux passants).
      - Mise à jour détaillée de la matrice de support dans [SUPPORT_MATRIX.md](../docs/SUPPORT_MATRIX.md).
 
 ---
@@ -230,7 +235,7 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
 | **Vérité des verdicts** | **PASS** | Exit code 2 par défaut sur résultat partiel, drapeaux explicites, fin des faux succès sur binaires sains ou échecs PEVerify. |
 | **SemanticRenamer** | **PASS** | Protection complète des symboles du compilateur Roslyn, détection des modes ConfuserEx Unicode, ASCII symbols, Letters et MD5, absence de rupture runtime. |
 | **Isolation dynamique** | **PASS** | Job Object Win32 avec politique fail-closed, création suspendue dans le moteur C# et le harnais PowerShell, quotas stricts mémoire/CPU, isolation complète. |
-| **Tests & Fixtures** | **PASS** | 465 tests xUnit verts (séparés par traits Unit/Integration), 88 tests pytest verts, 9 benchmarks validés avec fixture réelle. |
+| **Tests & Fixtures** | **PASS** | 466 tests xUnit verts (séparés par traits Unit/Integration), 88 tests automatisés Python passés (64 pytest + 24 contrôles du détecteur), 9 benchmarks validés avec fixture réelle. |
 | **Documentation** | **PASS** | Matrice de support en 9 colonnes basée sur des preuves (`SUPPORT_MATRIX.md`), spécification de sécurité (`WORKER_ISOLATION.md`), rapport exhaustif d'audit. |
 | **Maintenabilité du code** | **PASS** | Découpage de `Program.cs`, extraction de `PeSymbolicEvaluator` (1 280 lignes isolées et testées), régexes culture-agnostiques. |
 

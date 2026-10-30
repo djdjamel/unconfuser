@@ -817,10 +817,18 @@ namespace ConfuserExKillerRunner
                     Console.WriteLine($"[+] SemanticRenamer: {semResult.Message}");
                     try
                     {
-                        string mappingPath = Path.ChangeExtension(finalOutputPath, ".rename_map.txt");
+                        string mappingPath = !string.IsNullOrEmpty(opts.ExportMappingPath)
+                            ? opts.ExportMappingPath
+                            : Path.ChangeExtension(finalOutputPath, ".rename_map.txt");
                         semResult.SaveMappingReport(mappingPath);
+                        if (verbose)
+                            Console.WriteLine($"[+] SemanticRenamer: Mapping report saved to {mappingPath}");
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        if (verbose)
+                            Console.WriteLine($"[!] SemanticRenamer: Failed to save mapping report: {ex.Message}");
+                    }
                     FinalizeMethodBodies(module2);
                     stepTimings["Stage6_SemanticRenamer"] = swSemantic.ElapsedMilliseconds;
                 }

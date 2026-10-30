@@ -608,6 +608,18 @@ public static class JobObjectIsolationHelper {
             return false;
         }
 
+        if (wait != WAIT_OBJECT_0) {
+            TerminateJobObject(hJob, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            try { Task.WaitAll(new Task[] { outTask, errTask }, 1000); } catch { }
+            errorMessage = "WaitForSingleObject returned unexpected status 0x" + wait.ToString("X8");
+            exitCode = -1;
+            stdOut = sbOut.ToString();
+            stdErr = sbErr.ToString();
+            return false;
+        }
+
         uint uExit = 0;
         bool gotCode = GetExitCodeProcess(pi.hProcess, out uExit);
         CloseHandle(pi.hThread);

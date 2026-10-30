@@ -1056,6 +1056,28 @@ namespace ConfuserExKillerRunner.Tests
             Assert.False(SemanticRenamer.IsMangledIdentifier("ProcessCommandLineArguments"));
         }
 
+        [Fact]
+        public void C10_25_Detection_TechnicalAcronyms_NotMangled()
+        {
+            // Technical identifiers containing uppercase acronyms followed by words must NEVER be flagged as mangled
+            Assert.False(SemanticRenamer.IsMangledIdentifier("HTMLParser"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("HTMLDocument"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("XMLHttpRequest"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("JSONSerializer"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("HTTPServer"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("UTF8Encoding"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("IOHelper"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SQLStatement"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("WCFServiceClient"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("ColorRGB"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("RGBColor"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("AsyncCallback"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("XPathNavigator"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("GZipStream"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("RijndaelManaged"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SHA256Managed"));
+        }
+
         #endregion
     }
 }

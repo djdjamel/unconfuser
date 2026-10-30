@@ -181,7 +181,35 @@ namespace ConfuserExKillerRunner.Core
                     };
                 }
 
-                // Process completed: verify exit code
+                if (waitRes != JobObject.WAIT_OBJECT_0)
+                {
+                    int waitErr = Marshal.GetLastWin32Error();
+                    job.Terminate(1);
+                    try
+                    {
+                        using (var proc = Process.GetProcessById(procInfo.dwProcessId))
+                        {
+                            KillProcessTree(proc);
+                        }
+                    }
+                    catch { }
+
+                    JobObject.SafeCloseHandle(procInfo.hThread);
+                    JobObject.SafeCloseHandle(procInfo.hProcess);
+
+                    try { Task.WaitAll(new[] { outTask, errTask }, 1000); } catch { }
+
+                    return new ProcessResult
+                    {
+                        ExitCode = -1,
+                        StandardOutput = outputBuilder.ToString(),
+                        StandardError = (errorBuilder.ToString() + $"\n[!] WaitForSingleObject returned unexpected status 0x{waitRes:X8} (Win32 error {waitErr})").Trim(),
+                        Duration = stopwatch.Elapsed,
+                        TimedOut = false
+                    };
+                }
+
+                // Process completed with WAIT_OBJECT_0: verify exit code
                 bool gotExitCode = JobObject.GetExitCodeProcess(procInfo.hProcess, out uint exitCode);
                 int lastWin32Err = gotExitCode ? 0 : Marshal.GetLastWin32Error();
                 JobObject.SafeCloseHandle(procInfo.hThread);

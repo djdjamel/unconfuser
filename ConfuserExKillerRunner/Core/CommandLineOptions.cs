@@ -20,6 +20,7 @@ namespace ConfuserExKillerRunner.Core
         public bool StrictExitCodes { get; set; } = true;
         public bool Verbose { get; set; }
         public bool RestoreSemanticNames { get; set; }
+        public string ExportMappingPath { get; set; }
         public bool ForcePromote { get; set; }
         public bool IsHelp { get; set; }
 
@@ -90,6 +91,10 @@ namespace ConfuserExKillerRunner.Core
                 {
                     options.RestoreSemanticNames = true;
                 }
+                else if ((arg == "--export-mapping" || arg == "-m") && i + 1 < args.Length)
+                {
+                    options.ExportMappingPath = Path.GetFullPath(args[++i]);
+                }
                 else if (arg == "--force-promote" || arg == "--force")
                 {
                     options.ForcePromote = true;
@@ -136,6 +141,7 @@ namespace ConfuserExKillerRunner.Core
             Console.WriteLine("  --strict-exit-codes     Return exit code 2 on any partial deobfuscation (default: enabled)");
             Console.WriteLine("  --allow-partial-exit-zero Return exit code 0 on partial deobfuscation (report status remains PARTIAL_SUCCESS)");
             Console.WriteLine("  --restore-names, --semantic-names   Restore semantic symbol names (Forms, Controls, Event Handlers, Resources)");
+            Console.WriteLine("  -m, --export-mapping <path>         Export semantic renaming mapping report to specified text file");
             Console.WriteLine("  --force-promote, --force            Promote candidate to output path even if external dependencies cause indeterminate status");
             Console.WriteLine("  --verbose               Enable verbose console output");
             Console.WriteLine("  -h, --help              Show this help message");

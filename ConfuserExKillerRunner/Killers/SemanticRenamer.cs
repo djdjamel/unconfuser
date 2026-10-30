@@ -93,6 +93,16 @@ namespace ConfuserExKillerRunner.Killers
         private static readonly Regex ValidIdentifierRegex = new Regex(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
         private static readonly Regex DecodableRegex = new Regex(@"^_0[0-9a-fA-F]{3,}$", RegexOptions.Compiled);
         private static readonly Regex HexHashRegex = new Regex(@"^[0-9a-fA-F]{32}$", RegexOptions.Compiled);
+        private static readonly Regex IdentifierTokenRegex = new Regex(@"([A-Z]+(?=[A-Z][a-z]|[0-9]|_|$)|[A-Z][a-z]+|[a-z]+|[0-9]+)", RegexOptions.Compiled);
+
+        private static readonly HashSet<string> CommonAbbreviationWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "http", "sync", "async", "msg", "ptr", "id", "db", "fs", "io", "os", "ui", "ip",
+            "tcp", "udp", "src", "dst", "cmd", "ctrl", "btn", "txt", "lbl", "pnl", "chk", "cmb",
+            "pic", "lst", "grp", "dgv", "rgb", "xml", "html", "json", "utf", "sql", "wcf", "wpf",
+            "xaml", "sha", "md5", "aes", "des", "rsa", "url", "uri", "sdk", "api", "gui", "cli",
+            "csv", "pdf", "zip", "gzip"
+        };
 
         private static readonly HashSet<string> GenericResourceWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -1736,9 +1746,9 @@ namespace ConfuserExKillerRunner.Killers
             // Must be standard alphanumeric + underscore
             if (!ValidIdentifierRegex.IsMatch(name)) return false;
 
+            double entropy = ComputeShannonEntropy(name);
+
             int vowels = 0;
-            int maxConsonantRun = 0;
-            int currentConsonantRun = 0;
             int maxLowercaseRun = 0;
             int currentLowercaseRun = 0;
             int upperCount = 0;
@@ -1765,28 +1775,88 @@ namespace ConfuserExKillerRunner.Killers
                     if (IsVowel(c))
                     {
                         vowels++;
-                        currentConsonantRun = 0;
-                    }
-                    else
-                    {
-                        currentConsonantRun++;
-                        if (currentConsonantRun > maxConsonantRun)
-                            maxConsonantRun = currentConsonantRun;
                     }
                 }
             }
 
-            // ConfuserEx random letters mode: abnormal consonant cluster (>= 5 consecutive consonants)
-            if (maxConsonantRun >= 5)
-                return true;
+            // Pure uppercase constants (e.g. MAX_BUFFER_SIZE) or pure lowercase are not ConfuserEx random letters
+            if (upperCount == 0 || lowerCount == 0) return false;
 
-            // ConfuserEx random letters without vowels
-            if (vowels == 0)
-                return true;
+            // ConfuserEx random letters mode requires high Shannon entropy (typically >= 2.8 bits per symbol)
+            if (entropy < 2.8) return false;
 
             // ConfuserEx alternating single-character casing (e.g. aBcDeFgH) where lowercase runs never exceed 1
             if (upperCount >= 3 && lowerCount >= 3 && maxLowercaseRun <= 1)
                 return true;
+
+            // ConfuserEx random letters without vowels in mixed-case string of sufficient entropy
+            if (vowels == 0 && upperCount >= 2 && lowerCount >= 2)
+                return true;
+
+            // Token-based heuristic: decompose identifier into CamelCase/acronym tokens
+            var matches = IdentifierTokenRegex.Matches(name);
+            if (matches.Count >= 4)
+            {
+                int meaningfulTokens = 0;
+                int junkTokens = 0;
+                foreach (Match m in matches)
+                {
+                    string tok = m.Value;
+                    bool hasVowel = false;
+                    for (int k = 0; k < tok.Length; k++)
+                    {
+                        if (IsVowel(tok[k])) { hasVowel = true; break; }
+                    }
+
+                    if (hasVowel || (tok.Length >= 2 && tok.All(char.IsUpper)) || CommonAbbreviationWords.Contains(tok) || char.IsDigit(tok[0]))
+                        meaningfulTokens++;
+                    else
+                        junkTokens++;
+                }
+
+                // If majority of tokens are short junk fragments without vowels or acronym semantics
+                if (junkTokens > meaningfulTokens && junkTokens >= 3)
+                    return true;
+            }
+
+            // Consonant cluster detection, strictly excluding uppercase acronyms (e.g. HTMLParser, XMLHttpRequest)
+            int currConsRun = 0;
+            bool hasLowerInRun = false;
+            bool hasUpperInRun = false;
+            for (int i = 0; i < name.Length; i++)
+            {
+                char c = name[i];
+                if (char.IsLetter(c))
+                {
+                    if (!IsVowel(c))
+                    {
+                        currConsRun++;
+                        if (char.IsLower(c)) hasLowerInRun = true;
+                        if (char.IsUpper(c)) hasUpperInRun = true;
+
+                        // Must be mixed case (never all-uppercase acronym like HTML, XML, HTTP)
+                        // and vowel ratio must be abnormally low (< 0.18)
+                        if (currConsRun >= 5 && hasLowerInRun && hasUpperInRun)
+                        {
+                            double vowelRatio = (double)vowels / name.Length;
+                            if (vowelRatio < 0.18)
+                                return true;
+                        }
+                    }
+                    else
+                    {
+                        currConsRun = 0;
+                        hasLowerInRun = false;
+                        hasUpperInRun = false;
+                    }
+                }
+                else
+                {
+                    currConsRun = 0;
+                    hasLowerInRun = false;
+                    hasUpperInRun = false;
+                }
+            }
 
             return false;
         }
