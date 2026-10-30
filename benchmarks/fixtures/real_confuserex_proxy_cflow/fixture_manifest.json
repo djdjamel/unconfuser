@@ -10,17 +10,17 @@
   },
   "source_module": {
     "name": "BenignSample.exe",
-    "sha256": "f213b38cb6b655391d860d0769bb61e4006e73ff3e50df9d7326ef187af0cdbe",
+    "sha256": "33bf3cd2f921270c157f7313d096ef34111bfbcb47a4829fab9cb27af4f3f2a6",
     "size_bytes": 7680
   },
   "protection_profile": {
     "filename": "confuser_proxy_cflow.crproj",
-    "sha256": "fb7e5ded3c5dad400154345aa5a56cb6785c7bffb9487b8b0a1ef211b1372cf4",
-    "size_bytes": 451
+    "sha256": "cf48df2f0c4d21762176d592771d61e5e0585a1cfa65dd801bb0ec604e367d7b",
+    "size_bytes": 321
   },
   "fixture": {
     "filename": "BenignSample.exe",
-    "sha256": "716f8105b8e3f728a294f6d2b8d51e9fed2edff0e477293db0fb1e331d96c931",
+    "sha256": "e3c06a6369b57bfb6439eb6b24c0232ac7779aad3bdba9b1f6a10e461499f6cb",
     "size_bytes": 10752
   },
   "source_code": {

@@ -776,7 +776,7 @@ namespace ConfuserExKillerRunner.Tests
         {
             Assert.False(ProtectionMatrix.IsConfuserExObfuscatedIdentifier("ConfigChangedEventArgs"));
             Assert.False(ProtectionMatrix.IsConfuserExObfuscatedIdentifier("APPLICATION_NAME_DESIGNATION"));
-            Assert.False(ProtectionMatrix.IsConfuserExObfuscatedIdentifier("XpertExceptionTransaction"));
+            Assert.False(ProtectionMatrix.IsConfuserExObfuscatedIdentifier("CustomBusinessTransaction"));
             Assert.False(ProtectionMatrix.IsConfuserExObfuscatedIdentifier("TDB_SIMPLE_INDICATORS"));
         }
 

@@ -46,10 +46,7 @@ benchmarks/verify_*.json
 scratch/
 tools/
 dnSpy/
-audit/final_audit/staging*/
-audit/final_audit/frozen/
-audit/final_audit/out/
-audit/final_audit/diag/
+audit/final_audit/
 
 # OS files
 Thumbs.db

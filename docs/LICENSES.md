@@ -50,7 +50,7 @@ The `ConfuserExKillerRunner` engine is configured with multi-target framework su
 | Target Framework | Platform Target | Support Status | Rationale |
 | :--- | :--- | :--- | :--- |
 | **`net48`** (.NET Framework 4.8) | `x86` (32-bit required) | **Active (Component of Windows 10/11)** | Required for full compatibility with historical 32-bit ConfuserEx protected targets, runtime `AppDomain`/`Assembly.Load` reflection execution, mixed-mode C++/CLI, and anti-tamper P/Invoke hooks that rely on native 32-bit memory layouts. Supported natively as part of Windows OS lifecycle. |
-| **`net6.0-windows`** (.NET 6.0) | `AnyCPU` | **Déprécié (EOL Nov 2024)** | Maintenu pour compatibilité transitoire; voir [Plan d'Obsolescence](file:///c:/Users/acer/claude/xp_src/docs/DEPRECATION_NET6.md) pour le calendrier de retrait. |
+| **`net6.0-windows`** (.NET 6.0) | `AnyCPU` | **Déprécié (EOL Nov 2024)** | Maintenu pour compatibilité transitoire; voir [Plan d'Obsolescence](DEPRECATION_NET6.md) pour le calendrier de retrait. |
 | **`net8.0-windows`** (.NET 8.0) | `AnyCPU` | **Active Modern LTS (Supported until Nov 2026)** | Modern high-performance JIT runtime target for 64-bit and portable static analysis execution. |
 
 ### Build Reproducibility & Binary Assemblies:

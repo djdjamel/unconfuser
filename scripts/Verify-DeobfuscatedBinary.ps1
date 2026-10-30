@@ -582,8 +582,17 @@ public static class AssemblyVerifier {
                 try {
                     Type current = type;
                     while (current != null && current != typeof(object)) {
-                        string name = current.Name;
-                        if (name == "Form" || name == "XpertForm" || name == "UserControl" || name == "XtraForm") {
+                        if (typeof(System.Windows.Forms.Form).IsAssignableFrom(current) ||
+                            typeof(System.Windows.Forms.UserControl).IsAssignableFrom(current)) {
+                            isForm = true;
+                            break;
+                        }
+                        string fullName = current.FullName ?? current.Name ?? "";
+                        if (fullName.StartsWith("System.Windows.Forms.Form") ||
+                            fullName.StartsWith("System.Windows.Forms.UserControl") ||
+                            fullName.StartsWith("DevExpress.XtraEditors.XtraForm") ||
+                            fullName.StartsWith("DevExpress.XtraEditors.XtraUserControl") ||
+                            current.Name == "Form" || current.Name == "UserControl") {
                             isForm = true;
                             break;
                         }

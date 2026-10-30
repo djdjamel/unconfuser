@@ -1,12 +1,12 @@
 # Real-Target Re-Evaluation Procedure
 
-This document specifies the standard operating procedure for re-evaluating the real-world protected assembly `H:\Xpert.Common.BLL.dll` (or any equivalent commercial ConfuserEx protected target) using `ConfuserExKillerRunner`.
+This document specifies the standard operating procedure for re-evaluating a real-world protected assembly `C:\Targets\ProtectedTarget.dll` (or any equivalent commercial ConfuserEx protected target) using `ConfuserExKillerRunner`.
 
 ---
 
 ## 1. Background & Target Profile
 
-- **Target Binary**: `H:\Xpert.Common.BLL.dll` (or local test clone)
+- **Target Binary**: `C:\Targets\ProtectedTarget.dll` (or local test clone)
 - **Observed Protections**:
   - ConfuserEx Anti-Tamper (Normal Mode with section encryption)
   - Anti-Dump (corrupted COR20 header sizes and BSJB signatures)
@@ -43,11 +43,11 @@ To execute the complete deobfuscation pipeline with isolated dynamic execution a
 
 ```powershell
 dotnet run --project ConfuserExKillerRunner/ConfuserExKillerRunner.csproj -c Release -f net8.0-windows -- `
-  "H:\Xpert.Common.BLL.dll" `
+  "C:\Targets\ProtectedTarget.dll" `
   --allow-execution `
   --allow-target-deps `
   --worker-timeout 45000 `
-  --report-json "H:\Xpert.Common.BLL_audit.json"
+  --report-json "C:\Targets\ProtectedTarget_audit.json"
 ```
 
 ### 3.2 Safe Static Triage Run (Without Execution)
@@ -55,8 +55,8 @@ To perform pure static analysis, COR20 header repair, and triage inspection with
 
 ```powershell
 dotnet run --project ConfuserExKillerRunner/ConfuserExKillerRunner.csproj -c Release -f net8.0-windows -- `
-  "H:\Xpert.Common.BLL.dll" `
-  --report-json "H:\Xpert.Common.BLL_static_audit.json"
+  "C:\Targets\ProtectedTarget.dll" `
+  --report-json "C:\Targets\ProtectedTarget_static_audit.json"
 ```
 
 ---
@@ -70,12 +70,13 @@ Following pipeline execution, verify the output against the following criteria:
   - All protections resolved.
   - Structural audit PASSED.
   - External IL verification PASSED.
-  - Candidate assembly promoted to `H:\Xpert.Common.BLL_final.dll`.
+  - Candidate assembly promoted to `C:\Targets\ProtectedTarget_final.dll`.
 - **Exit Code `2` (`PARTIAL_SUCCESS` or `INDETERMINATE`)**:
   - `INDETERMINATE`: External IL verifier produced an internal tool failure (e.g., `0x8013129d` or timeout).
-    - **Crucial Rule**: The candidate assembly is saved as `H:\Xpert.Common.BLL.unverified_candidate.dll`.
-    - Any existing, previously verified `H:\Xpert.Common.BLL_final.dll` is **PRESERVED AND NEVER OVERWRITTEN**.
+    - **Crucial Rule**: The candidate assembly is saved as `C:\Targets\ProtectedTarget.unverified_candidate.dll`.
+    - Any existing, previously verified `C:\Targets\ProtectedTarget_final.dll` is **PRESERVED AND NEVER OVERWRITTEN**.
   - `PARTIAL_SUCCESS`: Candidate promoted, but some unsupported or partially evaluated protections remain (e.g. JIT hooks or partial constants).
+
 - **Exit Code `1` (`FAILED`)**:
   - Structural defect detected (e.g., broken branches, invalid opcodes, stack underflow).
   - Candidate discarded; no corrupt binary written.

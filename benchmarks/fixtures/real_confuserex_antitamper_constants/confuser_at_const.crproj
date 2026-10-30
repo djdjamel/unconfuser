@@ -1,7 +1,7 @@
-<project outputDir="C:\Users\acer\claude\xp_src\benchmarks\fixtures\real_confuserex_antitamper_constants" baseDir="C:\Users\acer\claude\xp_src\benchmarks\BenignSample\bin\Release\net48" xmlns="http://confuser.codeplex.com">
+<project outputDir="../../../../fixtures/real_confuserex_antitamper_constants" baseDir="../../BenignSample/bin/Release/net48" xmlns="http://confuser.codeplex.com">
   <rule pattern="true" inherit="false">
     <protection id="anti tamper" />
     <protection id="constants" />
   </rule>
-  <module path="C:\Users\acer\claude\xp_src\benchmarks\BenignSample\bin\Release\net48\BenignSample.exe" />
+  <module path="BenignSample.exe" />
 </project>

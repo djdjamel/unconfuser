@@ -333,10 +333,19 @@ def prepare_real_confuserex_fixture(
 
     # 4. Generate .crproj instance
     crproj_template = resolved_profile.read_text(encoding="utf-8")
+    try:
+        rel_output_dir = os.path.relpath(base_dir, resolved_source.parent)
+        rel_base_dir = os.path.relpath(resolved_source.parent, base_dir)
+        rel_module_path = resolved_source.name
+    except ValueError:
+        rel_output_dir = str(base_dir)
+        rel_base_dir = str(resolved_source.parent)
+        rel_module_path = str(resolved_source)
+
     crproj_content = crproj_template.format(
-        output_dir=str(base_dir),
-        base_dir=str(resolved_source.parent),
-        module_path=str(resolved_source),
+        output_dir=rel_output_dir,
+        base_dir=rel_base_dir,
+        module_path=rel_module_path,
     )
     instance_crproj_path = base_dir / "confuser_run.crproj"
     instance_crproj_path.write_text(crproj_content, encoding="utf-8")

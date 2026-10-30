@@ -10,17 +10,17 @@
   },
   "source_module": {
     "name": "BenignSample.exe",
-    "sha256": "f213b38cb6b655391d860d0769bb61e4006e73ff3e50df9d7326ef187af0cdbe",
+    "sha256": "33bf3cd2f921270c157f7313d096ef34111bfbcb47a4829fab9cb27af4f3f2a6",
     "size_bytes": 7680
   },
   "protection_profile": {
     "filename": "confuser_at_const.crproj",
-    "sha256": "2aded030d344e8a810657a0434138b2019c64c2ce111fcd18384a448c2373d00",
-    "size_bytes": 462
+    "sha256": "9ad4722aee2f0cc4f1af404c023ed84ea5b578eaaa4777ae35df02922393481e",
+    "size_bytes": 332
   },
   "fixture": {
     "filename": "BenignSample.exe",
-    "sha256": "e278913ab49cc42b1c52a3a01af9272223008ed4d8fe6a1d0416435945977ea0",
+    "sha256": "41f53af66ac7814614d35f47067418c4f825ef8058f2afc9bcfa9072d1c1de67",
     "size_bytes": 31744
   },
   "source_code": {

@@ -10,17 +10,17 @@
   },
   "source_module": {
     "name": "BenignSample.exe",
-    "sha256": "f213b38cb6b655391d860d0769bb61e4006e73ff3e50df9d7326ef187af0cdbe",
+    "sha256": "33bf3cd2f921270c157f7313d096ef34111bfbcb47a4829fab9cb27af4f3f2a6",
     "size_bytes": 7680
   },
   "protection_profile": {
     "filename": "confuser_compressor.crproj",
-    "sha256": "ab71eccc262b8c31d3defe75f19c67a7c0fc577009884a13e33649710bd0b0a0",
-    "size_bytes": 361
+    "sha256": "fff59b010588565e89bbde09b121699ab786c500417d3d6d437b2c5b70f5724f",
+    "size_bytes": 231
   },
   "fixture": {
     "filename": "BenignSample.exe",
-    "sha256": "3d8c39ab64e9e96fd4bae95f32f4d96e9e735008bcd9269294c0da14f2648800",
+    "sha256": "1f3c21f52cd426721ca235fa4db50bb6f00bdb74d6df7207a307f7a4f59bfe9b",
     "size_bytes": 17408
   },
   "source_code": {

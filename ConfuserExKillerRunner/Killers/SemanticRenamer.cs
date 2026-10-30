@@ -227,7 +227,7 @@ namespace ConfuserExKillerRunner.Killers
                 }
 
                 // Pattern 2: Check linked WinForm type in constructor:
-                // e.g. this.winForm = typeof(WDRetourComptoirForm);
+                // e.g. this.winForm = typeof(OrderDetailsForm);
                 if (discoveredName == null)
                 {
                     var ctor = type.FindDefaultConstructor() ?? type.Methods.FirstOrDefault(m => m.IsConstructor);

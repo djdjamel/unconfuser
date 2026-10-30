@@ -1,10 +1,53 @@
+<#
+.SYNOPSIS
+    Dumps the normalized public API contract of a .NET assembly using dnlib.
+.DESCRIPTION
+    Exports all visible types, methods, fields, properties, events, and custom attributes
+    in a deterministic, sorted format suitable for regression comparison and diffing.
+.PARAMETER Dll
+    Path to the target .NET assembly.
+.PARAMETER Out
+    Path to the output text file.
+.PARAMETER DnlibPath
+    Optional path to dnlib.dll. If omitted, auto-discovers dnlib.dll in standard build directories.
+#>
 param(
     [Parameter(Mandatory=$true)][string]$Dll,
-    [Parameter(Mandatory=$true)][string]$Out
+    [Parameter(Mandatory=$true)][string]$Out,
+    [Parameter(Mandatory=$false)][string]$DnlibPath
 )
-# C5 - Dump normalise du contrat public d'une assembly (types exportes, membres public/family/famorassem).
-Add-Type -Path 'c:\Users\acer\claude\xp_src\ConfuserExKillerRunner\bin\Debug\net48\dnlib.dll'
-$m = [dnlib.DotNet.ModuleDefMD]::Load($Dll)
+
+$ErrorActionPreference = 'Stop'
+
+if (-not (Test-Path $Dll)) {
+    throw "Target DLL not found: $Dll"
+}
+
+if (-not $DnlibPath) {
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $repoRoot = Resolve-Path (Join-Path $scriptDir "..")
+    $candidates = @(
+        (Join-Path $repoRoot "ConfuserExKillerRunner\bin\Release\net48\dnlib.dll"),
+        (Join-Path $repoRoot "ConfuserExKillerRunner\bin\Debug\net48\dnlib.dll"),
+        (Join-Path $repoRoot "ConfuserExKillerRunner\bin\Release\net8.0-windows\dnlib.dll"),
+        (Join-Path $repoRoot "ConfuserExKillerRunner\bin\Debug\net8.0-windows\dnlib.dll")
+    )
+    foreach ($cand in $candidates) {
+        if (Test-Path $cand) {
+            $DnlibPath = $cand
+            break
+        }
+    }
+}
+
+if (-not $DnlibPath -or -not (Test-Path $DnlibPath)) {
+    throw "dnlib.dll could not be located. Please provide -DnlibPath or build ConfuserExKillerRunner."
+}
+
+Add-Type -Path $DnlibPath
+
+$resolvedDll = (Resolve-Path $Dll).Path
+$m = [dnlib.DotNet.ModuleDefMD]::Load($resolvedDll)
 $L = New-Object System.Collections.Generic.List[string]
 
 function Exported($t) {
@@ -12,6 +55,7 @@ function Exported($t) {
     if (-not (Exported $t.DeclaringType)) { return $false }
     return ($t.IsNestedPublic -or $t.IsNestedFamily -or $t.IsNestedFamilyOrAssembly)
 }
+
 function Attrs($owner, $tag) {
     foreach ($a in $owner.CustomAttributes) {
         $args = ($a.ConstructorArguments | ForEach-Object { "" + $_.Value }) -join ','
@@ -52,5 +96,11 @@ foreach ($t in $m.GetTypes()) {
         $L.Add("E|" + $t.FullName + "|" + $e.Name + "|" + $e.EventType.FullName)
     }
 }
+
+$outDir = Split-Path -Parent $Out
+if ($outDir -and -not (Test-Path $outDir)) {
+    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+}
+
 $L | Sort-Object | Set-Content -Path $Out -Encoding UTF8
-"Lignes ecrites: " + $L.Count + " -> " + $Out
+Write-Host "Normalized public API dump written ($($L.Count) records): $Out"

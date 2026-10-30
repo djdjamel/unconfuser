@@ -111,7 +111,7 @@ Every ConfuserEx protection is classified under one of the following formal stat
 - **Prerequisites:** Embedded resource streams with valid `0xBEEFCACE` headers.
 - **Known Limitations:** Intentionally empty resources (0 entries) are recognized as valid; corrupt or missing streams prevent candidate promotion.
 - **Regression Tests:** `QualityAuditorTests.cs`, `SemanticRenamerTests.cs`, `tests/test_verify_deobfuscated_binary.py`.
-- **Fixtures Used:** Real WinForms application assemblies (`Xpert.Pharm.Forms.dll`), `missing_resource_form.dll`.
+- **Fixtures Used:** Real WinForms application assemblies (`WinFormsSample.dll`), `missing_resource_form.dll`.
 - **Verified Result:** Missing resource streams detected; valid resources bound without `MissingManifestResourceException`.
 
 ### 3.9 Semantic Renaming
@@ -133,7 +133,7 @@ To ensure complete transparency and prevent misleading claims, all verification 
 3. **Level 3 — Local Integration Tests:** End-to-end deobfuscation and verification of synthetic and real fixtures (`run_benchmark.py`, `Verify-DeobfuscatedBinary.ps1`).
 4. **Level 4 — Confirmed CI (GitHub Actions):** Execution within the automated workflow on clean virtual machine runners (`.github/workflows/ci.yml`).
 5. **Level 5 — Authentic Protectors Fixture:** Verification against authentic ConfuserEx 1.0.0 binaries provisioned via pinned cryptographic SHA-256 (`prepare_real_fixture.py`).
-6. **Level 6 — Real-World Application Assemblies:** Validation against real-world obfuscated application assemblies (`Xpert.Pharm.Forms.dll`).
+6. **Level 6 — Real-World Application Assemblies:** Validation against real-world obfuscated application assemblies.
 
 > [!NOTE]
 > CI workflows run on benign, source-built fixtures and authentic ConfuserEx binaries generated during the run. Commercial/proprietary application assemblies are validated locally and are never embedded into public CI runs without licensing authorization.
