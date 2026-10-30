@@ -5,6 +5,7 @@ using System.Linq;
 using ConfuserExKillerRunner.Core;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
+using System.Text.RegularExpressions;
 
 namespace ConfuserExKillerRunner.Analysis
 {
@@ -491,6 +492,18 @@ namespace ConfuserExKillerRunner.Analysis
             }
         }
 
+        private static readonly Regex PeVerifyBannerRegex = new Regex(
+            @"^(Microsoft\s*\(R\)|Copyright\s*\(c\)|Outil\s+de|Herramienta|Strumento|Werkzeug|PEVerify|\.NET\s+Framework)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex PeVerifySuccessRegex = new Regex(
+            @"\b(All\s+Classes\s+and\s+Methods\s+Verified|Toutes\s+les\s+classes\s+et\s+les\s+m[eé]thodes\s+v[eé]rifi[eé]es|Alle\s+Klassen\s+und\s+Methoden|Se\s+han\s+comprobado\s+todas\s+las\s+clases|Tutte\s+le\s+classi\s+e\s+i\s+metodi)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex MissingDepRegex = new Regex(
+            @"(0x80070002|0x80131040|0x80131018|missing\s+referenced\s+assembly|assembly\s+r[eé]f[eé]renc[eé]\s+manquant|fehlende\s+referenzierte\s+Assembly|ensamblado\s+de\s+referencia\s+que\s+falta)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
         internal static void InterpretPEVerifyResult(int exitCode, string stdOut, string stdErr, bool timedOut, AuditReport report)
         {
             InterpretPEVerifyILResult(exitCode, stdOut, stdErr, timedOut, report);
@@ -516,11 +529,9 @@ namespace ConfuserExKillerRunner.Analysis
             string combinedOutput = ((stdOut ?? "") + "\n" + (stdErr ?? "")).Trim();
             string[] lines = combinedOutput.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
-            var errorLines = lines.Where(l => !l.StartsWith("Outil de", StringComparison.OrdinalIgnoreCase)
-                                           && !l.StartsWith("Microsoft (R)", StringComparison.OrdinalIgnoreCase)
-                                           && !l.StartsWith("Copyright (c)", StringComparison.OrdinalIgnoreCase)
-                                           && !l.Contains("Toutes les classes et les méthodes vérifiées")
-                                           && !l.Contains("All Classes and Methods Verified")).ToList();
+            var errorLines = lines.Where(l =>
+                !PeVerifyBannerRegex.IsMatch(l.Trim()) &&
+                !PeVerifySuccessRegex.IsMatch(l.Trim())).ToList();
 
             bool isInternalError = exitCode == -2146231907 // 0x8013129D
                 || combinedOutput.IndexOf("Internal error", StringComparison.OrdinalIgnoreCase) >= 0
@@ -548,9 +559,7 @@ namespace ConfuserExKillerRunner.Analysis
 
             foreach (var line in errorLines)
             {
-                if (line.IndexOf("0x80070002", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    line.IndexOf("en raison d'un assembly référencé manquant", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    line.IndexOf("due to missing referenced assembly", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (MissingDepRegex.IsMatch(line))
                 {
                     missingDepErrors++;
                     report.Warnings.Add($"PEVerify /IL dependency warning: {line.Trim()}");
@@ -560,10 +569,10 @@ namespace ConfuserExKillerRunner.Analysis
                     moduleStubErrors++;
                     report.Warnings.Add($"PEVerify /IL <Module> warning: {line.Trim()}");
                 }
-                else if (line.IndexOf("[IL]: Erreur", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                         line.IndexOf("[IL]: Error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                else if (line.IndexOf("[IL]:", StringComparison.OrdinalIgnoreCase) >= 0 ||
                          line.IndexOf("Error:", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                         line.IndexOf("Erreur:", StringComparison.OrdinalIgnoreCase) >= 0)
+                         line.IndexOf("Erreur:", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         line.IndexOf("Fehler:", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     userMethodErrors++;
                     userErrors.Add(line.Trim());
@@ -624,19 +633,18 @@ namespace ConfuserExKillerRunner.Analysis
             string combinedOutput = ((stdOut ?? "") + "\n" + (stdErr ?? "")).Trim();
             string[] lines = combinedOutput.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
-            var mdLines = lines.Where(l => !l.StartsWith("Outil de", StringComparison.OrdinalIgnoreCase)
-                                        && !l.StartsWith("Microsoft (R)", StringComparison.OrdinalIgnoreCase)
-                                        && !l.StartsWith("Copyright (c)", StringComparison.OrdinalIgnoreCase)).ToList();
+            var mdLines = lines.Where(l =>
+                !PeVerifyBannerRegex.IsMatch(l.Trim()) &&
+                !PeVerifySuccessRegex.IsMatch(l.Trim())).ToList();
 
             bool has0x8013129d = combinedOutput.IndexOf("0x8013129d", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool allVerified = combinedOutput.IndexOf("Toutes les classes et les méthodes vérifiées", StringComparison.OrdinalIgnoreCase) >= 0
-                            || combinedOutput.IndexOf("All Classes and Methods Verified", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool allVerified = PeVerifySuccessRegex.IsMatch(combinedOutput);
 
             var genuineMdErrors = mdLines.Where(l =>
-                (l.IndexOf("[MD]: Erreur", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 l.IndexOf("[MD]: Error", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 l.IndexOf("Erreur :", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 l.IndexOf("Error :", StringComparison.OrdinalIgnoreCase) >= 0) &&
+                (l.IndexOf("[MD]:", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 l.IndexOf("Error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 l.IndexOf("Erreur", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 l.IndexOf("Fehler", StringComparison.OrdinalIgnoreCase) >= 0) &&
                 !l.Contains("0x8013129d")).ToList();
 
             if (genuineMdErrors.Count > 0)

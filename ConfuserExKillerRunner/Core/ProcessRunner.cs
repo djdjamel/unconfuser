@@ -294,60 +294,48 @@ namespace ConfuserExKillerRunner.Core
 
         public static string ResolveDe4dotPath(string explicitPath = null)
         {
+            // 1. Explicit parameter
             if (!string.IsNullOrEmpty(explicitPath) && File.Exists(explicitPath))
                 return Path.GetFullPath(explicitPath);
 
+            // 2. Dedicated environment variable
             string envPath = Environment.GetEnvironmentVariable("DE4DOT_PATH");
             if (!string.IsNullOrEmpty(envPath) && File.Exists(envPath))
                 return Path.GetFullPath(envPath);
 
+            // 3. Known application and tools directories
             string appDir = AppDomain.CurrentDomain.BaseDirectory;
-            var candidatePaths = new List<string>
+            if (!string.IsNullOrEmpty(appDir))
             {
-                Path.Combine(appDir, "de4dot.exe"),
-                Path.Combine(appDir, "tools", "de4dot", "de4dot.exe"),
-                Path.Combine(Directory.GetCurrentDirectory(), "de4dot.exe"),
-                Path.Combine(Directory.GetCurrentDirectory(), "tools", "de4dot", "de4dot.exe")
-            };
+                string appDe4Dot = Path.Combine(appDir, "de4dot.exe");
+                if (File.Exists(appDe4Dot))
+                    return Path.GetFullPath(appDe4Dot);
 
-            // Search upward parent directories for tools/de4dot/de4dot.exe
-            string current = appDir;
-            for (int i = 0; i < 5; i++)
-            {
-                var parent = Directory.GetParent(current);
-                if (parent == null) break;
-                candidatePaths.Add(Path.Combine(parent.FullName, "tools", "de4dot", "de4dot.exe"));
-                candidatePaths.Add(Path.Combine(parent.FullName, "de4dot.exe"));
-                candidatePaths.Add(Path.Combine(parent.FullName, "bin", "Release", "net48", "tools", "de4dot", "de4dot.exe"));
-                candidatePaths.Add(Path.Combine(parent.FullName, "bin", "Debug", "net48", "tools", "de4dot", "de4dot.exe"));
-                candidatePaths.Add(Path.Combine(parent.FullName, "ConfuserExKillerRunner", "bin", "Release", "net48", "tools", "de4dot", "de4dot.exe"));
-                candidatePaths.Add(Path.Combine(parent.FullName, "ConfuserExKillerRunner", "bin", "Debug", "net48", "tools", "de4dot", "de4dot.exe"));
-                current = parent.FullName;
-            }
+                string appTools = Path.Combine(appDir, "tools", "de4dot", "de4dot.exe");
+                if (File.Exists(appTools))
+                    return Path.GetFullPath(appTools);
 
-            foreach (var candidate in candidatePaths)
-            {
-                if (File.Exists(candidate))
-                    return Path.GetFullPath(candidate);
-            }
-
-            // Check PATH environment variable
-            string pathEnv = Environment.GetEnvironmentVariable("PATH");
-            if (!string.IsNullOrEmpty(pathEnv))
-            {
-                foreach (var dir in pathEnv.Split(Path.PathSeparator))
+                // Check workspace root if running within solution tree
+                string dir = appDir;
+                while (!string.IsNullOrEmpty(dir))
                 {
-                    try
+                    string candidate = Path.Combine(dir, "tools", "de4dot", "de4dot.exe");
+                    if (File.Exists(candidate))
+                        return Path.GetFullPath(candidate);
+
+                    if (File.Exists(Path.Combine(dir, "unconfuser.sln")) || Directory.Exists(Path.Combine(dir, ".git")))
                     {
-                        string fullPath = Path.Combine(dir.Trim(), "de4dot.exe");
-                        if (File.Exists(fullPath))
-                            return Path.GetFullPath(fullPath);
+                        break;
                     }
-                    catch { }
+
+                    var parent = Directory.GetParent(dir);
+                    if (parent == null) break;
+                    dir = parent.FullName;
                 }
             }
 
-            return null;
+            // 4. PATH environment variable
+            return ResolveExecutablePath("de4dot.exe");
         }
 
         public static string ResolveExecutablePath(string exeName)

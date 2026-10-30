@@ -25,107 +25,36 @@ namespace ConfuserExKillerRunner
                 return WorkerHost.Run(args);
             }
 
-            if (args == null || args.Length == 0 || args.Contains("-h") || args.Contains("--help"))
+            var opts = CommandLineOptions.Parse(args, out string errorMessage);
+            if (opts != null && opts.IsHelp)
             {
-                PrintUsage();
+                CommandLineOptions.PrintUsage();
                 return 0;
             }
 
-            string assemblyPath = null;
-            bool allowExecution = false;
-            int workerTimeoutMs = 30000;
-            bool allowTargetDeps = false;
-            var allowedDepDirs = new System.Collections.Generic.List<string>();
-            string explicitDe4dotPath = null;
-            bool skipDe4dot = false;
-            bool skipNetDetect = false;
-            string outputPath = null;
-            string jsonReportPath = null;
-            bool strictExitCodes = true;
-            bool verbose = false;
-            bool restoreSemanticNames = false;
-            bool forcePromote = false;
-
-            for (int i = 0; i < args.Length; i++)
+            if (opts == null)
             {
-                string arg = args[i];
-                if (arg == "--allow-execution")
-                {
-                    allowExecution = true;
-                }
-                else if (arg == "--worker-timeout" && i + 1 < args.Length && int.TryParse(args[i + 1], out int parsedTimeout))
-                {
-                    workerTimeoutMs = parsedTimeout;
-                    i++;
-                }
-                else if (arg == "--allow-target-deps")
-                {
-                    allowTargetDeps = true;
-                }
-                else if ((arg == "--dep-dir" || arg == "--allowed-dep-dir") && i + 1 < args.Length)
-                {
-                    allowedDepDirs.Add(args[++i]);
-                }
-                else if (arg == "--no-de4dot")
-                {
-                    skipDe4dot = true;
-                }
-                else if (arg == "--no-netdetect")
-                {
-                    skipNetDetect = true;
-                }
-                else if (arg == "--verbose")
-                {
-                    verbose = true;
-                }
-                else if ((arg == "--de4dot" || arg == "-d") && i + 1 < args.Length)
-                {
-                    explicitDe4dotPath = args[++i];
-                }
-                else if ((arg == "-o" || arg == "--output") && i + 1 < args.Length)
-                {
-                    outputPath = args[++i];
-                }
-                else if ((arg == "--json-report" || arg == "--report-json" || arg == "--report" || arg == "-r" || arg == "--json" || arg == "-j") && i + 1 < args.Length)
-                {
-                    jsonReportPath = Path.GetFullPath(args[++i]);
-                }
-                else if (arg == "--strict-exit-codes")
-                {
-                    strictExitCodes = true;
-                }
-                else if (arg == "--allow-partial-exit-zero" || arg == "--permissive-exit-codes")
-                {
-                    strictExitCodes = false;
-                }
-                else if (arg == "--restore-names" || arg == "--semantic-names")
-                {
-                    restoreSemanticNames = true;
-                }
-                else if (arg == "--force-promote" || arg == "--force")
-                {
-                    forcePromote = true;
-                }
-                else if (!arg.StartsWith("-") && assemblyPath == null)
-                {
-                    assemblyPath = Path.GetFullPath(arg);
-                }
+                Console.WriteLine($"[ERROR] {errorMessage}");
+                CommandLineOptions.PrintUsage();
+                return 1;
             }
+
+            string assemblyPath = opts.AssemblyPath;
+            bool allowExecution = opts.AllowExecution;
+            int workerTimeoutMs = opts.WorkerTimeoutMs;
+            bool allowTargetDeps = opts.AllowTargetDeps;
+            var allowedDepDirs = opts.AllowedDepDirs;
+            string explicitDe4dotPath = opts.ExplicitDe4dotPath;
+            bool skipDe4dot = opts.SkipDe4dot;
+            bool skipNetDetect = opts.SkipNetDetect;
+            string outputPath = opts.OutputPath;
+            string jsonReportPath = opts.JsonReportPath;
+            bool strictExitCodes = opts.StrictExitCodes;
+            bool verbose = opts.Verbose;
+            bool restoreSemanticNames = opts.RestoreSemanticNames;
+            bool forcePromote = opts.ForcePromote;
 
             Tool.Logger.Initialize(verbose);
-
-            if (string.IsNullOrEmpty(assemblyPath))
-            {
-                Console.WriteLine("[ERROR] No target assembly specified.");
-                PrintUsage();
-                return 1;
-            }
-
-            if (!File.Exists(assemblyPath))
-            {
-                Console.WriteLine($"[ERROR] File not found: {assemblyPath}");
-                return 1;
-            }
 
             Console.WriteLine("===============================================================");
             Console.WriteLine("          ConfuserExKillerRunner - Deobfuscation Engine        ");
@@ -1247,120 +1176,31 @@ namespace ConfuserExKillerRunner
 
             if (!string.IsNullOrEmpty(jsonReportPath))
             {
-                try
-                {
-                    string timingNote = "Pipeline stage timings reflect discrete execution time per phase; totalElapsedMs reflects total wall-clock duration including baseline audit, intermediate disk serialization, candidate verification, and report generation.";
-                    string summaryNotes = isIndeterminate 
-                        ? (string.IsNullOrEmpty(matrix?.SummaryNotes) ? $"Candidate assembly was preserved as unverified candidate because IL verification was indeterminate. Existing final output (if any) was not overwritten. {timingNote}" : $"{matrix.SummaryNotes} | IL verification was indeterminate; candidate not promoted. {timingNote}")
-                        : (string.IsNullOrEmpty(matrix?.SummaryNotes) ? timingNote : $"{matrix.SummaryNotes} | {timingNote}");
+                var report = PipelineReporter.BuildReport(
+                    originalInputPath,
+                    activeReportOutputPath,
+                    archInfo,
+                    matrix,
+                    auditReport,
+                    totalConstantsDecrypted,
+                    allConstantsResolved,
+                    totalResourcesExtracted,
+                    totalProxiesInlined,
+                    totalSwitchesResolved,
+                    totalJunkStripped,
+                    totalCleanerHooks,
+                    hookRegistry,
+                    stepTimings,
+                    swTotal.ElapsedMilliseconds,
+                    exceptionsAndRollbacks,
+                    regressions,
+                    finalStatus,
+                    exitCode,
+                    isIndeterminate,
+                    netDetectComp,
+                    activePreservedHooks);
 
-                    var report = new DeobfuscationReport
-                    {
-                        Input = new FileReportInfo
-                        {
-                            Path = originalInputPath,
-                            Sha256 = DeobfuscationReport.ComputeSha256(originalInputPath),
-                            SizeBytes = new FileInfo(originalInputPath).Length,
-                            TargetArchitecture = archInfo != null ? archInfo.Architecture.ToString() : "Unknown",
-                            PeFormat = archInfo?.PeFormat ?? "Unknown",
-                            TargetFramework = ArchitectureDetector.DetectTargetFramework(originalInputPath)
-                        },
-                        Output = new FileReportInfo
-                        {
-                            Path = activeReportOutputPath,
-                            Sha256 = File.Exists(activeReportOutputPath) ? DeobfuscationReport.ComputeSha256(activeReportOutputPath) : string.Empty,
-                            SizeBytes = File.Exists(activeReportOutputPath) ? new FileInfo(activeReportOutputPath).Length : 0,
-                            TargetArchitecture = archInfo != null ? archInfo.Architecture.ToString() : "Unknown",
-                            PeFormat = archInfo?.PeFormat ?? "Unknown",
-                            TargetFramework = ArchitectureDetector.DetectTargetFramework(activeReportOutputPath)
-                        },
-                        Protections = matrix?.Items ?? new List<ProtectionItem>(),
-                        Transformations = new TransformationReportMetrics
-                        {
-                            MethodsInspected = auditReport?.TotalMethods ?? 0,
-                            MethodsWithBodies = auditReport?.MethodsWithBody ?? 0,
-                            ConstantsDecryptedCount = totalConstantsDecrypted,
-                            AllConstantsResolved = matrix?.AllConstantsResolved ?? allConstantsResolved,
-                            ResourcesExtractedCount = totalResourcesExtracted,
-                            ProxiesInlinedCount = totalProxiesInlined,
-                            SwitchesResolvedCount = totalSwitchesResolved,
-                            JunkInstructionsStrippedCount = totalJunkStripped,
-                            CleanerHooksStrippedCount = totalCleanerHooks
-                        },
-                        QualityAudit = new QualityAuditReportInfo
-                        {
-                            Status = auditReport?.Status ?? "CLEAN",
-                            CanLoad = auditReport?.CanLoad ?? true,
-                            StructuralAuditPassed = auditReport?.StructuralAuditPassed ?? true,
-                            ILVerificationStatus = auditReport?.ILVerificationStatus ?? "UNVERIFIED",
-                            ILVerificationNotes = auditReport?.ILVerificationNotes ?? string.Empty,
-                            InvalidInstructionsCount = auditReport?.InvalidInstructionsCount ?? 0,
-                            InvalidBranchesCount = auditReport?.InvalidBranchesCount ?? 0,
-                            InvalidEHCount = auditReport?.InvalidEHCount ?? 0,
-                            StackUnderflowCount = auditReport?.StackUnderflowCount ?? 0,
-                            UnresolvedCallSitesCount = auditReport?.UnresolvedCallSitesCount ?? 0,
-                            Warnings = auditReport?.Warnings ?? new List<string>(),
-                            Errors = auditReport?.Errors ?? new List<string>(),
-                            RegressionsIntroducedCount = regressions?.Count ?? 0,
-                            Regressions = regressions ?? new List<string>()
-                        },
-                        Hooks = hookRegistry.Values.ToList(),
-                        PassTimingsMs = stepTimings,
-                        TotalElapsedMs = swTotal.ElapsedMilliseconds,
-                        PeakWorkingSetBytes = Process.GetCurrentProcess().PeakWorkingSet64,
-                        ExceptionsAndRollbacks = exceptionsAndRollbacks,
-                        FinalStatus = finalStatus,
-                        OverallVerdict = matrix?.OverallVerdict ?? (isIndeterminate ? "DEOBFUSCATION UNCONFIRMED (Indeterminate IL Verification)" : finalStatus),
-                        ExitCode = exitCode,
-                        SummaryNotes = summaryNotes
-                    };
-
-                    if (netDetectComp != null && netDetectComp.Available)
-                    {
-                        report.NetDetect = new NetDetectReportInfo
-                        {
-                            Available = true,
-                            PreScanScore = netDetectComp.PreScanScore,
-                            PostScanScore = netDetectComp.PostScanScore,
-                            ScoreDelta = netDetectComp.ScoreDelta,
-                            ScoreDeltaPercent = netDetectComp.ScoreDeltaPercent,
-                            PrimaryDetector = netDetectComp.PrimaryDetector,
-                            Confidence = netDetectComp.Confidence,
-                            ResolvedSignatures = netDetectComp.ResolvedSignatures,
-                            ExposedSignatures = netDetectComp.ExposedSignatures,
-                            PreservedSignatures = netDetectComp.PreservedSignatures,
-                            IndicatorInterpretation = netDetectComp.IndicatorInterpretation
-                        };
-                    }
-
-                    if (isIndeterminate)
-                    {
-                        report.KnownLimitations.Add("External IL verification was indeterminate (e.g. tool crash or internal error). Candidate not promoted to final output.");
-                    }
-                    if (matrix != null)
-                    {
-                        if (matrix.HasRequiresDynamicSkipped)
-                            report.KnownLimitations.Add("Dynamic execution required for full deobfuscation (--allow-execution).");
-                        if (matrix.HasUnsupported)
-                            report.KnownLimitations.Add("Unsupported native x86 machine-code or JIT hooks preserved.");
-                        if (!matrix.AllConstantsResolved)
-                            report.KnownLimitations.Add("Encrypted constants were detected but not all references could be resolved.");
-                        if (matrix.HasPartiallyProcessed && matrix.AllConstantsResolved)
-                            report.KnownLimitations.Add("Some protected members or proxies could not be resolved and were preserved.");
-                    }
-                    foreach (var hook in activePreservedHooks)
-                    {
-                        report.KnownLimitations.Add($"Preserved Hook: [{hook.HookType}] {hook.MethodName}: {hook.Reason}");
-                    }
-
-                    report.Save(jsonReportPath);
-                    Console.WriteLine($"[+] Deobfuscation audit report saved to: {jsonReportPath}");
-                }
-                catch (Exception ex)
-                {
-                    if (verbose)
-                        Console.WriteLine($"[!] Failed to write JSON report: {ex.Message}");
-                }
+                PipelineReporter.SaveJsonReport(report, jsonReportPath, verbose);
             }
 
             return exitCode;
@@ -1381,36 +1221,7 @@ namespace ConfuserExKillerRunner
             }
         }
 
-        static void PrintUsage()
-        {
-            Console.WriteLine("ConfuserExKillerRunner - High-Performance ConfuserEx Deobfuscator");
-            Console.WriteLine("Usage: ConfuserExKillerRunner.exe <path_to_assembly> [options]");
-            Console.WriteLine();
-            Console.WriteLine("Options:");
-            Console.WriteLine("  --allow-execution       Allow target module execution via isolated worker process (AntiTamper / Resources)");
-            Console.WriteLine("                          Spawns an isolated worker process with strict timeout and process tree termination.");
-            Console.WriteLine("                          NOTE: Subprocess isolation is NOT an OS security sandbox. Run untrusted samples in a VM.");
-            Console.WriteLine("  --worker-timeout <ms>   Timeout in milliseconds for isolated worker process (default: 30000)");
-            Console.WriteLine("  --allow-target-deps     Permit worker to resolve dependencies from target assembly directory");
-            Console.WriteLine("                          CAUTION: Only enable if target directory is trusted. Use --dep-dir for safe paths.");
-            Console.WriteLine("  --dep-dir <path>        Add explicitly authorized directory for dependency resolution");
-            Console.WriteLine("  -o, --output <path>     Specify custom destination path for final cleaned assembly");
-            Console.WriteLine("  -d, --de4dot <path>     Specify explicit path to de4dot-cex executable");
-            Console.WriteLine("  --no-de4dot             Skip de4dot external process pass");
-            Console.WriteLine("  --no-netdetect          Skip NetDetect pre/post obfuscation audit");
-            Console.WriteLine("  --json-report, --report-json <path>  Generate structured versioned JSON audit report");
-            Console.WriteLine("  --strict-exit-codes     Return exit code 2 on any partial deobfuscation (default: enabled)");
-            Console.WriteLine("  --allow-partial-exit-zero Return exit code 0 on partial deobfuscation (report status remains PARTIAL_SUCCESS)");
-            Console.WriteLine("  --restore-names, --semantic-names   Restore semantic symbol names (Forms, Controls, Event Handlers, Resources)");
-            Console.WriteLine("  --force-promote, --force            Promote candidate to output path even if external dependencies cause indeterminate status");
-            Console.WriteLine("  --verbose               Enable verbose console output");
-            Console.WriteLine("  -h, --help              Show this help message");
-            Console.WriteLine();
-            Console.WriteLine("Exit Codes:");
-            Console.WriteLine("  0: Success - complete, verified deobfuscation (or --allow-partial-exit-zero on partial)");
-            Console.WriteLine("  1: Fatal Error - corrupt assembly, structural audit failed, or unhandled exception");
-            Console.WriteLine("  2: Partial Result - candidate unverified/partial (dynamic required, unsupported, unevaluated, indeterminate)");
-        }
+        static void PrintUsage() => CommandLineOptions.PrintUsage();
 
         private static void FinalizeMethodBodies(ModuleDef module)
         {
