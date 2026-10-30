@@ -1,9 +1,10 @@
-using System.Linq;
+﻿using System.Linq;
 using ConfuserExKillerRunner.Analysis;
 using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class NetDetectJsonParserTests
     {
         [Fact]

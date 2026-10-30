@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using ConfuserExKillerRunner.Analysis;
 using ConfuserExKillerRunner.Killers;
 using dnlib.DotNet;
@@ -8,6 +8,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class CleanerKillerTests
     {
         [Fact]

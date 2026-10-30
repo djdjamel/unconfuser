@@ -45,7 +45,7 @@ Ce document synthétise les travaux réalisés dans le cadre des 4 phases de l'a
   - `benchmarks/fixtures/real_confuserex_compressor/` (Deflate Compressor + Packers)
   - Manifeste cryptographique SHA-256 généré dans `fixture_manifest.json`.
 - **Corrections de Fond (Élimination des Faux Positifs) :**
-  - Dans `ControlFlowAuditor.cs` : `HasSwitchFlattening` exige désormais la présence d'au moins une branche arrière (*loop back-edge*) ciblant l'en-tête du switch, éliminant les faux positifs sur les structures `switch` avant standard.
+  - Dans `ProtectionMatrix.cs` (section détection Control Flow) : `HasSwitchFlattening` exige désormais la présence d'au moins une branche arrière (*loop back-edge*) ciblant l'en-tête du switch, éliminant les faux positifs sur les structures `switch` avant standard.
   - Dans `QualityAuditor.cs` : `HasRenamingProtection` ignore les types imbriqués dans `<Module>` pour ne pas confondre les wrappers de protection avec de l'obfuscation de noms utilisateur.
   - Dans `Program.cs` (ligne 1109) : Conditionnement de l'exit code 2 sur `--strict-exit-codes` en cas de désobfuscation réussie avec protections non configurées.
 - **Réconciliation des Assertions du Benchmark Python :**

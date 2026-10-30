@@ -49,13 +49,17 @@ namespace ConfuserExKillerRunner.Tests
             return path;
         }
 
+        private static string GetBenignSamplePath()
+        {
+            return TestPathHelper.GetBenignSampleExe();
+        }
+
         [Fact]
         public void Promotion_StructurallyValidCandidate_IsPromotedWithSuccess()
         {
             // Case 1: Structurally valid candidate is promoted
-            string inPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "..", "benchmarks", "fixtures", "fixture_cflow.dll");
-            if (!File.Exists(inPath))
-                inPath = Path.Combine(Directory.GetCurrentDirectory(), "benchmarks", "fixtures", "fixture_cflow.dll");
+            string inPath = Path.Combine(_testDir, "BenignSample_valid.exe");
+            File.Copy(GetBenignSamplePath(), inPath, overwrite: true);
 
             string outPath = Path.Combine(_testDir, "valid_out.dll");
             string reportPath = Path.Combine(_testDir, "valid_report.json");
@@ -203,29 +207,35 @@ namespace ConfuserExKillerRunner.Tests
         public void Promotion_CoherentSyntheticAntiTamper_IsPromoted()
         {
             // Case 7: Synthetic Anti-Tamper with valid method bodies is promoted
-            string inPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "..", "benchmarks", "fixtures", "fixture_antitamper.dll");
-            if (!File.Exists(inPath))
-                inPath = Path.Combine(Directory.GetCurrentDirectory(), "benchmarks", "fixtures", "fixture_antitamper.dll");
-
-            if (File.Exists(inPath))
+            string inPath = Path.Combine(_testDir, "BenignSample_at.exe");
+            using (var mod = ModuleDefMD.Load(GetBenignSamplePath()))
             {
-                string outPath = Path.Combine(_testDir, "synthetic_at_out.dll");
-                int exitCode = Program.Main(new[]
-                {
-                    inPath,
-                    "-o", outPath,
-                    "--no-de4dot",
-                    "--no-netdetect"
-                });
+                var modType = mod.GlobalType;
+                var vpMethod = new MethodDefUser("VirtualProtect",
+                    MethodSig.CreateStatic(mod.CorLibTypes.Boolean, mod.CorLibTypes.IntPtr, mod.CorLibTypes.UIntPtr, mod.CorLibTypes.UInt32, mod.CorLibTypes.UInt32),
+                    MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.PinvokeImpl);
+                vpMethod.ImplMap = new ImplMapUser(new ModuleRefUser(mod, "kernel32.dll"), "VirtualProtect", PInvokeAttributes.CallConvWinapi);
+                modType.Methods.Add(vpMethod);
 
-                // In static mode without --allow-execution, Anti-Tamper dynamic decryption is skipped:
-                // ExitCode is 2 (PARTIAL_SUCCESS), but candidate is structurally coherent so it IS promoted!
-                Assert.Equal(2, exitCode);
-                Assert.True(File.Exists(outPath));
-
-                var audit = QualityAuditor.Audit(outPath, runExternalVerifier: false);
-                Assert.True(audit.StructuralAuditPassed);
+                mod.Write(inPath);
             }
+
+            string outPath = Path.Combine(_testDir, "synthetic_at_out.dll");
+            int exitCode = Program.Main(new[]
+            {
+                inPath,
+                "-o", outPath,
+                "--no-de4dot",
+                "--no-netdetect"
+            });
+
+            // In static mode without --allow-execution, Anti-Tamper dynamic decryption is skipped:
+            // ExitCode is 2 (PARTIAL_SUCCESS), but candidate is structurally coherent so it IS promoted!
+            Assert.Equal(2, exitCode);
+            Assert.True(File.Exists(outPath));
+
+            var audit = QualityAuditor.Audit(outPath, runExternalVerifier: false);
+            Assert.True(audit.StructuralAuditPassed);
         }
     }
 }

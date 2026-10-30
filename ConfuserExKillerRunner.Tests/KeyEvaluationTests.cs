@@ -1,10 +1,11 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using ConfuserExTools.ConstantKiller;
 using dnlib.DotNet.Emit;
 using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class KeyEvaluationTests
     {
         [Fact]

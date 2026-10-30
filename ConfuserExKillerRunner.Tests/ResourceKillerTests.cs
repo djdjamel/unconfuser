@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using ConfuserExKillerRunner.Killers;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
@@ -6,6 +6,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class ResourceKillerTests
     {
         [Fact]

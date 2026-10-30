@@ -1,9 +1,10 @@
-using ConfuserExKillerRunner.Killers;
+﻿using ConfuserExKillerRunner.Killers;
 using dnlib.DotNet.Emit;
 using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class PredicateEvaluationTests
     {
         [Theory]

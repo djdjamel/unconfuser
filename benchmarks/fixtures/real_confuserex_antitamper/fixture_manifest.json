@@ -8,6 +8,10 @@
     "expected_cli_sha256": "2b3e5cb7f96589e5377700a5f7f25e9fc6a14539e85256e6ac6e85c07f769f61",
     "actual_cli_sha256": "2b3e5cb7f96589e5377700a5f7f25e9fc6a14539e85256e6ac6e85c07f769f61"
   },
+  "environment": {
+    "target_framework": "net48",
+    "os_platform": "Windows"
+  },
   "source_module": {
     "name": "BenignSample.exe",
     "sha256": "33bf3cd2f921270c157f7313d096ef34111bfbcb47a4829fab9cb27af4f3f2a6",
@@ -16,13 +20,22 @@
   "protection_profile": {
     "filename": "confuser_antitamper.crproj",
     "sha256": "bfa248fcaa2612dd3da940c910d245e82c47ece1b8efeebc8d5f4b5b9429a1c5",
-    "size_bytes": 294
+    "size_bytes": 294,
+    "protections": [
+      "anti tamper"
+    ]
   },
   "fixture": {
     "filename": "BenignSample.exe",
     "sha256": "b98cf0320589dd6ada403420844d1340562260a06f19ee4725f0848cb23a9b82",
     "size_bytes": 10240
   },
+  "generation_steps": [
+    "Build BenignSample.exe under .NET Framework 4.8",
+    "Protect BenignSample.exe using Confuser.CLI.exe with confuser_antitamper.crproj",
+    "Verify output PE structure and compute cryptographic SHA-256 hashes"
+  ],
+  "validation_level": "VerifiedOnRealFixture",
   "source_code": {
     "source_files": [
       "BenignSample.csproj",

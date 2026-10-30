@@ -1,10 +1,11 @@
-using System;
+﻿using System;
 using System.Linq;
 using ConfuserExKillerRunner.Core;
 using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class SimpleJsonTests
     {
         [Fact]

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using ConfuserExKillerRunner;
 using dnlib.DotNet;
@@ -7,6 +7,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class SwitchKillerTests
     {
         [Fact]

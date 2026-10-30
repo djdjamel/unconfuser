@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using ConfuserExKillerRunner.Analysis;
@@ -9,6 +9,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class RandomizedControlFlowPropertyTests
     {
         private (ModuleDef Module, MethodDef Method) CreateMethod(Func<ModuleDef, TypeSig> returnTypeFunc, params Func<ModuleDef, TypeSig>[] paramTypesFunc)

@@ -9,8 +9,7 @@ namespace ConfuserExKillerRunner.Tests
     {
         private static string GetRepoRoot()
         {
-            string root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", ".."));
-            return root;
+            return TestPathHelper.GetRepositoryRoot();
         }
 
         [Fact]

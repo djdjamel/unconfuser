@@ -1,6 +1,7 @@
-pefile>=2023.2.7
-dnfile>=0.15.1
-dotnetfile>=0.2.4
-dncil>=1.0.2
-colorama>=0.4.6
-pytest>=7.0.0
+# Core runtime dependencies for NetDetect CLI & Analysis Engine
+# Strictly pinned for deterministic, reproducible builds
+pefile==2023.2.7
+dnfile==0.15.1
+dotnetfile==0.2.4
+dncil==1.0.2
+colorama==0.4.6

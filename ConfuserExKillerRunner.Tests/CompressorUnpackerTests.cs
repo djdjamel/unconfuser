@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using ConfuserExKillerRunner.Killers;
@@ -14,6 +14,7 @@ namespace ConfuserExKillerRunner.Tests
         public static void SignalExecution() => EntryPointExecuted = true;
     }
 
+    [Trait("Category", "Unit")]
     public class CompressorUnpackerTests
     {
         [Fact]

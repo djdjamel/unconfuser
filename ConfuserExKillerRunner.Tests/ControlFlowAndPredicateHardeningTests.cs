@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using ConfuserExKillerRunner;
 using ConfuserExKillerRunner.Killers;
@@ -9,6 +9,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class ControlFlowAndPredicateHardeningTests
     {
         [Fact]

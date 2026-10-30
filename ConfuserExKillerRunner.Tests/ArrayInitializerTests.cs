@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 using ConfuserExTools.ConstantKiller;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
@@ -6,6 +6,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class ArrayInitializerTests
     {
         [Fact]

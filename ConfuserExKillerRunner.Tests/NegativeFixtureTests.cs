@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -11,6 +11,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class NegativeFixtureTests : IDisposable
     {
         private readonly string _testDir;
@@ -33,7 +34,7 @@ namespace ConfuserExKillerRunner.Tests
 
         private static string GetBenignSamplePath()
         {
-            string root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", ".."));
+            string root = TestPathHelper.GetRepositoryRoot();
             string net8Dll = Path.Combine(root, "benchmarks", "BenignSample", "bin", "Release", "net8.0", "BenignSample.dll");
             if (File.Exists(net8Dll)) return net8Dll;
 

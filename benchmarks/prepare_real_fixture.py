@@ -137,6 +137,23 @@ def create_fixture_manifest(
     profile_sha = compute_file_sha256(profile_path)
     fixture_sha = compute_file_sha256(target_output_file)
 
+    import xml.etree.ElementTree as ET
+    protections = []
+    try:
+        root_el = ET.fromstring(profile_path.read_text(encoding="utf-8"))
+        for el in root_el.iter():
+            tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+            if tag == "protection":
+                prot_id = el.get("id")
+                if prot_id and prot_id not in protections:
+                    protections.append(prot_id)
+            elif tag == "packer":
+                packer_id = el.get("id")
+                if packer_id and packer_id not in protections:
+                    protections.append(f"packer:{packer_id}")
+    except Exception:
+        pass
+
     manifest = {
         "manifest_version": "1.0.0",
         "generator": "benchmarks/prepare_real_fixture.py",
@@ -147,6 +164,10 @@ def create_fixture_manifest(
             "expected_cli_sha256": EXPECTED_CLI_SHA256.lower(),
             "actual_cli_sha256": cli_sha.lower(),
         },
+        "environment": {
+            "target_framework": "net48",
+            "os_platform": "Windows",
+        },
         "source_module": {
             "name": source_module.name,
             "sha256": source_sha.lower(),
@@ -156,12 +177,19 @@ def create_fixture_manifest(
             "filename": profile_path.name,
             "sha256": profile_sha.lower(),
             "size_bytes": profile_path.stat().st_size,
+            "protections": protections,
         },
         "fixture": {
             "filename": target_output_file.name,
             "sha256": fixture_sha.lower(),
             "size_bytes": target_output_file.stat().st_size,
         },
+        "generation_steps": [
+            "Build BenignSample.exe under .NET Framework 4.8",
+            f"Protect BenignSample.exe using Confuser.CLI.exe with {profile_path.name}",
+            "Verify output PE structure and compute cryptographic SHA-256 hashes",
+        ],
+        "validation_level": "VerifiedOnRealFixture",
     }
 
     src_code_info = compute_source_code_hash(source_module)

@@ -8,6 +8,10 @@
     "expected_cli_sha256": "2b3e5cb7f96589e5377700a5f7f25e9fc6a14539e85256e6ac6e85c07f769f61",
     "actual_cli_sha256": "2b3e5cb7f96589e5377700a5f7f25e9fc6a14539e85256e6ac6e85c07f769f61"
   },
+  "environment": {
+    "target_framework": "net48",
+    "os_platform": "Windows"
+  },
   "source_module": {
     "name": "BenignSample.exe",
     "sha256": "33bf3cd2f921270c157f7313d096ef34111bfbcb47a4829fab9cb27af4f3f2a6",
@@ -16,13 +20,23 @@
   "protection_profile": {
     "filename": "confuser_proxy_cflow.crproj",
     "sha256": "cf48df2f0c4d21762176d592771d61e5e0585a1cfa65dd801bb0ec604e367d7b",
-    "size_bytes": 321
+    "size_bytes": 321,
+    "protections": [
+      "ref proxy",
+      "ctrl flow"
+    ]
   },
   "fixture": {
     "filename": "BenignSample.exe",
     "sha256": "e3c06a6369b57bfb6439eb6b24c0232ac7779aad3bdba9b1f6a10e461499f6cb",
     "size_bytes": 10752
   },
+  "generation_steps": [
+    "Build BenignSample.exe under .NET Framework 4.8",
+    "Protect BenignSample.exe using Confuser.CLI.exe with confuser_proxy_cflow.crproj",
+    "Verify output PE structure and compute cryptographic SHA-256 hashes"
+  ],
+  "validation_level": "VerifiedOnRealFixture",
   "source_code": {
     "source_files": [
       "BenignSample.csproj",

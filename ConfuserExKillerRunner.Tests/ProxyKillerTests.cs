@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using ConfuserExTools.ProxyKiller;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
@@ -6,6 +6,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class ProxyKillerTests
     {
         [Fact]

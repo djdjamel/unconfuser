@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using ConfuserExKillerRunner.Analysis;
@@ -7,6 +7,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class DeobfuscationReportAndRegressionTests : IDisposable
     {
         private readonly string _testDir;
@@ -156,7 +157,7 @@ namespace ConfuserExKillerRunner.Tests
         [Fact]
         public void PipelineExecution_GeneratesStageTimingsAndMemoryMetricsInJsonReport()
         {
-            string root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", ".."));
+            string root = TestPathHelper.GetRepositoryRoot();
             string samplePath = Path.Combine(root, "benchmarks", "BenignSample", "bin", "Release", "net8.0", "BenignSample.dll");
             if (!File.Exists(samplePath))
             {

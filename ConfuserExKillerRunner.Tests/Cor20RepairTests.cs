@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using ConfuserExKillerRunner.Analysis;
 using ConfuserExKillerRunner.Killers;
@@ -7,6 +7,7 @@ using Xunit;
 
 namespace ConfuserExKillerRunner.Tests
 {
+    [Trait("Category", "Unit")]
     public class Cor20RepairTests
     {
         private static byte[] CreateValidPeBytes()

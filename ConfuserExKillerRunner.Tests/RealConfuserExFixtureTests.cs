@@ -71,7 +71,7 @@ namespace ConfuserExKillerRunner.Tests
 
         private static string GetFixturePath(string relativePath)
         {
-            string root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", ".."));
+            string root = TestPathHelper.GetRepositoryRoot();
             string fullPath = Path.Combine(root, relativePath);
             if (!File.Exists(fullPath))
             {
