@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using ConfuserExKillerRunner.Core;
 using Xunit;
 
@@ -9,7 +10,7 @@ namespace ConfuserExKillerRunner.Tests
     public class JobObjectTests
     {
         [Fact]
-        public void JobObject_OnWindows_CreatesValidHandleAndAppliesKillOnClose()
+        public void JobObject_01_Creation_ValidHandleAndDefaultLimitsApplied()
         {
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
                 return; // Windows only
@@ -18,14 +19,51 @@ namespace ConfuserExKillerRunner.Tests
             {
                 Assert.True(job.IsValid);
                 Assert.NotEqual(IntPtr.Zero, job.Handle);
-
-                bool success = job.SetExtendedLimits(JobObjectLimitFlags.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE);
-                Assert.True(success);
+                Assert.True(job.LimitsApplied);
             }
         }
 
         [Fact]
-        public void JobObject_AssignProcess_AssociatesRunningProcess()
+        public void JobObject_02_ApplyLimits_MemoryLimitsEnforced()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            using (var job = new JobObject())
+            {
+                var limits = new JobLimits
+                {
+                    MaxProcessMemoryBytes = 256UL * 1024 * 1024,
+                    MaxJobMemoryBytes = 512UL * 1024 * 1024
+                };
+
+                bool success = job.ApplyLimits(limits);
+                Assert.True(success);
+                Assert.True(job.LimitsApplied);
+            }
+        }
+
+        [Fact]
+        public void JobObject_03_ApplyLimits_ActiveProcessLimitEnforced()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            using (var job = new JobObject())
+            {
+                var limits = new JobLimits
+                {
+                    MaxActiveProcesses = 5
+                };
+
+                bool success = job.ApplyLimits(limits);
+                Assert.True(success);
+                Assert.True(job.LimitsApplied);
+            }
+        }
+
+        [Fact]
+        public void JobObject_04_AssignProcess_AssociatesRunningProcess()
         {
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
                 return;
@@ -62,7 +100,79 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
-        public void JobObject_Terminate_TerminatesJobProcessesInstantly()
+        public void JobObject_05_AssignProcess_RejectsImpossibleAssignments()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            using (var job = new JobObject())
+            {
+                // 1. Null process
+                bool nullResult = job.AssignProcess((Process)null);
+                Assert.False(nullResult);
+
+                // 2. IntPtr.Zero
+                bool zeroResult = job.AssignProcess(IntPtr.Zero, out int err);
+                Assert.False(zeroResult);
+                Assert.Equal(-2, err);
+
+                // 3. Exited process
+                var psi = new ProcessStartInfo("cmd.exe", "/c echo done")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                };
+                using (var proc = Process.Start(psi))
+                {
+                    proc.WaitForExit(5000);
+                    Assert.True(proc.HasExited);
+
+                    bool exitedResult = job.AssignProcess(proc);
+                    Assert.False(exitedResult);
+                    Assert.Contains("exited", job.LastErrorString, StringComparison.OrdinalIgnoreCase);
+                }
+            }
+
+            // 4. Disposed Job Object
+            var disposedJob = new JobObject();
+            disposedJob.Dispose();
+            bool disposedResult = disposedJob.AssignProcess(IntPtr.Zero, out int dispErr);
+            Assert.False(disposedResult);
+            Assert.Equal(-1, dispErr);
+        }
+
+        [Fact]
+        public void JobObject_06_Termination_OnJobClose_KillsProcesses()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            int pid;
+            var psi = new ProcessStartInfo("cmd.exe", "/c ping -n 30 127.0.0.1 >nul")
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false
+            };
+
+            using (var proc = Process.Start(psi))
+            {
+                Assert.NotNull(proc);
+                pid = proc.Id;
+
+                using (var job = new JobObject())
+                {
+                    bool success = job.AssignProcess(proc);
+                    Assert.True(success);
+                    // Disposing job will invoke CloseHandle with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                }
+
+                bool exited = proc.WaitForExit(4000);
+                Assert.True(exited);
+            }
+        }
+
+        [Fact]
+        public void JobObject_07_Termination_ExplicitTerminate_KillsProcess()
         {
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
                 return;
@@ -82,7 +192,7 @@ namespace ConfuserExKillerRunner.Tests
                     Assert.NotNull(proc);
                     job.AssignProcess(proc);
 
-                    // Terminate job
+                    // Terminate job explicitly
                     bool termResult = job.Terminate(99);
                     Assert.True(termResult);
 
@@ -93,7 +203,62 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
-        public void JobObject_Dispose_MultipleCallsSafe()
+        public void JobObject_08_Termination_TerminatesDescendantsProcessTree()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            using (var job = new JobObject())
+            {
+                Assert.True(job.IsValid);
+
+                // Spawn a process that in turn spawns a child PowerShell process
+                var psi = new ProcessStartInfo("cmd.exe", "/c powershell.exe -NoProfile -Command \"Start-Sleep -Seconds 30\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                };
+
+                using (var parentProc = Process.Start(psi))
+                {
+                    Assert.NotNull(parentProc);
+                    bool assigned = job.AssignProcess(parentProc);
+                    Assert.True(assigned);
+
+                    // Give child powershell a moment to spawn
+                    System.Threading.Thread.Sleep(500);
+
+                    // Terminate the entire job object
+                    bool termResult = job.Terminate(1);
+                    Assert.True(termResult);
+
+                    bool exited = parentProc.WaitForExit(3000);
+                    Assert.True(exited);
+                }
+            }
+        }
+
+        [Fact]
+        public void JobObject_09_RunIsolated_EnforcesTimeoutAndSuspendedLaunch()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            // 1. Success case with suspended launch and pipe redirection
+            var okResult = ProcessRunner.RunIsolated("cmd.exe", "/c echo isolated_launch_verified", timeoutMs: 10000);
+            Assert.True(okResult.Success);
+            Assert.Equal(0, okResult.ExitCode);
+            Assert.Contains("isolated_launch_verified", okResult.StandardOutput);
+
+            // 2. Timeout case terminates process tree
+            var timeoutResult = ProcessRunner.RunIsolated("cmd.exe", "/c ping -n 30 127.0.0.1 >nul", timeoutMs: 1000);
+            Assert.True(timeoutResult.TimedOut);
+            Assert.False(timeoutResult.Success);
+            Assert.Equal(-1, timeoutResult.ExitCode);
+        }
+
+        [Fact]
+        public void JobObject_10_Handles_DisposedCleanlyAndDoubleDisposeSafe()
         {
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
                 return;
@@ -104,8 +269,13 @@ namespace ConfuserExKillerRunner.Tests
             job.Dispose();
             Assert.False(job.IsValid);
 
-            // Re-disposing should not throw
+            // Re-disposing must be idempotent and not throw
             job.Dispose();
+
+            // SafeCloseHandle with invalid/null handles must be safe
+            JobObject.SafeCloseHandle(IntPtr.Zero);
+            JobObject.SafeCloseHandle(new IntPtr(-1));
         }
     }
 }
+

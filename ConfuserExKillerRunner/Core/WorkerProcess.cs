@@ -193,7 +193,7 @@ namespace ConfuserExKillerRunner.Core
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
                 Logger.LogInfo($"[WorkerClient] Spawning isolated worker ({Path.GetFileName(runnerBin)}) for AntiTamper (Timeout: {timeoutMs}ms)...");
-                var procResult = ProcessRunner.Run(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
+                var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
 
                 if (procResult.TimedOut)
                 {
@@ -285,7 +285,7 @@ namespace ConfuserExKillerRunner.Core
                 string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
-                var procResult = ProcessRunner.Run(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
+                var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
 
                 if (procResult.TimedOut)
                 {
@@ -368,7 +368,7 @@ namespace ConfuserExKillerRunner.Core
                 string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
-                var procResult = ProcessRunner.Run(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
+                var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
 
                 if (procResult.TimedOut)
                 {
@@ -454,7 +454,7 @@ namespace ConfuserExKillerRunner.Core
                 string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
-                var procResult = ProcessRunner.Run(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
+                var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
 
                 if (procResult.TimedOut)
                 {
@@ -545,7 +545,7 @@ namespace ConfuserExKillerRunner.Core
                 string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
-                var procResult = ProcessRunner.Run(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
+                var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
 
                 int restoredCount = 0;
                 if (File.Exists(tempMetaOut))

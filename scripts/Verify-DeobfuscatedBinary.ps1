@@ -298,7 +298,96 @@ if (-not $WorkerMode) {
     if ($CommitHash) { $workerArgs += "-CommitHash"; $workerArgs += "`"$CommitHash`"" }
     if ($ReportJson) { $workerArgs += "-ReportJson"; $workerArgs += "`"$([System.IO.Path]::GetFullPath($ReportJson))`"" }
 
-    # 7. Setup isolated process with sanitized environment
+    # 7. Setup isolated process with sanitized environment and Windows Job Object
+    $isWin = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+    $hJob = [IntPtr]::Zero
+    if ($isWin) {
+        try {
+            if (-not ([System.Management.Automation.PSTypeName]'JobObjectIsolationHelper').Type) {
+                Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class JobObjectIsolationHelper {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetInformationJobObject(IntPtr hJob, int JobObjectInformationClass, IntPtr lpJobObjectInformation, uint cbJobObjectInformationLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool TerminateJobObject(IntPtr hJob, uint uExitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct IO_COUNTERS {
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount;
+        public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryLimit;
+        public UIntPtr PeakJobMemoryLimit;
+    }
+
+    public static IntPtr CreateJobWithLimits(ulong maxJobMemoryBytes, uint maxProcesses) {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) return IntPtr.Zero;
+
+        var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+        uint flags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if (maxJobMemoryBytes > 0) {
+            flags |= 0x0200; // JOB_OBJECT_LIMIT_JOB_MEMORY
+            info.JobMemoryLimit = new UIntPtr(maxJobMemoryBytes);
+        }
+        if (maxProcesses > 0) {
+            flags |= 0x0008; // JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+            info.BasicLimitInformation.ActiveProcessLimit = maxProcesses;
+        }
+        info.BasicLimitInformation.LimitFlags = flags;
+
+        int size = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+        IntPtr ptr = Marshal.AllocHGlobal(size);
+        try {
+            Marshal.StructureToPtr(info, ptr, false);
+            SetInformationJobObject(job, 9, ptr, (uint)size);
+        } finally {
+            Marshal.FreeHGlobal(ptr);
+        }
+        return job;
+    }
+}
+"@
+            }
+            $hJob = [JobObjectIsolationHelper]::CreateJobWithLimits(1073741824, 10) # 1GB job memory limit, max 10 processes
+        } catch {
+            Write-Warning "Failed to initialize Windows Job Object isolation: $_"
+        }
+    }
+
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $workerExe
     $psi.Arguments = $workerArgs -join " "
@@ -319,6 +408,54 @@ if (-not $WorkerMode) {
     }
 
     $workerProc = [System.Diagnostics.Process]::Start($psi)
+
+    # Assign worker process to Job Object immediately
+    if ($hJob -ne [IntPtr]::Zero) {
+        try {
+            $assigned = [JobObjectIsolationHelper]::AssignProcessToJobObject($hJob, $workerProc.Handle)
+            if (-not $assigned) {
+                # Fail-closed enforcement on isolation failure
+                try { $workerProc.Kill() } catch { }
+                [JobObjectIsolationHelper]::CloseHandle($hJob) | Out-Null
+                Write-Host "[-] Fail-closed security: Failed to assign worker process to Windows Job Object." -ForegroundColor Red
+
+                $isoFailReport = @{
+                    timestamp = $timestamp
+                    commit_hash = $CommitHash
+                    target = $targetFull
+                    sha256 = $targetSha
+                    status = "FAIL"
+                    exit_code = 1
+                    duration_ms = 0
+                    bitness = if ($workerExe -like "*SysWOW64*") { 32 } else { 64 }
+                    load_success = $false
+                    load_error = "Fail-closed security: Failed to assign worker process to Windows Job Object."
+                    module_cctor_status = "NOT_RUN"
+                    module_cctor_error = $null
+                    total_types = 0
+                    types_discovered = 0
+                    type_load_errors = @()
+                    total_methods = 0
+                    jit_success = 0
+                    jit_skipped = 0
+                    jit_failed_missing_dependency = 0
+                    jit_failed_corrupted_il = 0
+                    corrupted_il_failures = @()
+                    dependency_failures = @()
+                    forms_checked = 0
+                    forms_success = 0
+                    forms_failed = 0
+                    form_failures = @()
+                    summary = "Worker Job Object isolation assignment failed (fail-closed)"
+                }
+                Write-JsonReportFile $isoFailReport $ReportJson
+                exit 1
+            }
+        } catch {
+            Write-Warning "Job Object assignment error: $_"
+        }
+    }
+
     $stdoutTask = $workerProc.StandardOutput.ReadToEndAsync()
     $stderrTask = $workerProc.StandardError.ReadToEndAsync()
 
@@ -327,10 +464,21 @@ if (-not $WorkerMode) {
     $sw.Stop()
 
     if (-not $exited) {
+        # Terminate Job Object to kill entire process tree including descendants
+        if ($hJob -ne [IntPtr]::Zero) {
+            try { [JobObjectIsolationHelper]::TerminateJobObject($hJob, 1) | Out-Null } catch { }
+        }
         try {
-            $workerProc.Kill()
+            Start-Process -FilePath "taskkill.exe" -ArgumentList "/F /T /PID $($workerProc.Id)" -NoNewWindow -Wait -ErrorAction SilentlyContinue
         } catch { }
-        Write-Host "[-] Verification worker process timed out after $TimeoutSeconds seconds" -ForegroundColor Red
+        try {
+            if (-not $workerProc.HasExited) { $workerProc.Kill() }
+        } catch { }
+        if ($hJob -ne [IntPtr]::Zero) {
+            try { [JobObjectIsolationHelper]::CloseHandle($hJob) | Out-Null } catch { }
+        }
+
+        Write-Host "[-] Verification worker process timed out after $TimeoutSeconds seconds. Process tree terminated." -ForegroundColor Red
 
         $timeoutReport = @{
             timestamp = $timestamp
@@ -359,10 +507,14 @@ if (-not $WorkerMode) {
             forms_success = 0
             forms_failed = 0
             form_failures = @()
-            summary = "Verification process timed out after $TimeoutSeconds seconds"
+            summary = "Verification process timed out after $TimeoutSeconds seconds (process tree terminated)"
         }
         Write-JsonReportFile $timeoutReport $ReportJson
         exit 1
+    }
+
+    if ($hJob -ne [IntPtr]::Zero) {
+        try { [JobObjectIsolationHelper]::CloseHandle($hJob) | Out-Null } catch { }
     }
 
     # Worker finished
