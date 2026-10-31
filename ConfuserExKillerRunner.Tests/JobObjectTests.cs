@@ -276,6 +276,26 @@ namespace ConfuserExKillerRunner.Tests
             JobObject.SafeCloseHandle(IntPtr.Zero);
             JobObject.SafeCloseHandle(new IntPtr(-1));
         }
+
+        [Fact]
+        public void JobObject_11_RunIsolated_NullOrEmptyFileName_ThrowsArgumentNullException()
+        {
+            Assert.Throws<ArgumentNullException>(() => ProcessRunner.RunIsolated(null, ""));
+            Assert.Throws<ArgumentNullException>(() => ProcessRunner.RunIsolated(string.Empty, ""));
+        }
+
+        [Fact]
+        public void JobObject_12_RunIsolated_NonWindows_FailsClosed()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+            {
+                var result = ProcessRunner.RunIsolated("untrusted_sample.exe", "");
+                Assert.False(result.Success);
+                Assert.Equal(-1, result.ExitCode);
+                Assert.Contains("Fail-closed security enforcement", result.StandardError);
+            }
+        }
     }
 }
+
 

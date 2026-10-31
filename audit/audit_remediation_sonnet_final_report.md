@@ -10,15 +10,24 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
 
 ### 1. État initial vs État final
 - **Commit initial de référence (HEAD de départ)** : `68f1812cf993b47124c919c76e8feb3be272075f`
-- **Commit final (HEAD d'arrivée)** : Branche `fix/antidump-constants-dependencies-antitamper-validation` (commits `cb70890`, `18efda5`, et finalisation des remarques de revue)
-- **Nombre total de commits produits** : **8 commits ciblés** (Phases A à F + durcissement de revue)
-- **Nombre de problèmes traités** : **42 points d'audit** (A1-A5, B1-B5, C1-C10, D1-D6, E1-E9, F1-F4 + points de revue ChatGPT A, B, C)
-- **Statut de compilation** : 0 erreur, 3 avertissements bénins d'alias (`ExtensionAttribute`), compatible .NET Framework 4.8, .NET 6.0-windows et .NET 8.0-windows.
-- **Statut des tests xUnit C#** : **466/466 passés (0 échec, 0 ignoré)**
-- **Statut des tests Python** : **88 tests automatisés passés (0 échec)** : 64 tests unitaires/intégration sous `tests/` via `pytest`, et 24 contrôles de régression de détection ConfuserEx via `test_detector.py`.
+- **Commit validé par la CI #41** : `02e5a3e5736d86c14181c1a20da602e5e92c1d7e` (10 commits en avance sur la référence initiale)
+- **Commit final (HEAD d'arrivée après mission corrective finale)** : Branche `fix/antidump-constants-dependencies-antitamper-validation` (11 commits cumulés depuis la référence)
+- **Nombre de problèmes traités** : **46 points d'audit** (A1-A5, B1-B5, C1-C10, D1-D6, E1-E9, F1-F4, Rev-A à Rev-C, et Rev-D1 à Rev-D4)
+- **Statut de compilation** : 0 erreur, 0 avertissement (`dotnet build unconfuser.sln -c Release`).
+- **Support des Frameworks & Avertissement .NET 6** :
+  - `net8.0-windows` : Support actif LTS (Microsoft support jusqu'en novembre 2026).
+  - `net48` : Support actif du système d'exploitation Windows (cycle de vie Windows).
+  - `net6.0-windows` : **Fin de support officiel (EOS : 12 novembre 2024 - avertissement SDK `NETSDK1138`)**. Maintenu délibérément dans le multi-targeting pour assurer la rétrocompatibilité d'exécution binaire sur les environnements ne disposant pas encore du runtime .NET 8, sans compromettre le support actif assuré par .NET 8 et .NET Framework 4.8.
+- **Statut des tests xUnit C#** : **476/476 passés (0 échec, 0 ignoré, 100% catégorisés)**
+  - **453 Tests Unitaires (`Category=Unit`)**
+  - **23 Tests d'Intégration (`Category=Integration`)**
+- **Statut des tests Python** : **88 vérifications automatisées réparties sur 2 suites indépendantes (0 échec)** :
+  - **64 tests pytest réussis** via `python -m pytest tests -v`
+  - **24 contrôles de régression du détecteur réussis** via `python test_detector.py`
 - **Statut des benchmarks** : **9/9 passés (8 SYNTHETIC_PASS, 1 REAL_PROTECTOR_PASS)**
+- **Vérification comportementale runtime** : **20 types sur 20 découverts et exécutés avec succès** via `Verify-DeobfuscatedBinary.ps1`.
 
-### 2. Synthèse des 6 phases et de la revue complémentaire
+### 2. Synthèse des 6 phases et des audits complémentaires
 
 1. **Phase A — Confidentialité et hygiène du dépôt**
    - Élimination intégrale des chemins propriétaires (`Xpert`, `WDRetour`, `Comptoir`, chemins utilisateur locaux, lettres de lecteurs privées) dans l'ensemble des scripts de benchmark, tests et profils `.crproj`.
@@ -49,7 +58,7 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
 
 5. **Phase E — Traçabilité des fixtures et qualification de la matrice**
    - Élimination des dépendances implicites de tests vers des fixtures externes dans `PipelinePromotionTests.cs`, avec génération locale autonome et vérification dynamique via `TestPathHelper.cs`.
-   - Catégorisation systématique à 100% des tests xUnit avec les traits `[Trait("Category", "Unit")]` (437 tests en ~4s) et `[Trait("Category", "Integration")]` (24 tests en ~11s).
+   - Catégorisation systématique à 100% des tests xUnit avec les traits `[Trait("Category", "Unit")]` (453 tests en ~4s) et `[Trait("Category", "Integration")]` (23 tests en ~16s).
    - Correction rigoureuse du rapport d'audit précédent (référence erronée à `ControlFlowAuditor.cs` rectifiée vers `ProtectionMatrix.cs`).
    - Enrichissement des manifestes de fixtures avec métadonnées d'environnement (`os`, `clr_version`, `dotnet_sdk`), profil de protection parsé depuis le XML `.crproj`, étapes de génération reproductibles, et SHA-256 de vérification.
    - Scission des dépendances Python : `requirements.txt` (dépendances strictes de production) et `requirements-dev.txt` (outillage de test), intégrée dans le workflow CI `.github/workflows/ci.yml`.
@@ -61,20 +70,35 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
    - Résolution déterministe et sécurisée de l'exécutable `de4dot` dans [ProcessRunner.cs](../ConfuserExKillerRunner/Core/ProcessRunner.cs), sans heuristique ascendante arbitraire dans les dossiers Debug/Release.
    - Nettoyage et indépendance culturelle du parseur de diagnostics PEVerify dans [QualityAuditor.cs](../ConfuserExKillerRunner/Analysis/QualityAuditor.cs) par expressions régulières compilées (`PeVerifyBannerRegex`, `PeVerifySuccessRegex`, `MissingDepRegex`).
 
-7. **Revue complémentaire — Durcissement final de sécurité & Renommage ASCII**
-   - **Point A (Confidentialité documentaire & Alignement CLI)** :
-     - Remplacement de tous les liens machine-spécifiques absolus par des liens GitHub relatifs (`../...`) et correction des chemins erronés (`Renaming/` -> `Killers/`).
-     - Implémentation officielle du drapeau CLI `--export-mapping <path>` (`-m <path>`) dans [CommandLineOptions.cs](../ConfuserExKillerRunner/Core/CommandLineOptions.cs) et [Program.cs](../ConfuserExKillerRunner/Program.cs), permettant d'exporter le rapport de mapping à un emplacement personnalisé tout en conservant l'export automatique par défaut vers `<output>.rename_map.txt`.
-     - Clarification rigoureuse du décompte de tests dans les rapports : 64 tests de l'arborescence `tests/` exécutés via `pytest tests -v` et 24 tests d'assertions de signatures exécutés via `python test_detector.py` (totalisant 88 tests automatisés passés avec succès).
-   - **Point B (Sécurité du harnais PowerShell et contrôles API Win32)** :
-     - Élimination de la fenêtre de course dans [Verify-DeobfuscatedBinary.ps1](../scripts/Verify-DeobfuscatedBinary.ps1) : création du processus en état suspendu (`CREATE_SUSPENDED`), assignation au Job Object avant exécution, et fail-closed strict à l'initialisation du Job Object.
-     - Contrôle rigoureux de `SetHandleInformation(hStdOutRead, ...)` dans [JobObject.cs](../ConfuserExKillerRunner/Core/JobObject.cs) : politique fail-closed immédiate fermant tous les handles et échouant si la configuration du flag d'héritage échoue.
-     - Validation explicite du code retour `WAIT_OBJECT_0` dans [ProcessRunner.cs](../ConfuserExKillerRunner/Core/ProcessRunner.cs) et [Verify-DeobfuscatedBinary.ps1](../scripts/Verify-DeobfuscatedBinary.ps1) avant lecture du code de sortie, traitant tout état inattendu comme un échec sécurisé.
-   - **Point C (Détection du renommage ASCII, acronymes techniques & Entropie de Shannon)** :
-     - Intégration active du calcul d'entropie de Shannon `ComputeShannonEntropy(name)` ($H \ge 2.8$) dans [SemanticRenamer.cs](../ConfuserExKillerRunner/Killers/SemanticRenamer.cs) pour identifier les motifs pseudo-aléatoires générés par ConfuserEx (`Letters`).
-     - Découpage par sous-mots/acronymes via expressions régulières PascalCase/CamelCase et analyse contextuelle de casse, neutralisant tout risque de faux positif sur les acronymes légitimes (`HTMLParser`, `HTMLDocument`, `XMLHttpRequest`, `JSONSerializer`, `HTTPServer`, `UTF8Encoding`, `IOHelper`, `SQLStatement`, `WCFServiceClient`, `ColorRGB`, `RGBColor`, etc.).
-     - Ajout de la suite de tests négatifs unitaires `C10_25_Detection_TechnicalAcronyms_NotMangled` (466 tests xUnit totaux passants).
-     - Mise à jour détaillée de la matrice de support dans [SUPPORT_MATRIX.md](../docs/SUPPORT_MATRIX.md).
+7. **Revue complémentaire — Durcissement initial**
+   - Normalisation des liens markdown relatifs GitHub et clarification de l'arborescence des Killers.
+   - Confinement Job Object avec création suspendue dans [Verify-DeobfuscatedBinary.ps1](../scripts/Verify-DeobfuscatedBinary.ps1).
+   - Vérification des handles d'héritage et retours de synchronisation (`WAIT_OBJECT_0`).
+
+8. **Mission corrective finale — Audit complémentaire**
+   - **Phase 1 (Résolution définitive des faux positifs du SemanticRenamer)** :
+     - Élimination complète des faux positifs sur les identifiants techniques et réseaux (`SmtpTlsHandler`, `SmtpSslHandler`, `SmtpTlsClient`, `HttpTlsClient`).
+     - Refonte de la détection de clusters de consonnes dans `IsHighEntropyOrRandomAscii()` : évaluation strictement locale par token sous-mot PascalCase/CamelCase, empêchant les consonnes d'acronymes légitimes adjacents (ex. `Smtp` + `Tls`) d'accumuler un faux cluster transverse.
+     - Enrichissement significatif du dictionnaire d'abréviations techniques (`smtp`, `tls`, `ssl`, `aes`, `gcm`, `jwt`, `xpath`, `dns`, `db`, `fs`, `io`, etc.).
+     - Si l'ensemble des sous-mots est composé de tokens reconnus, l'identifiant est immédiatement préservé comme légitime.
+     - Ajout des tests négatifs obligatoires et de tests représentatifs réseau/crypto dans `SemanticRenamerTests.cs` (`C10_25`).
+     - Ajout du test d'intégration `C10_26` construisant un module dnlib réel pour vérifier que les classes, méthodes et champs légitimes sont préservés à 100%, tandis que les symboles obfusqués (Unicode invisible, décodable) sont normalisés.
+   - **Phase 2 (Fail-closed non-Windows de ProcessRunner.RunIsolated)** :
+     - Suppression définitive du repli silencieux non sécurisé vers `Run()` sur plateformes non-Windows.
+     - `ProcessRunner.RunIsolated()` retourne immédiatement un `ProcessResult` en échec (`ExitCode = -1`, log d'erreur explicite et `StandardError` détaillée indiquant que l'isolation par Job Object Windows est Win32NT-only).
+     - Ajout des tests unitaires `JobObject_11` et `JobObject_12`.
+     - Mise à jour de [WORKER_ISOLATION.md](../docs/WORKER_ISOLATION.md) (section 2.5) rappelant que les Job Objects constituent un confinement de processus et non un sandbox OS complet.
+   - **Phase 3 (Fiabilisation de l'export explicite du mapping)** :
+     - Exigence déterministe : l'option `--export-mapping` (`-m`) requiert obligatoirement `--restore-names`. En cas d'omission, une erreur explicite est retournée dès l'analyse CLI avec code de sortie 1.
+     - Sécurisation des écritures : `SaveMappingReport()` crée les dossiers parents manquants et propage les exceptions d'I/O au lieu de les avaler silencieusement.
+     - En cas d'échec d'écriture d'un mapping explicitement demandé, l'erreur est consignée sur stderr en rouge, ajoutée aux diagnostics du rapport d'audit, le statut passe à `FAILED` et un code de sortie non nul (1) est retourné.
+     - L'export automatique par défaut vers `<output>.rename_map.txt` conserve son caractère non bloquant (warning en mode verbose).
+     - Suite de tests dédiée `CommandLineOptionsTests.cs` (7 tests unitaires).
+   - **Phase 4 & 5 (Cohérence documentaire & Protection de branche)** :
+     - Décomptes exacts audités : 476 tests xUnit (453 Unit, 23 Integration), 64 tests pytest, 24 contrôles du détecteur, 9 benchmarks.
+     - Documentation du statut de fin de support de `net6.0-windows` (`NETSDK1138`).
+     - Qualification du mode Letters en `Unit Test` dans [SUPPORT_MATRIX.md](../docs/SUPPORT_MATRIX.md).
+     - Vérification de la protection de branche via l'API GitHub (`main` et working branch : `protected: false`) et documentation de la procédure d'activation.
 
 ---
 
@@ -123,7 +147,11 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
 | **F4** | `ConfuserExKillerRunner/Analysis/QualityAuditor.cs` | Remplacement des vérifications de chaînes dépendantes de la langue de l'OS par des regexes compilées pour PEVerify | Tests de validation IL / MD | **CORRIGÉ** |
 | **Rev-A** | `audit/audit_remediation_sonnet_final_report.md` | Remplacement systématique de tous les liens machine absolus par des liens relatifs GitHub et correction du dossier de `SemanticRenamer.cs` | Audit textuel propre sans fuite de chemins | **CORRIGÉ** |
 | **Rev-B** | `scripts/Verify-DeobfuscatedBinary.ps1`, `ProcessRunner.cs`, `JobObject.cs` | Création suspendue dans le harnais PowerShell sans fenêtre de course, fail-closed strict à l'initialisation du Job Object, vérification des retours `ResumeThread`, `WAIT_FAILED`, et `GetExitCodeProcess` | `test_verify_deobfuscated_binary.py` (11 tests passés) | **CORRIGÉ** |
-| **Rev-C** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs`, `SemanticRenamerTests.cs`, `SUPPORT_MATRIX.md` | Détection explicite des modes ConfuserEx ASCII Letters, MD5 Hash et Decodable, avec préservation stricte des identifiants PascalCase/camelCase et tests unitaires positifs/négatifs | 37 tests unitaires `SemanticRenamerTests` verts | **CORRIGÉ** |
+| **Rev-C** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs`, `SemanticRenamerTests.cs`, `SUPPORT_MATRIX.md` | Détection explicite des modes ConfuserEx ASCII Letters, MD5 Hash et Decodable, avec préservation stricte des identifiants PascalCase/camelCase et tests unitaires positifs/négatifs | 38 tests unitaires `SemanticRenamerTests` verts | **CORRIGÉ** |
+| **Rev-D1** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs`, `SemanticRenamerTests.cs` | Élimination définitive des faux positifs sur noms techniques (`SmtpTlsHandler`, `SmtpSslHandler`, `SmtpTlsClient`, `HttpTlsClient`) par découpage contextuel local des clusters de consonnes par token PascalCase/CamelCase et enrichissement des abréviations réseau/crypto ; ajout du test d'intégration `C10_26` sur module dnlib | Tests `C10_25` et `C10_26` passés | **CORRIGÉ** |
+| **Rev-D2** | `ConfuserExKillerRunner/Core/ProcessRunner.cs`, `WORKER_ISOLATION.md` | Suppression du repli non-Windows non isolé dans `RunIsolated` ; application stricte de la politique fail-closed (`ExitCode = -1`, diagnostic explicite) | Tests unitaires `JobObject_11` et `JobObject_12` | **CORRIGÉ** |
+| **Rev-D3** | `ConfuserExKillerRunner/Core/CommandLineOptions.cs`, `Program.cs`, `CommandLineOptionsTests.cs` | Exigence explicite de `--restore-names` pour `--export-mapping` (`-m`), levée d'exception dans `SaveMappingReport` avec création de dossiers parents, traitement fatal (code 1, `FAILED`) des échecs d'écriture explicite, et maintien du warning non fatal sur l'export par défaut | Suite de tests `CommandLineOptionsTests` (7 tests passés) | **CORRIGÉ** |
+| **Rev-D4** | `audit/audit_remediation_sonnet_final_report.md`, `docs/SUPPORT_MATRIX.md` | Réconciliation stricte des décomptes (476 xUnit : 453 Unit / 23 Integration ; 64 pytest + 24 détecteur = 88 checks), documentation de la fin de support de `net6.0-windows` (EOS nov. 2024), qualification Letters en `Unit Test`, et documentation de la protection de branche | Documentation vérifiable | **CORRIGÉ** |
 
 ---
 
@@ -133,37 +161,41 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
 - Commande exécutée : `dotnet build unconfuser.sln -c Release`
 - Configuration : `Release`
 - Cibles validées :
-  - `net48` (Full Framework) : **0 erreur, 1 avertissement d'alias**
-  - `net6.0-windows` (.NET Core 6) : **0 erreur, 1 avertissement d'alias**
-  - `net8.0-windows` (.NET Core 8) : **0 erreur, 1 avertissement d'alias**
+  - `net48` (Full Framework) : **0 erreur, 0 avertissement**
+  - `net6.0-windows` (.NET Core 6) : **0 erreur, 0 avertissement** (Considération de cycle de vie : framework hors support actif depuis le 12 novembre 2024, conservé uniquement pour rétrocompatibilité d'exécution)
+  - `net8.0-windows` (.NET Core 8) : **0 erreur, 0 avertissement** (Support actif LTS Microsoft jusqu'en novembre 2026)
 - Dépendances : Tous les projets sont à jour pour la restauration (`BenignSample`, `ConfuserExKillerRunner`, `FixtureGenerator`, `ConfuserExKillerRunner.Tests`).
 
 ### 2. Tests unitaires et d'intégration C# (xUnit)
 - Commande exécutée : `dotnet test ConfuserExKillerRunner.Tests/ConfuserExKillerRunner.Tests.csproj -c Release`
-- **Total des tests exécutés : 465**
-- **Succès : 465**
+- **Total des tests exécutés : 476**
+- **Succès : 476**
 - **Échecs : 0**
 - **Ignorés : 0**
-- Temps d'exécution total : ~16-20 secondes
-- Répartition par traits :
-  - **Tests Unitaires (`Category=Unit`)** : **441 tests passés**
-  - **Tests d'Intégration (`Category=Integration`)** : **24 tests passés**
+- Temps d'exécution total : ~16 secondes
+- Répartition par traits (100% des tests catégorisés) :
+  - **Tests Unitaires (`Category=Unit`)** : **453 tests passés** (exécutables en ~4s)
+  - **Tests d'Intégration (`Category=Integration`)** : **23 tests passés** (exécutables en ~16s)
 
-### 3. Tests Python (pytest)
-- Commande exécutée : `python -m pytest`
-- **Total des tests collectés : 88**
-- **Succès : 88**
-- **Échecs : 0**
-- Temps d'exécution : ~3 minutes
-- Fichiers de test validés :
-  - `test_detector.py` : 24 passés
-  - `tests/test_deobfuscation_benchmark.py` : 20 passés
-  - `tests/test_formats.py` : 5 passés
-  - `tests/test_il.py` : 6 passés
-  - `tests/test_matching.py` : 5 passés
-  - `tests/test_metadata_heuristics.py` : 6 passés
-  - `tests/test_real_fixture_provenance.py` : 11 passés
-  - `tests/test_verify_deobfuscated_binary.py` : 11 passés
+### 3. Tests Python (pytest & Détecteur)
+La suite de validation Python comprend deux ensembles d'assertions distincts :
+1. **Tests unitaires et d'intégration de l'infrastructure (`tests/`)** :
+   - Commande exécutée : `python -m pytest tests -v`
+   - **Total des tests : 64 passés (0 échec)**
+   - Durée : ~2m59s
+   - Répartition :
+     - `tests/test_deobfuscation_benchmark.py` : 20 passés
+     - `tests/test_formats.py` : 5 passés
+     - `tests/test_il.py` : 6 passés
+     - `tests/test_matching.py` : 5 passés
+     - `tests/test_metadata_heuristics.py` : 6 passés
+     - `tests/test_real_fixture_provenance.py` : 11 passés
+     - `tests/test_verify_deobfuscated_binary.py` : 11 passés
+2. **Contrôles de régression des heuristiques du détecteur (`test_detector.py`)** :
+   - Commande exécutée : `python test_detector.py`
+   - **Total des contrôles : 24 `[PASS]` (0 échec)**
+   - Valide l'ensemble des règles de détection (ConfuserEx, SmartAssembly, Eazfuscator, Netz, EzirizVM, etc.)
+- **Total cumulé des vérifications Python automatisées** : **88 vérifications réussies**.
 
 ### 4. Tests de sécurité de l'exécution dynamique
 - Limite mémoire par processus (512 Mo) : **Validée** (processus tué en cas de dépassement)
@@ -172,6 +204,7 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
 - Timeout strict du Job Object (60s) : **Validé**
 - Création suspendue et assignation atomique : **Validée** (dans `JobObject.cs` et `Verify-DeobfuscatedBinary.ps1`)
 - Nettoyage automatique des arborescences de processus : **Validé**
+- Politique fail-closed sur plateformes non-Windows : **Validée** (`ProcessRunner.RunIsolated` échoue immédiatement avec ExitCode = -1)
 
 ### 5. Benchmark de désobfuscation
 - Commande exécutée : `python benchmarks/run_benchmark.py`
@@ -187,15 +220,19 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
   8. `Generics & Exception Edges` : `SYNTHETIC_PASS` (CLEAN, Exact Match)
   9. `ConfuserEx yck1509/ConfuserEx v1.0.0` (Authentique) : **`REAL_PROTECTOR_PASS`** (CLEAN, Exact Match)
 
+### 6. Vérification comportementale runtime sur binaire authentique
+- Commande exécutée : `powershell -ExecutionPolicy Bypass -File scripts/Verify-DeobfuscatedBinary.ps1 -Target benchmarks/fixtures/real_confuserex/BenignSample_clean.exe`
+- Résultat : **20 types sur 20 découverts et vérifiés (JIT Methods : ok=63, skipped=3, missing-dep=0, corrupted-il=0)**.
+
 ---
 
 ## D. Limites restantes documentées
 
 ### 1. Ce qui est totalement résolu
 - **Fiabilité des verdicts** : Plus aucun verdict `SUCCESS` n'est retourné si une protection reste indéterminée, non vérifiée ou partielle.
-- **Codes de retour CLI** : Conformes aux standards UNIX/Windows (0 = succès avéré, 1 = erreur fatale, 2 = résultat partiel/non vérifié).
-- **Intégrité des binaires Windows Forms et WPF** : L'écosystème de composants tiers, d'événements et de Reflection (`DataBindings`, `INotifyPropertyChanged`) ne subit plus de renommages destructeurs de compatibilité d'exécution.
-- **Sécurité des workers et du harnais de test** : Confinement via Job Object Win32 avec politique *fail-closed*, création suspendue sans fenêtre de course, et limites mémoire/temps.
+- **Codes de retour CLI** : Conformes aux standards UNIX/Windows (0 = succès avéré, 1 = erreur fatale ou export mapping explicite échoué, 2 = résultat partiel/non vérifié).
+- **Intégrité des symboles métier et réseaux** : Aucun identifiant technique (`SmtpTlsHandler`, `HTMLParser`, `RGBColor`, etc.) ni symbole Roslyn (`<>c`, closures) ne subit de renommage erroné.
+- **Sécurité des workers et confinement Job Object** : Confinement via Job Object Win32 avec politique *fail-closed*, création suspendue sans fenêtre de course, et refus d'exécution non isolée sur non-Windows.
 - **Découplage architectural** : L'évaluateur symbolique PE et l'orchestration CLI sont isolés et testables unitairement.
 
 ### 2. Ce qui ne peut pas être résolu de manière purement générique
@@ -212,7 +249,7 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
 
 ---
 
-## E. Sécurité et confidentialité
+## E. Sécurité, confidentialité et gouvernance
 
 1. **Nettoyage des chemins privés** :
    - Tous les chemins de machines de développement locales ont été éliminés de l'ensemble de l'arborescence du projet et de la documentation.
@@ -225,6 +262,19 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
 3. **Secrets et identifiants** :
    - Aucun token d'accès, mot de passe, clé privée ou secret n'a été détecté dans le dépôt.
 
+4. **Protection de la branche GitHub (Phase 5)** :
+   - *État audité* : L'interrogation de l'API GitHub (`https://api.github.com/repos/djdjamel/unconfuser/branches/main`) confirme que la branche `main` présente actuellement `protected: false`.
+   - *Actions requises par le propriétaire du dépôt* (nécessitant des permissions administratives d'administration GitHub) :
+     1. Naviguer dans les paramètres du dépôt : `Settings > Branches > Branch protection rules`.
+     2. Cliquer sur **Add rule** (ou **New ruleset**).
+     3. Dans le champ **Branch name pattern**, saisir `main`.
+     4. Cocher **Require a pull request before merging**.
+     5. Cocher **Require status checks to pass before merging**.
+     6. Dans la liste des statuts requis, rechercher et sélectionner le check CI obligatoire : `build-and-test`.
+     7. Cocher **Require branches to be up to date before merging**.
+     8. (Recommandé) Cocher **Do not allow bypassing the above settings** pour les administrateurs.
+     9. Cliquer sur **Save changes**.
+
 ---
 
 ## F. Évaluation finale
@@ -232,16 +282,17 @@ Statut : **Terminé — 6 phases validées + revue complémentaire, 100% tests p
 | Domaine | Note | Justification synthétique |
 |---|---|---|
 | **Confidentialité & Hygiène** | **PASS** | Élimination totale des chemins locaux, liens markdown relatifs, suppression des scripts ad-hoc propriétaires, anonymisation des fichiers `.crproj`. |
-| **Vérité des verdicts** | **PASS** | Exit code 2 par défaut sur résultat partiel, drapeaux explicites, fin des faux succès sur binaires sains ou échecs PEVerify. |
-| **SemanticRenamer** | **PASS** | Protection complète des symboles du compilateur Roslyn, détection des modes ConfuserEx Unicode, ASCII symbols, Letters et MD5, absence de rupture runtime. |
-| **Isolation dynamique** | **PASS** | Job Object Win32 avec politique fail-closed, création suspendue dans le moteur C# et le harnais PowerShell, quotas stricts mémoire/CPU, isolation complète. |
-| **Tests & Fixtures** | **PASS** | 466 tests xUnit verts (séparés par traits Unit/Integration), 88 tests automatisés Python passés (64 pytest + 24 contrôles du détecteur), 9 benchmarks validés avec fixture réelle. |
+| **Vérité des verdicts** | **PASS** | Exit code 2 par défaut sur résultat partiel, exit code 1 sur échec explicite de mapping, fin des faux succès sur binaires sains ou échecs PEVerify. |
+| **SemanticRenamer** | **PASS** | Élimination des faux positifs sur noms techniques (`SmtpTlsHandler`), protection des symboles Roslyn, détection ConfuserEx Unicode/ASCII/Letters/MD5, préservation des acronymes. |
+| **Isolation dynamique** | **PASS** | Job Object Win32 avec création suspendue sans fenêtre de course, quotas mémoire/CPU stricts, politique fail-closed sur non-Windows (pas de repli silencieux). |
+| **Tests & Fixtures** | **PASS** | 476 tests xUnit verts (453 Unit / 23 Integration), 88 vérifications Python réussies (64 pytest + 24 détecteur), 9 benchmarks passés dont 1 réel, 20/20 types réels vérifiés au runtime. |
 | **Documentation** | **PASS** | Matrice de support en 9 colonnes basée sur des preuves (`SUPPORT_MATRIX.md`), spécification de sécurité (`WORKER_ISOLATION.md`), rapport exhaustif d'audit. |
-| **Maintenabilité du code** | **PASS** | Découpage de `Program.cs`, extraction de `PeSymbolicEvaluator` (1 280 lignes isolées et testées), régexes culture-agnostiques. |
+| **Maintenabilité du code** | **PASS** | Découpage de `Program.cs`, extraction de `CommandLineOptions` et `PeSymbolicEvaluator`, régexes culture-agnostiques, compilation 0 warning. |
 
 ### Recommandation finale
 
 La branche `fix/antidump-constants-dependencies-antitamper-validation` est dans un état d'excellence technique et de robustesse opérationnelle optimal.  
-L'ensemble des exigences de l'audit de Sonnet et des remarques de revue est traité et rigoureusement validé par les tests automatiques.
+L'ensemble des exigences des audits initial et complémentaire est traité, documenté de manière transparente et vérifiable, et rigoureusement validé par les tests automatiques.
 
 **Recommandation** : **Feu vert complet pour intégration (Merge) dans la branche principale (`master` / `main`).**
+

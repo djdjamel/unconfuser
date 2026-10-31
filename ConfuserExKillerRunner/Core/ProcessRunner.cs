@@ -27,6 +27,12 @@ namespace ConfuserExKillerRunner.Core
         /// Spawns the process in a suspended state (CREATE_SUSPENDED), assigns it to the Job Object,
         /// verifies containment, and only then resumes execution. This completely eliminates the
         /// race condition where an unconstrained process could run code or spawn descendants before job assignment.
+        /// <para>
+        /// Security Policy (Fail-Closed): On non-Windows platforms (e.g. Linux, macOS), Windows Job Object
+        /// isolation is unavailable. To prevent unconstrained execution of untrusted code, this method
+        /// strictly fails closed by returning a failed ProcessResult (ExitCode = -1) rather than falling
+        /// back to un-isolated execution.
+        /// </para>
         /// </summary>
         public static ProcessResult RunIsolated(
             string fileName,
@@ -38,10 +44,18 @@ namespace ConfuserExKillerRunner.Core
             if (string.IsNullOrEmpty(fileName))
                 throw new ArgumentNullException(nameof(fileName));
 
-            // On non-Windows platforms, fallback to standard Run
+            // Fail-closed enforcement on non-Windows platforms: Windows Job Object isolation is Win32NT-only
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
             {
-                return Run(fileName, arguments, workingDirectory, timeoutMs);
+                Logger.LogError($"[ProcessRunner] Fail-closed: Windows Job Object process isolation is not supported on platform {Environment.OSVersion.Platform}. Untrusted execution aborted.");
+                return new ProcessResult
+                {
+                    ExitCode = -1,
+                    StandardOutput = string.Empty,
+                    StandardError = $"[!] Fail-closed security enforcement: Windows Job Object process isolation is only supported on Windows (Win32NT). Process isolation is unavailable on platform {Environment.OSVersion.Platform}. Untrusted execution aborted.",
+                    Duration = TimeSpan.Zero,
+                    TimedOut = false
+                };
             }
 
             string resolvedExe = ResolveExecutablePath(fileName) ?? fileName;

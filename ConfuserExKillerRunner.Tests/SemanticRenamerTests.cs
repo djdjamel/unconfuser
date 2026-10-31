@@ -1059,6 +1059,12 @@ namespace ConfuserExKillerRunner.Tests
         [Fact]
         public void C10_25_Detection_TechnicalAcronyms_NotMangled()
         {
+            // Network and security handlers with consonant-rich acronym boundaries (e.g. Smtp + Tls + Handler)
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SmtpTlsHandler"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SmtpSslHandler"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SmtpTlsClient"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("HttpTlsClient"));
+
             // Technical identifiers containing uppercase acronyms followed by words must NEVER be flagged as mangled
             Assert.False(SemanticRenamer.IsMangledIdentifier("HTMLParser"));
             Assert.False(SemanticRenamer.IsMangledIdentifier("HTMLDocument"));
@@ -1076,9 +1082,90 @@ namespace ConfuserExKillerRunner.Tests
             Assert.False(SemanticRenamer.IsMangledIdentifier("GZipStream"));
             Assert.False(SemanticRenamer.IsMangledIdentifier("RijndaelManaged"));
             Assert.False(SemanticRenamer.IsMangledIdentifier("SHA256Managed"));
+
+            // Additional representative technical/domain identifiers
+            Assert.False(SemanticRenamer.IsMangledIdentifier("AesGcmEncryption"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("TcpIpStreamHandler"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("DbConnectionPool"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("JwtTokenValidator"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("DnsPacketParser"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("HmacSha256Provider"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SshSessionManager"));
+        }
+
+        [Fact]
+        public void C10_26_Execute_PreservesLegitimateNamesAndNormalizesObfuscated()
+        {
+            var module = new ModuleDefUser("IntegrationApp.dll");
+
+            // 1. Legitimate technical class with acronyms
+            var smtpType = new TypeDefUser("MailApp.Network", "SmtpTlsHandler", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(smtpType);
+            var sendMethod = new MethodDefUser("SendSecureMessage", MethodSig.CreateInstance(module.CorLibTypes.Void)) { Body = new CilBody() };
+            sendMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            smtpType.Methods.Add(sendMethod);
+
+            // 2. Legitimate acronym class
+            var htmlType = new TypeDefUser("MailApp.Parsing", "HTMLParser", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(htmlType);
+
+            // 3. Legitimate business class with fields and methods
+            var repoType = new TypeDefUser("MailApp.Data", "CustomerRepository", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(repoType);
+
+            var getCustMethod = new MethodDefUser("GetCustomerById", MethodSig.CreateInstance(module.CorLibTypes.Object, module.CorLibTypes.Int32)) { Body = new CilBody() };
+            getCustMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            getCustMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            repoType.Methods.Add(getCustMethod);
+
+            var processMethod = new MethodDefUser("ProcessOrder", MethodSig.CreateInstance(module.CorLibTypes.Void)) { Body = new CilBody() };
+            processMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            repoType.Methods.Add(processMethod);
+
+            var colorField = new FieldDefUser("RGBColor", new FieldSig(module.CorLibTypes.Int32), FieldAttributes.Private);
+            repoType.Fields.Add(colorField);
+
+            var ioField = new FieldDefUser("IOHelper", new FieldSig(module.CorLibTypes.Object), FieldAttributes.Private);
+            repoType.Fields.Add(ioField);
+
+            // 4. Truly obfuscated members (unprintable and decodable ConfuserEx patterns)
+            var unprintableType = new TypeDefUser("MailApp.Obfuscated", "\u200B\u200CType99", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(unprintableType);
+
+            var unprintableMethod = new MethodDefUser("\u200D\u200EmethodSecret", MethodSig.CreateInstance(module.CorLibTypes.Void)) { Body = new CilBody() };
+            unprintableMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            smtpType.Methods.Add(unprintableMethod);
+
+            var decodableType = new TypeDefUser("MailApp.Obfuscated", "_0001", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(decodableType);
+
+            var unprintableField = new FieldDefUser("\uFEFF\u200BsecretKey", new FieldSig(module.CorLibTypes.String), FieldAttributes.Private);
+            repoType.Fields.Add(unprintableField);
+
+            // Execute SemanticRenamer pass
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // Verify legitimate names are 100% PRESERVED
+            Assert.Equal("SmtpTlsHandler", smtpType.Name.String);
+            Assert.Equal("SendSecureMessage", sendMethod.Name.String);
+            Assert.Equal("HTMLParser", htmlType.Name.String);
+            Assert.Equal("CustomerRepository", repoType.Name.String);
+            Assert.Equal("GetCustomerById", getCustMethod.Name.String);
+            Assert.Equal("ProcessOrder", processMethod.Name.String);
+            Assert.Equal("RGBColor", colorField.Name.String);
+            Assert.Equal("IOHelper", ioField.Name.String);
+
+            // Verify truly mangled items WERE normalized
+            Assert.NotEqual("\u200B\u200CType99", unprintableType.Name.String);
+            Assert.NotEqual("\u200D\u200EmethodSecret", unprintableMethod.Name.String);
+            Assert.NotEqual("_0001", decodableType.Name.String);
+            Assert.NotEqual("\uFEFF\u200BsecretKey", unprintableField.Name.String);
+
+            Assert.True(result.UnprintableNormalized >= 3);
         }
 
         #endregion
     }
 }
+
 

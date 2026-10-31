@@ -36,6 +36,13 @@ The `JobLimits` class enforces defensive defaults against denial-of-service, for
 - Dedicated `--allowed-dep-dir` switches restrict assembly resolution to safe, trusted dependency locations.
 - Sensitive environment variables (containing tokens, keys, credentials, or secrets) are scrubbed before worker launch.
 
+### 2.5 Cross-Platform Security Policy (Fail-Closed)
+- Windows Job Objects are an exclusive feature of the Windows NT kernel (`PlatformID.Win32NT`).
+- On non-Windows platforms (e.g. Linux, macOS under Mono or .NET), Windows Job Object process containment is unavailable.
+- In accordance with Unconfuser's fail-closed security model, `ProcessRunner.RunIsolated` **strictly refuses** to execute untrusted targets when running on non-Windows platforms, immediately returning `ExitCode = -1` with an explicit diagnostic message rather than silently falling back to un-isolated execution.
+- Standard execution of trusted tooling via `ProcessRunner.Run()` remains operational across all platforms.
+- **Important**: A Job Object constitutes an operating-system process containment mechanism (resource limits, tree termination, launch race prevention), **not** an operating system security sandbox or hypervisor VM boundary.
+
 ---
 
 ## 3. What the Job Object Does NOT Protect (Security Boundaries & Limitations)

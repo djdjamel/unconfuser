@@ -91,9 +91,22 @@ namespace ConfuserExKillerRunner.Core
                 {
                     options.RestoreSemanticNames = true;
                 }
-                else if ((arg == "--export-mapping" || arg == "-m") && i + 1 < args.Length)
+                else if (arg == "--export-mapping" || arg == "-m")
                 {
-                    options.ExportMappingPath = Path.GetFullPath(args[++i]);
+                    if (i + 1 >= args.Length || args[i + 1].StartsWith("-"))
+                    {
+                        errorMessage = "Option --export-mapping (-m) requires a target file path.";
+                        return null;
+                    }
+                    try
+                    {
+                        options.ExportMappingPath = Path.GetFullPath(args[++i]);
+                    }
+                    catch (Exception ex)
+                    {
+                        errorMessage = $"Invalid path specified for --export-mapping: {ex.Message}";
+                        return null;
+                    }
                 }
                 else if (arg == "--force-promote" || arg == "--force")
                 {
@@ -103,6 +116,12 @@ namespace ConfuserExKillerRunner.Core
                 {
                     options.AssemblyPath = Path.GetFullPath(arg);
                 }
+            }
+
+            if (!string.IsNullOrEmpty(options.ExportMappingPath) && !options.RestoreSemanticNames)
+            {
+                errorMessage = "Option --export-mapping (-m) requires --restore-names to be enabled.";
+                return null;
             }
 
             if (string.IsNullOrEmpty(options.AssemblyPath))
@@ -141,7 +160,7 @@ namespace ConfuserExKillerRunner.Core
             Console.WriteLine("  --strict-exit-codes     Return exit code 2 on any partial deobfuscation (default: enabled)");
             Console.WriteLine("  --allow-partial-exit-zero Return exit code 0 on partial deobfuscation (report status remains PARTIAL_SUCCESS)");
             Console.WriteLine("  --restore-names, --semantic-names   Restore semantic symbol names (Forms, Controls, Event Handlers, Resources)");
-            Console.WriteLine("  -m, --export-mapping <path>         Export semantic renaming mapping report to specified text file");
+            Console.WriteLine("  -m, --export-mapping <path>         Export semantic renaming mapping report to specified text file (requires --restore-names)");
             Console.WriteLine("  --force-promote, --force            Promote candidate to output path even if external dependencies cause indeterminate status");
             Console.WriteLine("  --verbose               Enable verbose console output");
             Console.WriteLine("  -h, --help              Show this help message");

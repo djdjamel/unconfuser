@@ -83,6 +83,7 @@ namespace ConfuserExKillerRunner
             var swTotal = Stopwatch.StartNew();
             var stepTimings = new Dictionary<string, long>(StringComparer.Ordinal);
             var exceptionsAndRollbacks = new List<string>();
+            bool explicitMappingFailed = false;
 
             AuditReport baselineAudit = null;
             try
@@ -815,19 +816,36 @@ namespace ConfuserExKillerRunner
                     Console.WriteLine("[*] Step 6.1: Running SemanticRenamer (Restoring Forms, Controls, Handlers, and Resources)...");
                     semResult = SemanticRenamer.Execute(module2, verbose);
                     Console.WriteLine($"[+] SemanticRenamer: {semResult.Message}");
-                    try
+                    if (!string.IsNullOrEmpty(opts.ExportMappingPath))
                     {
-                        string mappingPath = !string.IsNullOrEmpty(opts.ExportMappingPath)
-                            ? opts.ExportMappingPath
-                            : Path.ChangeExtension(finalOutputPath, ".rename_map.txt");
-                        semResult.SaveMappingReport(mappingPath);
-                        if (verbose)
-                            Console.WriteLine($"[+] SemanticRenamer: Mapping report saved to {mappingPath}");
+                        try
+                        {
+                            semResult.SaveMappingReport(opts.ExportMappingPath);
+                            Console.WriteLine($"[+] SemanticRenamer: Explicit mapping report saved to {opts.ExportMappingPath}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Red;
+                            Console.Error.WriteLine($"[ERROR] SemanticRenamer: Failed to export mapping report to '{opts.ExportMappingPath}': {ex.Message}");
+                            Console.ResetColor();
+                            exceptionsAndRollbacks.Add($"Explicit mapping export failed for '{opts.ExportMappingPath}': {ex.Message}");
+                            explicitMappingFailed = true;
+                        }
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        if (verbose)
-                            Console.WriteLine($"[!] SemanticRenamer: Failed to save mapping report: {ex.Message}");
+                        try
+                        {
+                            string defaultMappingPath = Path.ChangeExtension(finalOutputPath, ".rename_map.txt");
+                            semResult.SaveMappingReport(defaultMappingPath);
+                            if (verbose)
+                                Console.WriteLine($"[+] SemanticRenamer: Default mapping report saved to {defaultMappingPath}");
+                        }
+                        catch (Exception ex)
+                        {
+                            if (verbose)
+                                Console.WriteLine($"[!] SemanticRenamer: Warning - Failed to save default mapping report: {ex.Message}");
+                        }
                     }
                     FinalizeMethodBodies(module2);
                     stepTimings["Stage6_SemanticRenamer"] = swSemantic.ElapsedMilliseconds;
@@ -1166,7 +1184,12 @@ namespace ConfuserExKillerRunner
 
             int exitCode = 0;
             string finalStatus = "SUCCESS";
-            if (isIndeterminate)
+            if (explicitMappingFailed)
+            {
+                exitCode = 1;
+                finalStatus = "FAILED";
+            }
+            else if (isIndeterminate)
             {
                 exitCode = 2;
                 finalStatus = "INDETERMINATE";
