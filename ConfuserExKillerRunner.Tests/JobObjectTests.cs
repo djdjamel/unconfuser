@@ -287,12 +287,35 @@ namespace ConfuserExKillerRunner.Tests
         [Fact]
         public void JobObject_12_RunIsolated_NonWindows_FailsClosed()
         {
-            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+            var previousDetector = ProcessRunner.PlatformDetector;
+            try
             {
-                var result = ProcessRunner.RunIsolated("untrusted_sample.exe", "");
+                // Deterministically simulate non-Windows environment (e.g. Linux / Unix)
+                ProcessRunner.PlatformDetector = () => PlatformID.Unix;
+
+                var result = ProcessRunner.RunIsolated("untrusted_sample.exe", "--malicious-param");
+
+                // 1. Must return explicit failure
                 Assert.False(result.Success);
+
+                // 2. ExitCode must be -1 per established fail-closed contract
                 Assert.Equal(-1, result.ExitCode);
+
+                // 3. Must not have timed out
+                Assert.False(result.TimedOut);
+
+                // 4. Must not have produced stdout (no fallback execution via Run())
+                Assert.Equal(string.Empty, result.StandardOutput);
+
+                // 5. StandardError must explicitly indicate isolation unavailability and untrusted execution abort
                 Assert.Contains("Fail-closed security enforcement", result.StandardError);
+                Assert.Contains("only supported on Windows (Win32NT)", result.StandardError);
+                Assert.Contains("Process isolation is unavailable on platform Unix", result.StandardError);
+                Assert.Contains("Untrusted execution aborted", result.StandardError);
+            }
+            finally
+            {
+                ProcessRunner.PlatformDetector = previousDetector;
             }
         }
     }

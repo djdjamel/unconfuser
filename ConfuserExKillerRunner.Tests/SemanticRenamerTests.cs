@@ -1059,14 +1059,20 @@ namespace ConfuserExKillerRunner.Tests
         [Fact]
         public void C10_25_Detection_TechnicalAcronyms_NotMangled()
         {
-            // Network and security handlers with consonant-rich acronym boundaries (e.g. Smtp + Tls + Handler)
+            // Mandatory audit test cases: technical compound identifiers composed of multiple acronyms and domain words
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SctpRtpRtcpProcessor"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SctpRtpRtcpHandler"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SftpScpNtpBridge"));
             Assert.False(SemanticRenamer.IsMangledIdentifier("SmtpTlsHandler"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("HTMLParser"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("CustomerRepository"));
+
+            // Network and security handlers with consonant-rich acronym boundaries (e.g. Smtp + Tls + Handler)
             Assert.False(SemanticRenamer.IsMangledIdentifier("SmtpSslHandler"));
             Assert.False(SemanticRenamer.IsMangledIdentifier("SmtpTlsClient"));
             Assert.False(SemanticRenamer.IsMangledIdentifier("HttpTlsClient"));
 
             // Technical identifiers containing uppercase acronyms followed by words must NEVER be flagged as mangled
-            Assert.False(SemanticRenamer.IsMangledIdentifier("HTMLParser"));
             Assert.False(SemanticRenamer.IsMangledIdentifier("HTMLDocument"));
             Assert.False(SemanticRenamer.IsMangledIdentifier("XMLHttpRequest"));
             Assert.False(SemanticRenamer.IsMangledIdentifier("JSONSerializer"));
@@ -1105,11 +1111,18 @@ namespace ConfuserExKillerRunner.Tests
             sendMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
             smtpType.Methods.Add(sendMethod);
 
-            // 2. Legitimate acronym class
+            // 2. Legitimate technical compound classes with multiple acronyms
+            var sctpProcessorType = new TypeDefUser("MailApp.Network", "SctpRtpRtcpProcessor", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(sctpProcessorType);
+
+            var bridgeType = new TypeDefUser("MailApp.Bridge", "SftpScpNtpBridge", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(bridgeType);
+
+            // 3. Legitimate acronym class
             var htmlType = new TypeDefUser("MailApp.Parsing", "HTMLParser", module.CorLibTypes.Object.TypeDefOrRef);
             module.Types.Add(htmlType);
 
-            // 3. Legitimate business class with fields and methods
+            // 4. Legitimate business class with fields and methods
             var repoType = new TypeDefUser("MailApp.Data", "CustomerRepository", module.CorLibTypes.Object.TypeDefOrRef);
             module.Types.Add(repoType);
 
@@ -1128,7 +1141,7 @@ namespace ConfuserExKillerRunner.Tests
             var ioField = new FieldDefUser("IOHelper", new FieldSig(module.CorLibTypes.Object), FieldAttributes.Private);
             repoType.Fields.Add(ioField);
 
-            // 4. Truly obfuscated members (unprintable and decodable ConfuserEx patterns)
+            // 5. Truly obfuscated members (unprintable and decodable ConfuserEx patterns)
             var unprintableType = new TypeDefUser("MailApp.Obfuscated", "\u200B\u200CType99", module.CorLibTypes.Object.TypeDefOrRef);
             module.Types.Add(unprintableType);
 
@@ -1147,6 +1160,8 @@ namespace ConfuserExKillerRunner.Tests
 
             // Verify legitimate names are 100% PRESERVED
             Assert.Equal("SmtpTlsHandler", smtpType.Name.String);
+            Assert.Equal("SctpRtpRtcpProcessor", sctpProcessorType.Name.String);
+            Assert.Equal("SftpScpNtpBridge", bridgeType.Name.String);
             Assert.Equal("SendSecureMessage", sendMethod.Name.String);
             Assert.Equal("HTMLParser", htmlType.Name.String);
             Assert.Equal("CustomerRepository", repoType.Name.String);

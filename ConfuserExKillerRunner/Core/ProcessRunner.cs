@@ -23,6 +23,13 @@ namespace ConfuserExKillerRunner.Core
     public static class ProcessRunner
     {
         /// <summary>
+        /// Internal platform detector hook used to inspect the active operating system platform.
+        /// Defaults to () => Environment.OSVersion.Platform, allowing deterministic testing of
+        /// fail-closed non-Windows behavior in unit tests without weakening production security.
+        /// </summary>
+        internal static Func<PlatformID> PlatformDetector { get; set; } = () => Environment.OSVersion.Platform;
+
+        /// <summary>
         /// Executes an untrusted process under strict fail-closed Windows Job Object isolation.
         /// Spawns the process in a suspended state (CREATE_SUSPENDED), assigns it to the Job Object,
         /// verifies containment, and only then resumes execution. This completely eliminates the
@@ -45,14 +52,15 @@ namespace ConfuserExKillerRunner.Core
                 throw new ArgumentNullException(nameof(fileName));
 
             // Fail-closed enforcement on non-Windows platforms: Windows Job Object isolation is Win32NT-only
-            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+            var currentPlatform = PlatformDetector != null ? PlatformDetector() : Environment.OSVersion.Platform;
+            if (currentPlatform != PlatformID.Win32NT)
             {
-                Logger.LogError($"[ProcessRunner] Fail-closed: Windows Job Object process isolation is not supported on platform {Environment.OSVersion.Platform}. Untrusted execution aborted.");
+                Logger.LogError($"[ProcessRunner] Fail-closed: Windows Job Object process isolation is not supported on platform {currentPlatform}. Untrusted execution aborted.");
                 return new ProcessResult
                 {
                     ExitCode = -1,
                     StandardOutput = string.Empty,
-                    StandardError = $"[!] Fail-closed security enforcement: Windows Job Object process isolation is only supported on Windows (Win32NT). Process isolation is unavailable on platform {Environment.OSVersion.Platform}. Untrusted execution aborted.",
+                    StandardError = $"[!] Fail-closed security enforcement: Windows Job Object process isolation is only supported on Windows (Win32NT). Process isolation is unavailable on platform {currentPlatform}. Untrusted execution aborted.",
                     Duration = TimeSpan.Zero,
                     TimedOut = false
                 };

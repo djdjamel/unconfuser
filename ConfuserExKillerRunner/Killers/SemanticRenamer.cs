@@ -101,7 +101,7 @@ namespace ConfuserExKillerRunner.Killers
         private static readonly HashSet<string> CommonAbbreviationWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "http", "https", "sync", "async", "msg", "ptr", "id", "db", "fs", "io", "os", "ui", "ip",
-            "tcp", "udp", "src", "dst", "cmd", "ctrl", "btn", "txt", "lbl", "pnl", "chk", "cmb",
+            "tcp", "udp", "sctp", "rtp", "rtcp", "sftp", "scp", "ntp", "src", "dst", "cmd", "ctrl", "btn", "txt", "lbl", "pnl", "chk", "cmb",
             "pic", "lst", "grp", "dgv", "rgb", "rgba", "xml", "html", "json", "utf", "sql", "wcf", "wpf",
             "xaml", "sha", "md5", "aes", "des", "rsa", "gcm", "ecb", "cbc", "hmac", "url", "uri", "sdk", "api", "gui", "cli",
             "csv", "pdf", "zip", "gzip", "smtp", "tls", "ssl", "imap", "pop", "dns", "dhcp", "ftp",
@@ -1803,6 +1803,9 @@ namespace ConfuserExKillerRunner.Killers
             {
                 int meaningfulTokens = 0;
                 int junkTokens = 0;
+                int singleLetterTokens = 0;
+                int structuredAcronymTokens = 0;
+                int solidWords = 0;
 
                 foreach (Match m in matches)
                 {
@@ -1813,22 +1816,49 @@ namespace ConfuserExKillerRunner.Killers
                         if (IsVowel(tok[k])) { hasVowel = true; break; }
                     }
 
-                    bool isAcronym = tok.Length >= 2 && tok.All(char.IsUpper);
+                    bool isAllUpperAcronym = tok.Length >= 2 && tok.All(char.IsUpper);
+                    bool isTitleCaseAcronym = tok.Length >= 2 && tok.Length <= 5 && char.IsUpper(tok[0]) && tok.Substring(1).All(char.IsLower);
                     bool isAbbrev = CommonAbbreviationWords.Contains(tok);
                     bool isDigit = char.IsDigit(tok[0]);
 
-                    if (hasVowel || isAcronym || isAbbrev || isDigit)
+                    if (tok.Length == 1 && char.IsLetter(tok[0]))
+                    {
+                        singleLetterTokens++;
+                    }
+
+                    if (hasVowel || isAllUpperAcronym || isAbbrev || isDigit)
+                    {
                         meaningfulTokens++;
+                        if (hasVowel && tok.Length >= 4)
+                        {
+                            solidWords++;
+                        }
+                    }
                     else
-                        junkTokens++;
+                    {
+                        if (isTitleCaseAcronym)
+                        {
+                            structuredAcronymTokens++;
+                        }
+                        else
+                        {
+                            junkTokens++;
+                        }
+                    }
                 }
 
                 // If EVERY token is meaningful/valid, the identifier is strictly legitimate
-                if (junkTokens == 0)
+                if (junkTokens == 0 && structuredAcronymTokens == 0)
                     return false;
 
-                // If majority of tokens are short junk fragments without vowels or acronym/abbreviation semantics
-                if (junkTokens >= 3 && junkTokens > meaningfulTokens)
+                // If composed of clean TitleCase/Uppercase acronyms paired with solid meaningful word(s)
+                // without any single-letter junk fragments: legitimate technical compound (e.g. SctpRtpRtcpProcessor)
+                if (singleLetterTokens == 0 && solidWords >= 1 && (meaningfulTokens + structuredAcronymTokens == matches.Count))
+                    return false;
+
+                // If majority of tokens are short junk fragments or unanchored acronyms without vowels
+                int totalSuspicious = junkTokens + structuredAcronymTokens;
+                if (totalSuspicious >= 3 && totalSuspicious > meaningfulTokens)
                     return true;
             }
 
