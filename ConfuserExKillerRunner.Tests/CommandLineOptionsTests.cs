@@ -316,5 +316,89 @@ namespace ConfuserExKillerRunner.Tests
                 if (File.Exists(tempTarget)) File.Delete(tempTarget);
             }
         }
+
+        [Fact]
+        [Trait("Category", "Integration")]
+        public void CommandLineOptions_11_ProgramMain_DefaultMappingExportFailure_TreatedAsNonFatalWarning()
+        {
+            // Integration test demonstrating that automatic default mapping export failure is non-fatal:
+            // 1. Prepare valid input and output paths
+            // 2. Pre-create a directory at the expected automatic mapping file path (.rename_map.txt)
+            // 3. Run Program.Main() without --export-mapping
+            // 4. SaveMappingReport throws an IOException/UnauthorizedAccessException because the destination is a directory
+            // 5. Verify the error is caught and logged as a warning, output executable is created, exit code is 0,
+            //    and JSON report reflects SUCCESS without converting the warning into a fatal failure.
+            string tempDir = Path.Combine(Path.GetTempPath(), "cli_test_default_fail_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            string inPath = Path.Combine(tempDir, "input.exe");
+            string outPath = Path.Combine(tempDir, "output.exe");
+            string reportPath = Path.Combine(tempDir, "report.json");
+            string expectedDefaultMapDir = Path.ChangeExtension(outPath, ".rename_map.txt");
+
+            var originalOut = Console.Out;
+            var originalError = Console.Error;
+            var swOut = new StringWriter();
+            var swError = new StringWriter();
+
+            try
+            {
+                File.Copy(TestPathHelper.GetBenignSampleExe(), inPath, overwrite: true);
+
+                // Pre-create a directory where the default mapping file expects to be written
+                Directory.CreateDirectory(expectedDefaultMapDir);
+                Assert.True(Directory.Exists(expectedDefaultMapDir));
+
+                Console.SetOut(swOut);
+                Console.SetError(swError);
+
+                var args = new[]
+                {
+                    inPath,
+                    "-o", outPath,
+                    "--restore-names",
+                    "--json-report", reportPath,
+                    "--no-de4dot",
+                    "--no-netdetect"
+                };
+
+                int exitCode = Program.Main(args);
+
+                // 1. Output executable must exist and be written normally
+                Assert.True(File.Exists(outPath));
+
+                // 2. The mapping destination remains a directory (default file export failed)
+                Assert.True(Directory.Exists(expectedDefaultMapDir));
+
+                // 3. Failure must be captured and logged as a benign warning
+                string stdout = swOut.ToString();
+                Assert.Contains("Failed to save default mapping report", stdout);
+
+                // 4. No fatal mapping export error printed to stderr
+                string stderr = swError.ToString();
+                Assert.DoesNotContain("Failed to export mapping report", stderr);
+
+                // 5. Application exit code must NOT fail solely because of default mapping export
+                Assert.Equal(0, exitCode);
+
+                // 6. JSON report preserves SUCCESS status and exit code 0
+                Assert.True(File.Exists(reportPath));
+                var parsed = JsonValue.Parse(File.ReadAllText(reportPath));
+                Assert.Equal("SUCCESS", parsed["verdict"]["finalStatus"].AsString());
+                Assert.Equal(0, parsed["verdict"]["exitCode"].AsInt());
+
+                // 7. Verify no fatal mapping exceptions registered in exceptionsAndRollbacks
+                var excList = parsed["exceptionsAndRollbacks"];
+                for (int i = 0; i < excList.Count; i++)
+                {
+                    Assert.DoesNotContain("Explicit mapping export failed", excList[i].AsString());
+                }
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+                Console.SetError(originalError);
+                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true); } catch { }
+            }
+        }
     }
 }

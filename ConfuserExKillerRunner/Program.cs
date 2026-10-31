@@ -843,8 +843,7 @@ namespace ConfuserExKillerRunner
                         }
                         catch (Exception ex)
                         {
-                            if (verbose)
-                                Console.WriteLine($"[!] SemanticRenamer: Warning - Failed to save default mapping report: {ex.Message}");
+                            Console.WriteLine($"[!] SemanticRenamer: Warning - Failed to save default mapping report: {ex.Message}");
                         }
                     }
                     FinalizeMethodBodies(module2);

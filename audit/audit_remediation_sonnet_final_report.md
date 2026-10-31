@@ -13,17 +13,17 @@ Statut : **Terminé — 6 phases validées + points résiduels de l'audit indép
 - **Commit audité de départ de cette mission** : `88176d1e4fed52c19e6cae1bef318b1721052ce8` (CI #42 réussie)
 - **Commit final (HEAD d'arrivée après mission corrective finale)** : Branche `fix/antidump-constants-dependencies-antitamper-validation`
 - **Nombre de problèmes traités** : **50 points d'audit** (A1-A5, B1-B5, C1-C10, D1-D6, E1-E9, F1-F4, Rev-A à Rev-C, Rev-D1 à Rev-D4, et Rev-E1 à Rev-E4)
-- **Statut de compilation** : 0 erreur, 0 avertissement (`dotnet build unconfuser.sln -c Release`).
+- **Statut de compilation** : 0 erreur sur l'ensemble des cibles (`dotnet build unconfuser.sln -c Release`). Zéro avertissement sur les cibles actives (`net48`, `net8.0-windows`). L'avertissement SDK `NETSDK1138` est documenté pour `net6.0-windows` (EOS), et l'avertissement de collision de types `CS1685` est supprimé au niveau du projet via `NoWarn`.
 - **Support des Frameworks, Cycle de Vie & Avertissements Compilateur** :
   - `net8.0-windows` : **Phase de maintenance Microsoft** (en phase de maintenance depuis le 11 novembre 2025 ; Fin de support officiel / EOS fixée au 10 novembre 2026).
   - `net10.0-windows` : **Version LTS active de référence** (publiée en novembre 2025, support actif jusqu'en novembre 2027, EOS novembre 2028), cible prioritaire pour la future modernisation planifiée.
   - `net48` : Support actif aligné sur le cycle de vie du système d'exploitation Windows.
   - `net6.0-windows` : **Fin de support officiel (EOS : 12 novembre 2024 - avertissement SDK `NETSDK1138`)**. Maintenu délibérément dans le multi-targeting pour assurer la rétrocompatibilité d'exécution binaire sur les environnements ne disposant pas encore du runtime .NET 8, sans compromettre le support actif assuré par .NET 8 et .NET Framework 4.8.
-  - **Avertissement CS1685 (`ExtensionAttribute`)** : Résolu de manière sûre et ciblée via `<NoWarn>$(NoWarn);1685</NoWarn>` dans `ConfuserExKillerRunner.csproj`. Cet avertissement provenait de la définition historique de `ExtensionAttribute` intégrée dans l'assembly `dnlib 1.6.0.0` (pour compatibilité .NET 2.0/3.5) entrant en collision bénigne avec la BCL .NET.
-- **Statut des tests xUnit C#** : **479/479 passés (0 échec, 0 ignoré, 100% catégorisés)**
-  - **454 Tests Unitaires (`Category=Unit`)**
-  - **25 Tests d'Intégration (`Category=Integration`)**
-  - *Note méthodologique sur la CI* : La commande globale exécutée par la CI (`dotnet test unconfuser.sln -c Release --no-build --verbosity normal`) confirme le total de 479 tests exécutés avec succès. La répartition fine entre 454 tests unitaires et 25 tests d'intégration est prouvée par l'exécution ciblée des filtres xUnit `--filter "Category=Unit"` et `--filter "Category=Integration"`.
+  - **Avertissement CS1685 (`ExtensionAttribute`)** : Non corrigé à la source dans le binaire tiers `dnlib.dll` (v1.6.0.0 compilé pour .NET 2.0/3.5 intégrant son propre `ExtensionAttribute`), mais neutralisé de manière sûre et ciblée par suppression d'avertissement compilateur via `<NoWarn>$(NoWarn);1685</NoWarn>` dans `ConfuserExKillerRunner.csproj`. La portée de cette suppression est strictement restreinte à ce code d'avertissement au sein du projet, garantissant qu'aucune autre erreur ou collision de type n'est masquée.
+- **Statut des tests xUnit C#** : **481/481 passés (0 échec, 0 ignoré, 100% catégorisés)**
+  - **455 Tests Unitaires (`Category=Unit`)**
+  - **26 Tests d'Intégration (`Category=Integration`)**
+  - *Note méthodologique sur la CI* : La commande globale exécutée par la CI (`dotnet test unconfuser.sln -c Release --no-build --verbosity normal`) confirme le total de 481 tests exécutés avec succès. La répartition fine entre 455 tests unitaires et 26 tests d'intégration provient exclusivement des vérifications locales filtrées par traits (`--filter "Category=Unit"` et `--filter "Category=Integration"`), et non d'un découpage produit directement par la CI qui exécute l'ensemble en une commande globale.
 - **Statut des tests Python** : **88 vérifications automatisées réparties sur 2 suites indépendantes (0 échec)** :
   - **64 tests pytest réussis** via `python -m pytest tests -v`
   - **24 contrôles de régression du détecteur réussis** via `python test_detector.py`
@@ -62,7 +62,7 @@ Statut : **Terminé — 6 phases validées + points résiduels de l'audit indép
 
 5. **Phase E — Traçabilité des fixtures et qualification de la matrice**
    - Élimination des dépendances implicites de tests vers des fixtures externes dans `PipelinePromotionTests.cs`, avec génération locale autonome et vérification dynamique via `TestPathHelper.cs`.
-   - Catégorisation systématique à 100% des tests xUnit avec les traits `[Trait("Category", "Unit")]` (453 tests en ~4s) et `[Trait("Category", "Integration")]` (23 tests en ~16s).
+   - Catégorisation systématique à 100% des tests xUnit avec les traits `[Trait("Category", "Unit")]` et `[Trait("Category", "Integration")]` (chiffres historiques de la phase E : 453 tests unitaires et 23 tests d'intégration, actualisés dans le bilan final à 455 unitaires et 26 intégration suite aux tests complémentaires de mapping, de non-Windows fail-closed et d'analyse d'acronymes).
    - Correction rigoureuse du rapport d'audit précédent (référence erronée à `ControlFlowAuditor.cs` rectifiée vers `ProtectionMatrix.cs`).
    - Enrichissement des manifestes de fixtures avec métadonnées d'environnement (`os`, `clr_version`, `dotnet_sdk`), profil de protection parsé depuis le XML `.crproj`, étapes de génération reproductibles, et SHA-256 de vérification.
    - Scission des dépendances Python : `requirements.txt` (dépendances strictes de production) et `requirements-dev.txt` (outillage de test), intégrée dans le workflow CI `.github/workflows/ci.yml`.
@@ -170,24 +170,24 @@ Statut : **Terminé — 6 phases validées + points résiduels de l'audit indép
 - Configuration : `Release`
 - Cibles validées :
   - `net48` (Full Framework) : **0 erreur, 0 avertissement**
-  - `net6.0-windows` (.NET Core 6) : **0 erreur, 0 avertissement**
   - `net8.0-windows` (.NET Core 8) : **0 erreur, 0 avertissement**
-- **Traçabilité des avertissements observés en CI** :
-  1. `NETSDK1138` (*TargetFramework 'net6.0-windows' is out of support*) : Émis par le SDK .NET lors de la restauration / compilation de la cible .NET 6. .NET 6 est officiellement arrivé en fin de support le 12 novembre 2024. Cette cible est conservée délibérément pour la rétrocompatibilité d'exécution binaire sur les machines ne disposant pas du runtime .NET 8.
-  2. `CS1685` (*The predefined type 'System.Runtime.CompilerServices.ExtensionAttribute' is defined in multiple assemblies in the global alias*) : Émis lors de la compilation contre les BCL modernes (.NET 4.8, .NET 6, .NET 8) car l'assembly tiers historique `dnlib.dll` (v1.6.0.0, compilé initialement pour .NET 2.0/3.5) incorpore sa propre définition interne de `ExtensionAttribute`. Cet avertissement a été neutralisé de façon sûre et propre via `<NoWarn>$(NoWarn);1685</NoWarn>` dans `ConfuserExKillerRunner.csproj`, éliminant le bruit de build sans modifier le comportement au runtime.
+  - `net6.0-windows` (.NET Core 6) : **0 erreur** ; avertissement SDK `NETSDK1138`
+- **Traçabilité des avertissements réels de compilation** :
+  1. `NETSDK1138` (*TargetFramework 'net6.0-windows' is out of support*) : Émis par le SDK .NET lors de la restauration / compilation de la cible .NET 6 dans les environnements où le SDK signale les frameworks hors support (.NET 6 EOS le 12 novembre 2024). Cette cible est conservée délibérément pour la rétrocompatibilité d'exécution binaire sur les machines ne disposant pas du runtime .NET 8.
+  2. `CS1685` (*The predefined type 'System.Runtime.CompilerServices.ExtensionAttribute' is defined in multiple assemblies in the global alias*) : Cet avertissement n'est **pas corrigé à la source** (l'assembly binaire tiers historique `dnlib.dll` v1.6.0.0 compilé pour .NET 2.0/3.5 contient sa propre définition d'attribut). Il est **supprimé** via `<NoWarn>$(NoWarn);1685</NoWarn>` dans `ConfuserExKillerRunner.csproj`. La portée de cette suppression est strictement limitée au projet `ConfuserExKillerRunner` et au code `1685`, sans impacter les autres vérifications sémantiques du compilateur.
 - Dépendances : Tous les projets sont à jour pour la restauration (`BenignSample`, `ConfuserExKillerRunner`, `FixtureGenerator`, `ConfuserExKillerRunner.Tests`).
 
 ### 2. Tests unitaires et d'intégration C# (xUnit)
 - Commande exécutée : `dotnet test ConfuserExKillerRunner.Tests/ConfuserExKillerRunner.Tests.csproj -c Release`
-- **Total des tests exécutés : 479**
-- **Succès : 479**
+- **Total des tests exécutés : 481**
+- **Succès : 481**
 - **Échecs : 0**
 - **Ignorés : 0**
 - Temps d'exécution total : ~27 secondes (suite complète incluant désobfuscations réelles)
 - Répartition par traits (100% des tests catégorisés) :
-  - **Tests Unitaires (`Category=Unit`)** : **454 tests passés** (exécutables en ~6s)
-  - **Tests d'Intégration (`Category=Integration`)** : **25 tests passés** (exécutables en ~27s)
-- *Traçabilité CI vs Local* : La commande globale exécutée par GitHub Actions (`dotnet test unconfuser.sln -c Release --no-build --verbosity normal`) confirme le succès des 479 tests. La preuve de la répartition unitaire / intégration est établie localement via filtrage par traits (`--filter "Category=Unit"` et `--filter "Category=Integration"`).
+  - **Tests Unitaires (`Category=Unit`)** : **455 tests passés** (exécutables en ~7s)
+  - **Tests d'Intégration (`Category=Integration`)** : **26 tests passés** (exécutables en ~24s)
+- *Traçabilité CI vs Local* : La commande globale exécutée par GitHub Actions (`dotnet test unconfuser.sln -c Release --no-build --verbosity normal`) valide le total de 481 tests en une passe unique. Les chiffres de répartition unitaire (455) et intégration (26) proviennent d'une vérification locale par filtres de catégories et ne sont pas directement distingués dans la sortie globale de la CI.
 
 ### 3. Tests Python (pytest & Détecteur)
 La suite de validation Python comprend deux ensembles d'assertions distincts :

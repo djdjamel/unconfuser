@@ -1804,7 +1804,6 @@ namespace ConfuserExKillerRunner.Killers
                 int meaningfulTokens = 0;
                 int junkTokens = 0;
                 int singleLetterTokens = 0;
-                int structuredAcronymTokens = 0;
                 int solidWords = 0;
 
                 foreach (Match m in matches)
@@ -1817,7 +1816,6 @@ namespace ConfuserExKillerRunner.Killers
                     }
 
                     bool isAllUpperAcronym = tok.Length >= 2 && tok.All(char.IsUpper);
-                    bool isTitleCaseAcronym = tok.Length >= 2 && tok.Length <= 5 && char.IsUpper(tok[0]) && tok.Substring(1).All(char.IsLower);
                     bool isAbbrev = CommonAbbreviationWords.Contains(tok);
                     bool isDigit = char.IsDigit(tok[0]);
 
@@ -1836,29 +1834,20 @@ namespace ConfuserExKillerRunner.Killers
                     }
                     else
                     {
-                        if (isTitleCaseAcronym)
-                        {
-                            structuredAcronymTokens++;
-                        }
-                        else
-                        {
-                            junkTokens++;
-                        }
+                        junkTokens++;
                     }
                 }
 
                 // If EVERY token is meaningful/valid, the identifier is strictly legitimate
-                if (junkTokens == 0 && structuredAcronymTokens == 0)
+                if (junkTokens == 0)
                     return false;
 
-                // If composed of clean TitleCase/Uppercase acronyms paired with solid meaningful word(s)
-                // without any single-letter junk fragments: legitimate technical compound (e.g. SctpRtpRtcpProcessor)
-                if (singleLetterTokens == 0 && solidWords >= 1 && (meaningfulTokens + structuredAcronymTokens == matches.Count))
-                    return false;
+                // If majority of tokens are short junk fragments without vowels or multiple unverified consonant clusters
+                // (e.g. KpxQtzProcessor with 2 junk vs 1 meaningful, or KpxQtzVrmProcessor with 3 junk vs 1 meaningful)
+                if (junkTokens >= 2 && junkTokens > meaningfulTokens)
+                    return true;
 
-                // If majority of tokens are short junk fragments or unanchored acronyms without vowels
-                int totalSuspicious = junkTokens + structuredAcronymTokens;
-                if (totalSuspicious >= 3 && totalSuspicious > meaningfulTokens)
+                if (junkTokens >= 3)
                     return true;
             }
 

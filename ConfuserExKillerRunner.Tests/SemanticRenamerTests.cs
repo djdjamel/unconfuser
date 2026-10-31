@@ -1155,6 +1155,10 @@ namespace ConfuserExKillerRunner.Tests
             var unprintableField = new FieldDefUser("\uFEFF\u200BsecretKey", new FieldSig(module.CorLibTypes.String), FieldAttributes.Private);
             repoType.Fields.Add(unprintableField);
 
+            // 6. Random TitleCase consonant prefix with domain suffix (must be normalized)
+            var pseudoLegitType = new TypeDefUser("MailApp.Obfuscated", "KpxQtzVrmProcessor", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(pseudoLegitType);
+
             // Execute SemanticRenamer pass
             var result = SemanticRenamer.Execute(module, verbose: false);
 
@@ -1175,8 +1179,29 @@ namespace ConfuserExKillerRunner.Tests
             Assert.NotEqual("\u200D\u200EmethodSecret", unprintableMethod.Name.String);
             Assert.NotEqual("_0001", decodableType.Name.String);
             Assert.NotEqual("\uFEFF\u200BsecretKey", unprintableField.Name.String);
+            Assert.NotEqual("KpxQtzVrmProcessor", pseudoLegitType.Name.String);
 
-            Assert.True(result.UnprintableNormalized >= 3);
+            Assert.True(result.UnprintableNormalized >= 4);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_27_Detection_RandomTitleCaseFragmentsWithSolidSuffix_DetectedAsMangled()
+        {
+            // Pseudo-legitimate identifiers composed of multiple random TitleCase consonant clusters
+            // followed by a solid domain word must be detected as mangled
+            Assert.True(SemanticRenamer.IsMangledIdentifier("KpxQtzVrmProcessor"));
+            Assert.True(SemanticRenamer.IsMangledIdentifier("KpxQtzVrmHandler"));
+            Assert.True(SemanticRenamer.IsMangledIdentifier("KpxQtzProcessor"));
+            Assert.True(SemanticRenamer.IsMangledIdentifier("KpxQtzVrm"));
+
+            // While genuine multi-acronym compounds remain preserved
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SctpRtpRtcpProcessor"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SctpRtpRtcpHandler"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SftpScpNtpBridge"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("SmtpTlsHandler"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("HTMLParser"));
+            Assert.False(SemanticRenamer.IsMangledIdentifier("CustomerRepository"));
         }
 
         #endregion
