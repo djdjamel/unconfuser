@@ -1784,6 +1784,220 @@ namespace ConfuserExKillerRunner.Tests
 
         [Fact]
         [Trait("Category", "Unit")]
+        public void C10_29L_ExtensibleTypeReflection_DerivedClassPreserved()
+        {
+            var module = new ModuleDefUser("DerivedClassTest.dll");
+
+            // BaseService (extensible class)
+            var baseServiceType = new TypeDefUser("MyApp.Services", "BaseService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(baseServiceType);
+
+            // InternalService : BaseService with mangled private method
+            var internalServiceType = new TypeDefUser("MyApp.Services", "InternalService", baseServiceType);
+            module.Types.Add(internalServiceType);
+            var secretMethod = new MethodDefUser("\u200B\u200CSecretMethod", MethodSig.CreateInstance(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            secretMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            internalServiceType.Methods.Add(secretMethod);
+
+            // CallerService with Invoke(BaseService service, string dynamicName)
+            var callerType = new TypeDefUser("MyApp.Services", "CallerService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var invokeMethod = new MethodDefUser("Invoke", MethodSig.CreateInstance(module.CorLibTypes.Void, baseServiceType.ToTypeSig(), module.CorLibTypes.String))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var objRef = new TypeRefUser(module, "System", "Object", module.CorLibTypes.AssemblyRef);
+            var methodInfoRef = new TypeRefUser(module, "System.Reflection", "MethodInfo", module.CorLibTypes.AssemblyRef);
+            var getTypeRef = new MemberRefUser(module, "GetType", MethodSig.CreateInstance(typeRef.ToTypeSig()), objRef);
+            var getMethodRef = new MemberRefUser(module, "GetMethod", MethodSig.CreateInstance(methodInfoRef.ToTypeSig(), module.CorLibTypes.String), typeRef);
+
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1)); // service (BaseService)
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getTypeRef)); // service.GetType()
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_2)); // dynamicName
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef)); // .GetMethod(dynamicName)
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(invokeMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // Derived class method must remain intact because BaseService was extensible and targeted by reflection
+            Assert.Equal("\u200B\u200CSecretMethod", secretMethod.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29M_ExtensibleTypeReflection_InterfaceImplementationPreserved()
+        {
+            var module = new ModuleDefUser("InterfaceTest.dll");
+
+            // IService interface
+            var iServiceType = new TypeDefUser("MyApp.Services", "IService", null)
+            {
+                Attributes = TypeAttributes.NotPublic | TypeAttributes.Interface | TypeAttributes.Abstract
+            };
+            module.Types.Add(iServiceType);
+
+            // InternalService implementing IService
+            var internalServiceType = new TypeDefUser("MyApp.Services", "InternalService", module.CorLibTypes.Object.TypeDefOrRef);
+            internalServiceType.Interfaces.Add(new InterfaceImplUser(iServiceType));
+            module.Types.Add(internalServiceType);
+            var internalMethod = new MethodDefUser("\u200B\u200CExecuteInternal", MethodSig.CreateInstance(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            internalMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            internalServiceType.Methods.Add(internalMethod);
+
+            // CallerService with Invoke(IService service, string dynamicName)
+            var callerType = new TypeDefUser("MyApp.Services", "CallerService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var invokeMethod = new MethodDefUser("Invoke", MethodSig.CreateInstance(module.CorLibTypes.Void, iServiceType.ToTypeSig(), module.CorLibTypes.String))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var objRef = new TypeRefUser(module, "System", "Object", module.CorLibTypes.AssemblyRef);
+            var methodInfoRef = new TypeRefUser(module, "System.Reflection", "MethodInfo", module.CorLibTypes.AssemblyRef);
+            var getTypeRef = new MemberRefUser(module, "GetType", MethodSig.CreateInstance(typeRef.ToTypeSig()), objRef);
+            var getMethodRef = new MemberRefUser(module, "GetMethod", MethodSig.CreateInstance(methodInfoRef.ToTypeSig(), module.CorLibTypes.String), typeRef);
+
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1)); // service (IService)
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getTypeRef)); // service.GetType()
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_2)); // dynamicName
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef)); // .GetMethod(dynamicName)
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(invokeMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // Concrete implementation method must remain intact
+            Assert.Equal("\u200B\u200CExecuteInternal", internalMethod.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29N_ExtensibleTypeReflection_AbstractBaseClassPreserved()
+        {
+            var module = new ModuleDefUser("AbstractClassTest.dll");
+
+            // AbstractService
+            var abstractServiceType = new TypeDefUser("MyApp.Services", "AbstractService", module.CorLibTypes.Object.TypeDefOrRef)
+            {
+                Attributes = TypeAttributes.NotPublic | TypeAttributes.Abstract
+            };
+            module.Types.Add(abstractServiceType);
+
+            // InternalService : AbstractService
+            var internalServiceType = new TypeDefUser("MyApp.Services", "InternalService", abstractServiceType);
+            module.Types.Add(internalServiceType);
+            var handleMethod = new MethodDefUser("\u200B\u200CHandleAction", MethodSig.CreateInstance(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            handleMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            internalServiceType.Methods.Add(handleMethod);
+
+            // CallerService with Invoke(AbstractService service, string dynamicName)
+            var callerType = new TypeDefUser("MyApp.Services", "CallerService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var invokeMethod = new MethodDefUser("Invoke", MethodSig.CreateInstance(module.CorLibTypes.Void, abstractServiceType.ToTypeSig(), module.CorLibTypes.String))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var objRef = new TypeRefUser(module, "System", "Object", module.CorLibTypes.AssemblyRef);
+            var methodInfoRef = new TypeRefUser(module, "System.Reflection", "MethodInfo", module.CorLibTypes.AssemblyRef);
+            var getTypeRef = new MemberRefUser(module, "GetType", MethodSig.CreateInstance(typeRef.ToTypeSig()), objRef);
+            var getMethodRef = new MemberRefUser(module, "GetMethod", MethodSig.CreateInstance(methodInfoRef.ToTypeSig(), module.CorLibTypes.String), typeRef);
+
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1)); // service (AbstractService)
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getTypeRef)); // service.GetType()
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_2)); // dynamicName
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef)); // .GetMethod(dynamicName)
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(invokeMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // Concrete implementation method must remain intact
+            Assert.Equal("\u200B\u200CHandleAction", handleMethod.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29O_ExactTypeReflection_SealedOrNewobjPreservedWithoutOverprotection()
+        {
+            var module = new ModuleDefUser("ExactClassTest.dll");
+
+            // Sealed TargetService
+            var targetServiceType = new TypeDefUser("MyApp.Services", "TargetService", module.CorLibTypes.Object.TypeDefOrRef)
+            {
+                Attributes = TypeAttributes.NotPublic | TypeAttributes.Sealed
+            };
+            module.Types.Add(targetServiceType);
+            var exactMethod = new MethodDefUser("\u200B\u200CExactMethod", MethodSig.CreateInstance(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            exactMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            targetServiceType.Methods.Add(exactMethod);
+
+            // UnrelatedService (unrelated internal class with mangled method)
+            var unrelatedServiceType = new TypeDefUser("MyApp.Services", "UnrelatedService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(unrelatedServiceType);
+            var unrelatedMethod = new MethodDefUser("\u200B\u200CUnrelatedMethod", MethodSig.CreateInstance(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            unrelatedMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            unrelatedServiceType.Methods.Add(unrelatedMethod);
+
+            // CallerService with typeof(TargetService).GetMethod(dynamicName)
+            var callerType = new TypeDefUser("MyApp.Services", "CallerService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var invokeMethod = new MethodDefUser("Invoke", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var methodInfoRef = new TypeRefUser(module, "System.Reflection", "MethodInfo", module.CorLibTypes.AssemblyRef);
+            var getMethodRef = new MemberRefUser(module, "GetMethod", MethodSig.CreateInstance(methodInfoRef.ToTypeSig(), module.CorLibTypes.String), typeRef);
+
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, targetServiceType));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(typeRef.ToTypeSig(), new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()), typeRef)));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1)); // dynamicName
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(invokeMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // TargetService is provably exact: its method is protected
+            Assert.Equal("\u200B\u200CExactMethod", exactMethod.Name.String);
+
+            // UnrelatedService is NOT protected: its unprintable method was normalized safely
+            Assert.StartsWith("Method_", unrelatedMethod.Name.String);
+            Assert.True(result.UnprintableNormalized >= 1);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
         public void C10_30_ReflectionProtection_PropertyChanged_Preserved()
         {
             var module = new ModuleDefUser("NotifyTest.dll");

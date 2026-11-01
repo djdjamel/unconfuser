@@ -285,7 +285,149 @@ namespace ConfuserExKillerRunner.Killers
             return false;
         }
 
-        private static TypeDef TryResolveTargetType(
+        private sealed class TargetTypeResolution
+        {
+            /// <summary>
+            /// Exact target type when strictly demonstrable (e.g. typeof(Target), newobj Target, sealed type instance).
+            /// </summary>
+            public TypeDef ExactType { get; set; }
+
+            /// <summary>
+            /// Indicates whether the runtime type is provably exact.
+            /// </summary>
+            public bool IsExact { get; set; }
+
+            /// <summary>
+            /// Candidate target types in the module when the declared static type is extensible (interface, abstract class, non-sealed base class).
+            /// </summary>
+            public List<TypeDef> PotentialTypes { get; } = new List<TypeDef>();
+
+            /// <summary>
+            /// Indicates whether target resolution is unbounded or cannot be safely determined, requiring conservative module-scope fallback.
+            /// </summary>
+            public bool RequiresModuleScopeFallback { get; set; }
+
+            /// <summary>
+            /// Diagnostic description of the resolution outcome.
+            /// </summary>
+            public string Description { get; set; }
+        }
+
+        private static bool DerivesFrom(TypeDef type, TypeDef baseType)
+        {
+            if (type == null || baseType == null) return false;
+            var curr = type.BaseType?.ResolveTypeDef();
+            while (curr != null)
+            {
+                if (curr == baseType || curr.FullName == baseType.FullName)
+                    return true;
+                curr = curr.BaseType?.ResolveTypeDef();
+            }
+            return false;
+        }
+
+        private static bool ImplementsInterface(TypeDef type, TypeDef ifaceType)
+        {
+            if (type == null || ifaceType == null) return false;
+            var visited = new HashSet<string>(StringComparer.Ordinal);
+            var queue = new Queue<TypeDef>();
+            queue.Enqueue(type);
+            while (queue.Count > 0)
+            {
+                var curr = queue.Dequeue();
+                if (curr == null || !visited.Add(curr.FullName)) continue;
+                if (curr.HasInterfaces)
+                {
+                    foreach (var iface in curr.Interfaces)
+                    {
+                        var resolved = iface.Interface?.ResolveTypeDef();
+                        if (resolved != null)
+                        {
+                            if (resolved == ifaceType || resolved.FullName == ifaceType.FullName)
+                                return true;
+                            queue.Enqueue(resolved);
+                        }
+                    }
+                }
+                var baseDef = curr.BaseType?.ResolveTypeDef();
+                if (baseDef != null)
+                    queue.Enqueue(baseDef);
+            }
+            return false;
+        }
+
+        private static TargetTypeResolution ResolveExtensibleTypeTargets(ModuleDef module, TypeDef resolved, string sourceKind)
+        {
+            if (resolved == null || resolved.FullName == "System.Object")
+            {
+                return new TargetTypeResolution
+                {
+                    RequiresModuleScopeFallback = true,
+                    Description = $"{sourceKind} is System.Object or unresolvable; requires conservative module-scope protection."
+                };
+            }
+
+            // Sealed classes or value types cannot be subclassed in CLR: runtime type is guaranteed to be exact
+            if (resolved.IsSealed || resolved.IsValueType)
+            {
+                return new TargetTypeResolution
+                {
+                    IsExact = true,
+                    ExactType = resolved,
+                    Description = $"{sourceKind} '{resolved.FullName}' is sealed/value-type; runtime type is provably exact."
+                };
+            }
+
+            var res = new TargetTypeResolution
+            {
+                IsExact = false
+            };
+
+            if (resolved.IsInterface)
+            {
+                foreach (var t in module.GetTypes())
+                {
+                    if (t.IsInterface || t.IsAbstract) continue;
+                    if (ImplementsInterface(t, resolved))
+                    {
+                        res.PotentialTypes.Add(t);
+                    }
+                }
+                res.PotentialTypes.Add(resolved);
+                res.Description = $"{sourceKind} interface '{resolved.FullName}' targets {res.PotentialTypes.Count} implementing/interface types in module.";
+            }
+            else if (resolved.IsAbstract)
+            {
+                foreach (var t in module.GetTypes())
+                {
+                    if (t.IsInterface || t.IsAbstract) continue;
+                    if (DerivesFrom(t, resolved))
+                    {
+                        res.PotentialTypes.Add(t);
+                    }
+                }
+                res.PotentialTypes.Add(resolved);
+                res.Description = $"{sourceKind} abstract class '{resolved.FullName}' targets {res.PotentialTypes.Count} derived/base types in module.";
+            }
+            else
+            {
+                // Non-sealed class: can be the base class itself or any derived class in the module
+                res.PotentialTypes.Add(resolved);
+                foreach (var t in module.GetTypes())
+                {
+                    if (t == resolved) continue;
+                    if (DerivesFrom(t, resolved))
+                    {
+                        res.PotentialTypes.Add(t);
+                    }
+                }
+                res.Description = $"{sourceKind} extensible base class '{resolved.FullName}' targets {res.PotentialTypes.Count} base/derived types in module.";
+            }
+
+            return res;
+        }
+
+        private static TargetTypeResolution TryResolveTargetType(
             ModuleDef module,
             TypeDef declaringType,
             MethodDef currentMethod,
@@ -304,7 +446,16 @@ namespace ConfuserExKillerRunner.Killers
                 {
                     if (instrs[tokenIdx].Operand is ITypeDefOrRef tdr)
                     {
-                        return tdr.ResolveTypeDef() ?? (tdr as TypeDef);
+                        var exactDef = tdr.ResolveTypeDef() ?? (tdr as TypeDef);
+                        if (exactDef != null)
+                        {
+                            return new TargetTypeResolution
+                            {
+                                IsExact = true,
+                                ExactType = exactDef,
+                                Description = $"typeof({exactDef.FullName}) is provably exact."
+                            };
+                        }
                     }
                 }
             }
@@ -317,19 +468,34 @@ namespace ConfuserExKillerRunner.Killers
                 if (objIdx >= 0)
                 {
                     var objIns = instrs[objIdx];
+
+                    // Direct instantiation via newobj on the evaluation stack guarantees exact runtime type
+                    if (objIns.OpCode == OpCodes.Newobj && objIns.Operand is IMethod ctor)
+                    {
+                        var exactT = ctor.DeclaringType?.ResolveTypeDef() ?? (ctor.DeclaringType as TypeDef);
+                        if (exactT != null)
+                        {
+                            return new TargetTypeResolution
+                            {
+                                IsExact = true,
+                                ExactType = exactT,
+                                Description = $"newobj {exactT.FullName} guarantees exact runtime type."
+                            };
+                        }
+                    }
+
                     int argIdx = GetArgIndex(objIns);
                     if (argIdx >= 0)
                     {
                         if (argIdx == 0 && currentMethod.HasThis)
                         {
-                            return declaringType;
+                            return ResolveExtensibleTypeTargets(module, declaringType, "Instance (this)");
                         }
                         if (argIdx < currentMethod.Parameters.Count)
                         {
                             var pType = currentMethod.Parameters[argIdx].Type?.ToTypeDefOrRef();
                             var resolved = pType?.ResolveTypeDef() ?? (pType as TypeDef);
-                            if (resolved != null && resolved.FullName != "System.Object")
-                                return resolved;
+                            return ResolveExtensibleTypeTargets(module, resolved, $"Parameter #{argIdx}");
                         }
                     }
 
@@ -338,21 +504,14 @@ namespace ConfuserExKillerRunner.Killers
                     {
                         var locType = currentMethod.Body.Variables[locIdx].Type?.ToTypeDefOrRef();
                         var resolved = locType?.ResolveTypeDef() ?? (locType as TypeDef);
-                        if (resolved != null && resolved.FullName != "System.Object")
-                            return resolved;
-                    }
-
-                    if (objIns.OpCode == OpCodes.Newobj && objIns.Operand is IMethod ctor)
-                    {
-                        return ctor.DeclaringType?.ResolveTypeDef() ?? (ctor.DeclaringType as TypeDef);
+                        return ResolveExtensibleTypeTargets(module, resolved, $"Local variable #{locIdx}");
                     }
 
                     if ((objIns.OpCode == OpCodes.Ldfld || objIns.OpCode == OpCodes.Ldsfld) && objIns.Operand is IField fld)
                     {
                         var fType = fld.FieldSig?.Type?.ToTypeDefOrRef();
                         var resolved = fType?.ResolveTypeDef() ?? (fType as TypeDef);
-                        if (resolved != null && resolved.FullName != "System.Object")
-                            return resolved;
+                        return ResolveExtensibleTypeTargets(module, resolved, $"Field '{fld.Name}'");
                     }
                 }
             }
@@ -364,14 +523,32 @@ namespace ConfuserExKillerRunner.Killers
                 int strIdx = FindStackProducer(instrs, typeProducerIdx, targetDepth: 0);
                 if (strIdx >= 0 && instrs[strIdx].OpCode == OpCodes.Ldstr && instrs[strIdx].Operand is string tName)
                 {
-                    return module.Find(tName, isReflectionName: true);
+                    var exactDef = module.Find(tName, isReflectionName: true);
+                    if (exactDef != null)
+                    {
+                        return new TargetTypeResolution
+                        {
+                            IsExact = true,
+                            ExactType = exactDef,
+                            Description = $"Type.GetType(\"{tName}\") is provably exact."
+                        };
+                    }
                 }
             }
 
             // Case 4: direct ldtoken without GetTypeFromHandle
             if (ins.OpCode == OpCodes.Ldtoken && ins.Operand is ITypeDefOrRef rawTdr)
             {
-                return rawTdr.ResolveTypeDef() ?? (rawTdr as TypeDef);
+                var exactDef = rawTdr.ResolveTypeDef() ?? (rawTdr as TypeDef);
+                if (exactDef != null)
+                {
+                    return new TargetTypeResolution
+                    {
+                        IsExact = true,
+                        ExactType = exactDef,
+                        Description = $"Direct ldtoken for '{exactDef.FullName}' is provably exact."
+                    };
+                }
             }
 
             return null;
@@ -481,23 +658,44 @@ namespace ConfuserExKillerRunner.Killers
                                             }
                                         }
 
-                                        TypeDef targetTypeDef = null;
+                                        TargetTypeResolution targetResolution = null;
                                         if (typeStackDepth >= 0)
                                         {
                                             int typeProducer = FindStackProducer(instrs, i, typeStackDepth);
                                             if (typeProducer >= 0)
                                             {
-                                                targetTypeDef = TryResolveTargetType(module, type, method, instrs, typeProducer);
+                                                targetResolution = TryResolveTargetType(module, type, method, instrs, typeProducer);
                                             }
                                         }
 
                                         if (!resolvedMember)
                                         {
                                             map.HasUnresolvableDynamicReflection = true;
-                                            if (targetTypeDef != null)
+                                            if (targetResolution != null)
                                             {
-                                                map.UnresolvableDynamicReflectionTypes.Add(targetTypeDef);
-                                                map.UnresolvedDynamicPatterns.Add($"Dynamic member reflection on type '{targetTypeDef.FullName}' in method '{type.FullName}::{method.Name}'.");
+                                                if (targetResolution.RequiresModuleScopeFallback)
+                                                {
+                                                    map.HasUnresolvableModuleScopeReflection = true;
+                                                    map.UnresolvedDynamicPatterns.Add($"Dynamic member reflection with unresolvable/unbounded target type in method '{type.FullName}::{method.Name}' ({targetResolution.Description}).");
+                                                }
+                                                else if (targetResolution.IsExact && targetResolution.ExactType != null)
+                                                {
+                                                    map.UnresolvableDynamicReflectionTypes.Add(targetResolution.ExactType);
+                                                    map.UnresolvedDynamicPatterns.Add($"Dynamic member reflection on exact type '{targetResolution.ExactType.FullName}' in method '{type.FullName}::{method.Name}'.");
+                                                }
+                                                else if (!targetResolution.IsExact && targetResolution.PotentialTypes.Count > 0)
+                                                {
+                                                    foreach (var pt in targetResolution.PotentialTypes)
+                                                    {
+                                                        map.UnresolvableDynamicReflectionTypes.Add(pt);
+                                                    }
+                                                    map.UnresolvedDynamicPatterns.Add($"Dynamic member reflection on extensible hierarchy in method '{type.FullName}::{method.Name}' ({targetResolution.Description}).");
+                                                }
+                                                else
+                                                {
+                                                    map.HasUnresolvableModuleScopeReflection = true;
+                                                    map.UnresolvedDynamicPatterns.Add($"Unresolvable target type for dynamic reflection in method '{type.FullName}::{method.Name}'.");
+                                                }
                                             }
                                             else
                                             {
