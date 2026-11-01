@@ -1892,68 +1892,129 @@ namespace ConfuserExKillerRunner.Tests
         {
             string repoRoot = TestPathHelper.GetRepositoryRoot();
 
-            // Pinned and versioned reference assemblies constituting the reproducible empirical corpus
-            var sources = new (string Name, string Version, string LogicalPath, string Provenance)[]
+            // 1. Pinned Reference Manifest with expected SHA-256 hashes
+            var pinnedManifest = new (string Name, string Version, string RelativePath, string ExpectedSha256, string Provenance)[]
             {
-                ("dnlib.dll", "1.6.0.0", Path.Combine(repoRoot, "ConfuserExKillerRunner", "dnlib.dll"), "Pinned third-party library"),
-                ("de4dot.blocks.dll", "3.1.41592.3405", Path.Combine(repoRoot, "ConfuserExKillerRunner", "de4dot.blocks.dll"), "Pinned third-party deobfuscation library"),
-                ("ConfuserExKillerRunner.dll", typeof(SemanticRenamer).Assembly.GetName().Version?.ToString() ?? "1.0.0.0", typeof(SemanticRenamer).Assembly.Location, "Unconfuser deobfuscation engine runner"),
-                ("System.Private.CoreLib.dll", typeof(object).Assembly.GetName().Version?.ToString() ?? "8.0.0.0", typeof(object).Assembly.Location, "Microsoft .NET 8.0 CoreCLR Reference BCL")
+                ("dnlib.dll", "1.6.0.0", "ConfuserExKillerRunner/dnlib.dll", "1b9e108e458c30655f98bb681bc6162b39c08e781264f2181e18be297d7b22d2", "Pinned third-party metadata library"),
+                ("de4dot.blocks.dll", "3.1.41592.3405", "ConfuserExKillerRunner/de4dot.blocks.dll", "ba197b4b6a19ce6242256639a3f641575c77108a07d5fcd3ac13f1d38bfcf98f", "Pinned third-party deobfuscation library")
             };
 
-            var assemblyMetadataList = new List<object>();
-
-            var allUniqueIdentifiers = new HashSet<string>(StringComparer.Ordinal);
-            var publicTypesAndMethods = new HashSet<string>(StringComparer.Ordinal);
-            var nonPublicMembers = new HashSet<string>(StringComparer.Ordinal);
+            // 2. Dynamic compilation and runtime reference assemblies
+            var dynamicSources = new (string Name, string Version, string FilePath, string LogicalPath, string Category, string Provenance)[]
+            {
+                ("ConfuserExKillerRunner.dll", typeof(SemanticRenamer).Assembly.GetName().Version?.ToString() ?? "1.0.0.0", typeof(SemanticRenamer).Assembly.Location, "ConfuserExKillerRunner/bin/Release/net8.0-windows/ConfuserExKillerRunner.dll", "DynamicCompilation", "Unconfuser deobfuscation engine runner"),
+                ("System.Private.CoreLib.dll", typeof(object).Assembly.GetName().Version?.ToString() ?? "8.0.0.0", typeof(object).Assembly.Location, "runtime/System.Private.CoreLib.dll", "RuntimeCoreLib", "Microsoft .NET 8.0 CoreCLR Reference BCL")
+            };
 
             using var sha256 = System.Security.Cryptography.SHA256.Create();
+            var assemblyMetadataList = new List<object>();
 
-            foreach (var src in sources)
+            // Distinct textual names (metric 1)
+            var allTextualNames = new HashSet<string>(StringComparer.Ordinal);
+            var publicTextualNames = new HashSet<string>(StringComparer.Ordinal);
+            var nonPublicTextualNames = new HashSet<string>(StringComparer.Ordinal);
+
+            // Distinct metadata symbols (metric 2)
+            var allSymbols = new Dictionary<string, (string Assembly, string Type, string Kind, string Name, bool IsPublic)>(StringComparer.Ordinal);
+            int publicTypesCount = 0, nonPublicTypesCount = 0;
+            int publicMethodsCount = 0, nonPublicMethodsCount = 0;
+            int publicFieldsCount = 0, nonPublicFieldsCount = 0;
+            int publicPropsCount = 0, nonPublicPropsCount = 0;
+            int publicEventsCount = 0, nonPublicEventsCount = 0;
+            int parametersCount = 0;
+
+            // Process pinned assemblies first and assert exact hash verification
+            foreach (var pinned in pinnedManifest)
             {
-                if (!File.Exists(src.LogicalPath))
-                    continue;
+                string fullPath = Path.Combine(repoRoot, pinned.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+                Assert.True(File.Exists(fullPath), $"Pinned reference assembly not found: {pinned.RelativePath}");
 
-                byte[] fileBytes = File.ReadAllBytes(src.LogicalPath);
-                string hash = BitConverter.ToString(sha256.ComputeHash(fileBytes)).Replace("-", "").ToLowerInvariant();
+                byte[] fileBytes = File.ReadAllBytes(fullPath);
+                string actualHash = BitConverter.ToString(sha256.ComputeHash(fileBytes)).Replace("-", "").ToLowerInvariant();
+
+                // Assert: fail if pinned assembly hash does not match expected cryptographic hash
+                Assert.Equal(pinned.ExpectedSha256, actualHash);
 
                 assemblyMetadataList.Add(new
                 {
-                    Name = src.Name,
-                    Version = src.Version,
-                    LogicalPath = src.LogicalPath,
-                    Sha256 = hash,
-                    Provenance = src.Provenance,
+                    Name = pinned.Name,
+                    Version = pinned.Version,
+                    LogicalPath = pinned.RelativePath,
+                    Category = "PinnedReference",
+                    Sha256 = actualHash,
+                    Sha256Verified = true,
+                    Provenance = pinned.Provenance,
                     SizeBytes = fileBytes.Length
                 });
 
-                var mod = ModuleDefMD.Load(fileBytes);
+                IndexAssemblySymbols(fileBytes, pinned.Name);
+            }
+
+            // Process dynamic compilation and runtime assemblies
+            foreach (var dyn in dynamicSources)
+            {
+                if (!File.Exists(dyn.FilePath))
+                    continue;
+
+                byte[] fileBytes = File.ReadAllBytes(dyn.FilePath);
+                string actualHash = BitConverter.ToString(sha256.ComputeHash(fileBytes)).Replace("-", "").ToLowerInvariant();
+
+                assemblyMetadataList.Add(new
+                {
+                    Name = dyn.Name,
+                    Version = dyn.Version,
+                    LogicalPath = dyn.LogicalPath,
+                    Category = dyn.Category,
+                    Sha256 = actualHash,
+                    Sha256Verified = (bool?)null,
+                    Provenance = dyn.Provenance,
+                    SizeBytes = fileBytes.Length
+                });
+
+                IndexAssemblySymbols(fileBytes, dyn.Name);
+            }
+
+            void IndexAssemblySymbols(byte[] bytes, string asmName)
+            {
+                var mod = ModuleDefMD.Load(bytes);
                 foreach (var t in mod.GetTypes())
                 {
                     if (string.IsNullOrEmpty(t.Name) || SemanticRenamer.IsCompilerGeneratedIdentifier(t.Name))
                         continue;
 
-                    allUniqueIdentifiers.Add(t.Name.String);
-                    if (t.IsPublic || t.IsNestedPublic)
-                        publicTypesAndMethods.Add(t.Name.String);
-                    else
-                        nonPublicMembers.Add(t.Name.String);
+                    bool isTypePublic = t.IsPublic || t.IsNestedPublic;
+                    if (isTypePublic) publicTypesCount++; else nonPublicTypesCount++;
+
+                    allTextualNames.Add(t.Name.String);
+                    if (isTypePublic) publicTextualNames.Add(t.Name.String); else nonPublicTextualNames.Add(t.Name.String);
+
+                    string typeKey = $"{asmName}!{t.FullName}::Type:{t.Name.String}";
+                    allSymbols[typeKey] = (asmName, t.FullName, "Type", t.Name.String, isTypePublic);
 
                     foreach (var m in t.Methods)
                     {
                         if (string.IsNullOrEmpty(m.Name) || SemanticRenamer.IsCompilerGeneratedIdentifier(m.Name) || m.IsSpecialName)
                             continue;
 
-                        allUniqueIdentifiers.Add(m.Name.String);
-                        if (m.IsPublic && (t.IsPublic || t.IsNestedPublic))
-                            publicTypesAndMethods.Add(m.Name.String);
-                        else
-                            nonPublicMembers.Add(m.Name.String);
+                        bool isMethodPublic = (m.IsPublic || m.IsFamily || m.IsFamilyOrAssembly) && isTypePublic;
+                        if (isMethodPublic) publicMethodsCount++; else nonPublicMethodsCount++;
+
+                        allTextualNames.Add(m.Name.String);
+                        if (isMethodPublic) publicTextualNames.Add(m.Name.String); else nonPublicTextualNames.Add(m.Name.String);
+
+                        string mSig = m.MethodSig?.ToString() ?? "";
+                        string methodKey = $"{asmName}!{t.FullName}::Method:{m.Name.String}({mSig})";
+                        allSymbols[methodKey] = (asmName, t.FullName, "Method", m.Name.String, isMethodPublic);
 
                         foreach (var p in m.Parameters)
                         {
                             if (!string.IsNullOrEmpty(p.Name) && !SemanticRenamer.IsCompilerGeneratedIdentifier(p.Name))
-                                allUniqueIdentifiers.Add(p.Name);
+                            {
+                                parametersCount++;
+                                allTextualNames.Add(p.Name);
+                                string paramKey = $"{asmName}!{t.FullName}::{m.Name.String}:Param:{p.Name}";
+                                allSymbols[paramKey] = (asmName, t.FullName, "Parameter", p.Name, isMethodPublic);
+                            }
                         }
                     }
 
@@ -1962,54 +2023,135 @@ namespace ConfuserExKillerRunner.Tests
                         if (string.IsNullOrEmpty(f.Name) || SemanticRenamer.IsCompilerGeneratedIdentifier(f.Name) || f.IsSpecialName)
                             continue;
 
-                        allUniqueIdentifiers.Add(f.Name.String);
-                        nonPublicMembers.Add(f.Name.String);
+                        // Classify field by its true metadata visibility
+                        bool isFieldPublic = (f.IsPublic || f.IsFamily || f.IsFamilyOrAssembly) && isTypePublic;
+                        if (isFieldPublic) publicFieldsCount++; else nonPublicFieldsCount++;
+
+                        allTextualNames.Add(f.Name.String);
+                        if (isFieldPublic) publicTextualNames.Add(f.Name.String); else nonPublicTextualNames.Add(f.Name.String);
+
+                        string fSig = f.FieldSig?.ToString() ?? "";
+                        string fieldKey = $"{asmName}!{t.FullName}::Field:{f.Name.String}:{fSig}";
+                        allSymbols[fieldKey] = (asmName, t.FullName, "Field", f.Name.String, isFieldPublic);
                     }
 
                     foreach (var prop in t.Properties)
                     {
-                        if (!string.IsNullOrEmpty(prop.Name) && !SemanticRenamer.IsCompilerGeneratedIdentifier(prop.Name))
-                            allUniqueIdentifiers.Add(prop.Name.String);
+                        if (string.IsNullOrEmpty(prop.Name) || SemanticRenamer.IsCompilerGeneratedIdentifier(prop.Name))
+                            continue;
+
+                        // Classify property by its getter/setter visibility
+                        bool isPropPublic = ((prop.GetMethod != null && (prop.GetMethod.IsPublic || prop.GetMethod.IsFamily)) ||
+                                             (prop.SetMethod != null && (prop.SetMethod.IsPublic || prop.SetMethod.IsFamily))) && isTypePublic;
+                        if (isPropPublic) publicPropsCount++; else nonPublicPropsCount++;
+
+                        allTextualNames.Add(prop.Name.String);
+                        if (isPropPublic) publicTextualNames.Add(prop.Name.String); else nonPublicTextualNames.Add(prop.Name.String);
+
+                        string propKey = $"{asmName}!{t.FullName}::Property:{prop.Name.String}";
+                        allSymbols[propKey] = (asmName, t.FullName, "Property", prop.Name.String, isPropPublic);
                     }
 
                     foreach (var ev in t.Events)
                     {
-                        if (!string.IsNullOrEmpty(ev.Name) && !SemanticRenamer.IsCompilerGeneratedIdentifier(ev.Name))
-                            allUniqueIdentifiers.Add(ev.Name.String);
+                        if (string.IsNullOrEmpty(ev.Name) || SemanticRenamer.IsCompilerGeneratedIdentifier(ev.Name))
+                            continue;
+
+                        // Classify event by its add/remove method visibility
+                        bool isEventPublic = ((ev.AddMethod != null && (ev.AddMethod.IsPublic || ev.AddMethod.IsFamily)) ||
+                                              (ev.RemoveMethod != null && (ev.RemoveMethod.IsPublic || ev.RemoveMethod.IsFamily))) && isTypePublic;
+                        if (isEventPublic) publicEventsCount++; else nonPublicEventsCount++;
+
+                        allTextualNames.Add(ev.Name.String);
+                        if (isEventPublic) publicTextualNames.Add(ev.Name.String); else nonPublicTextualNames.Add(ev.Name.String);
+
+                        string eventKey = $"{asmName}!{t.FullName}::Event:{ev.Name.String}";
+                        allSymbols[eventKey] = (asmName, t.FullName, "Event", ev.Name.String, isEventPublic);
                     }
                 }
             }
 
-            Assert.True(allUniqueIdentifiers.Count >= 15000, $"Corpus size too small: {allUniqueIdentifiers.Count}");
+            // Assert corpus scale: distinct metadata symbols >= 15000 and distinct textual names >= 15000
+            Assert.True(allSymbols.Count >= 15000, $"Metadata symbols corpus size too small: {allSymbols.Count}");
+            Assert.True(allTextualNames.Count >= 15000, $"Textual names corpus size too small: {allTextualNames.Count}");
 
-            // Group 1: All unique identifiers
-            var allFlagged = allUniqueIdentifiers.Where(id => SemanticRenamer.IsMangledIdentifier(id)).ToList();
-            double allFpRate = (double)allFlagged.Count / allUniqueIdentifiers.Count;
+            // 1. Textual names metrics
+            var allFlaggedNames = allTextualNames.Where(id => SemanticRenamer.IsMangledIdentifier(id)).ToList();
+            var publicFlaggedNames = publicTextualNames.Where(id => SemanticRenamer.IsMangledIdentifier(id)).ToList();
+            var nonPublicFlaggedNames = nonPublicTextualNames.Where(id => SemanticRenamer.IsMangledIdentifier(id)).ToList();
 
-            // Group 2: Public types and methods
-            var publicFlagged = publicTypesAndMethods.Where(id => SemanticRenamer.IsMangledIdentifier(id)).ToList();
-            double publicFpRate = publicTypesAndMethods.Count > 0 ? (double)publicFlagged.Count / publicTypesAndMethods.Count : 0.0;
+            double allNamesFpRate = (double)allFlaggedNames.Count / allTextualNames.Count;
+            double publicNamesFpRate = publicTextualNames.Count > 0 ? (double)publicFlaggedNames.Count / publicTextualNames.Count : 0.0;
+            double nonPublicNamesFpRate = nonPublicTextualNames.Count > 0 ? (double)nonPublicFlaggedNames.Count / nonPublicTextualNames.Count : 0.0;
 
-            // Group 3: Non-public members
-            var nonPublicFlagged = nonPublicMembers.Where(id => SemanticRenamer.IsMangledIdentifier(id)).ToList();
-            double nonPublicFpRate = nonPublicMembers.Count > 0 ? (double)nonPublicFlagged.Count / nonPublicMembers.Count : 0.0;
+            // 2. Metadata symbols metrics
+            var publicSymbols = allSymbols.Values.Where(s => s.IsPublic).ToList();
+            var nonPublicSymbols = allSymbols.Values.Where(s => !s.IsPublic).ToList();
 
-            // Save JSON evaluation report artifact
+            var allFlaggedSymbols = allSymbols.Where(kvp => SemanticRenamer.IsMangledIdentifier(kvp.Value.Name)).ToList();
+            var publicFlaggedSymbols = publicSymbols.Where(s => SemanticRenamer.IsMangledIdentifier(s.Name)).ToList();
+            var nonPublicFlaggedSymbols = nonPublicSymbols.Where(s => SemanticRenamer.IsMangledIdentifier(s.Name)).ToList();
+
+            double allSymbolsFpRate = (double)allFlaggedSymbols.Count / allSymbols.Count;
+            double publicSymbolsFpRate = publicSymbols.Count > 0 ? (double)publicFlaggedSymbols.Count / publicSymbols.Count : 0.0;
+            double nonPublicSymbolsFpRate = nonPublicSymbols.Count > 0 ? (double)nonPublicFlaggedSymbols.Count / nonPublicSymbols.Count : 0.0;
+
+            // Generate clean, neutral JSON evaluation report artifact
             var reportData = new
             {
                 EvaluationDate = DateTime.UtcNow.ToString("o"),
-                TotalUniqueIdentifiers = allUniqueIdentifiers.Count,
-                TotalPublicTypesAndMethods = publicTypesAndMethods.Count,
-                TotalNonPublicMembers = nonPublicMembers.Count,
-                AllIdentifiersFalsePositiveCount = allFlagged.Count,
-                AllIdentifiersFalsePositiveRate = allFpRate,
-                PublicFalsePositiveCount = publicFlagged.Count,
-                PublicFalsePositiveRate = publicFpRate,
-                NonPublicFalsePositiveCount = nonPublicFlagged.Count,
-                NonPublicFalsePositiveRate = nonPublicFpRate,
+                ManifestVerification = new
+                {
+                    PinnedAssembliesVerified = true,
+                    PinnedAssembliesCount = pinnedManifest.Length
+                },
                 SourceAssemblies = assemblyMetadataList,
-                FlaggedSample = allFlagged.Take(20).ToList(),
-                PublicFlagged = publicFlagged
+                TextualNameMetrics = new
+                {
+                    TotalUniqueNames = allTextualNames.Count,
+                    PublicNamesCount = publicTextualNames.Count,
+                    NonPublicNamesCount = nonPublicTextualNames.Count,
+                    AllNamesFalsePositiveCount = allFlaggedNames.Count,
+                    AllNamesFalsePositiveRate = allNamesFpRate,
+                    PublicFalsePositiveCount = publicFlaggedNames.Count,
+                    PublicFalsePositiveRate = publicNamesFpRate,
+                    NonPublicFalsePositiveCount = nonPublicFlaggedNames.Count,
+                    NonPublicFalsePositiveRate = nonPublicNamesFpRate
+                },
+                MetadataSymbolMetrics = new
+                {
+                    TotalMetadataSymbols = allSymbols.Count,
+                    PublicSymbolsCount = publicSymbols.Count,
+                    NonPublicSymbolsCount = nonPublicSymbols.Count,
+                    AllSymbolsFalsePositiveCount = allFlaggedSymbols.Count,
+                    AllSymbolsFalsePositiveRate = allSymbolsFpRate,
+                    PublicFalsePositiveCount = publicFlaggedSymbols.Count,
+                    PublicFalsePositiveRate = publicSymbolsFpRate,
+                    NonPublicFalsePositiveCount = nonPublicFlaggedSymbols.Count,
+                    NonPublicFalsePositiveRate = nonPublicSymbolsFpRate
+                },
+                SymbolBreakdown = new
+                {
+                    Public = new
+                    {
+                        Types = publicTypesCount,
+                        Methods = publicMethodsCount,
+                        Fields = publicFieldsCount,
+                        Properties = publicPropsCount,
+                        Events = publicEventsCount
+                    },
+                    NonPublic = new
+                    {
+                        Types = nonPublicTypesCount,
+                        Methods = nonPublicMethodsCount,
+                        Fields = nonPublicFieldsCount,
+                        Properties = nonPublicPropsCount,
+                        Events = nonPublicEventsCount
+                    },
+                    Parameters = parametersCount
+                },
+                FlaggedSample = allFlaggedSymbols.Take(25).Select(s => $"{s.Key} => {s.Value.Name}").ToList(),
+                PublicFlaggedSymbols = publicFlaggedSymbols.Select(s => $"{s.Assembly}!{s.Type}::{s.Kind}:{s.Name}").ToList()
             };
 
             string benchmarksDir = Path.Combine(repoRoot, "benchmarks");
@@ -2020,9 +2162,33 @@ namespace ConfuserExKillerRunner.Tests
                 File.WriteAllText(reportPath, System.Text.Json.JsonSerializer.Serialize(reportData, jsonOptions));
             }
 
-            // Assertions: FP rate on large real corpus must remain low and tightly bounded
-            Assert.True(allFpRate < 0.01, $"All identifiers FP rate {allFpRate:P3} ({allFlagged.Count}/{allUniqueIdentifiers.Count}) exceeded 1.0% threshold.");
-            Assert.True(publicFpRate < 0.005, $"Public types/methods FP rate {publicFpRate:P3} ({publicFlagged.Count}/{publicTypesAndMethods.Count}) exceeded 0.5% threshold.");
+            // Distinct subsets for exact assertions
+            var publicTypesAndMethodsNames = allSymbols.Values
+                .Where(s => s.IsPublic && (s.Kind == "Type" || s.Kind == "Method"))
+                .Select(s => s.Name)
+                .Distinct()
+                .ToList();
+            var publicTypesAndMethodsFlagged = publicTypesAndMethodsNames.Where(SemanticRenamer.IsMangledIdentifier).ToList();
+
+            var pinnedPublicSymbols = allSymbols.Values
+                .Where(s => s.IsPublic && (s.Assembly == "dnlib.dll" || s.Assembly == "de4dot.blocks.dll"))
+                .ToList();
+            var pinnedPublicFlagged = pinnedPublicSymbols.Where(s => SemanticRenamer.IsMangledIdentifier(s.Name)).ToList();
+
+            // Assertions:
+            // 1. Strict ZERO false positives on public Types and Methods contract
+            Assert.Empty(publicTypesAndMethodsFlagged);
+
+            // 2. Strict ZERO false positives on pinned third-party reference library public symbols
+            Assert.Empty(pinnedPublicFlagged);
+
+            // 3. Overall public symbol false positives tightly bounded (e.g. Win32 COM interop struct fields)
+            Assert.True(publicFlaggedSymbols.Count <= 5, $"Public symbols FP count exceeded expected threshold: {publicFlaggedSymbols.Count}");
+            Assert.True(publicSymbolsFpRate < 0.001, $"Public symbols FP rate {publicSymbolsFpRate:P4} exceeded 0.1% threshold.");
+
+            // 4. Global false positive rate across the entire corpus tightly bounded under 1.0%
+            Assert.True(allNamesFpRate < 0.01, $"All names FP rate {allNamesFpRate:P3} ({allFlaggedNames.Count}/{allTextualNames.Count}) exceeded 1.0% threshold.");
+            Assert.True(allSymbolsFpRate < 0.01, $"All symbols FP rate {allSymbolsFpRate:P3} ({allFlaggedSymbols.Count}/{allSymbols.Count}) exceeded 1.0% threshold.");
         }
 
         [Fact]

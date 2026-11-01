@@ -1,69 +1,120 @@
 {
-  "EvaluationDate": "2026-11-01T08:40:00.7426346Z",
-  "TotalUniqueIdentifiers": 27521,
-  "TotalPublicTypesAndMethods": 5234,
-  "TotalNonPublicMembers": 16131,
-  "AllIdentifiersFalsePositiveCount": 47,
-  "AllIdentifiersFalsePositiveRate": 0.0017077867810035973,
-  "PublicFalsePositiveCount": 0,
-  "PublicFalsePositiveRate": 0,
-  "NonPublicFalsePositiveCount": 35,
-  "NonPublicFalsePositiveRate": 0.00216973529229434,
+  "EvaluationDate": "2026-11-01T13:38:10.6263878Z",
+  "ManifestVerification": {
+    "PinnedAssembliesVerified": true,
+    "PinnedAssembliesCount": 2
+  },
   "SourceAssemblies": [
     {
       "Name": "dnlib.dll",
       "Version": "1.6.0.0",
-      "LogicalPath": "C:\\Users\\acer\\claude\\xp_src\\ConfuserExKillerRunner\\dnlib.dll",
+      "LogicalPath": "ConfuserExKillerRunner/dnlib.dll",
+      "Category": "PinnedReference",
       "Sha256": "1b9e108e458c30655f98bb681bc6162b39c08e781264f2181e18be297d7b22d2",
-      "Provenance": "Pinned third-party library",
+      "Sha256Verified": true,
+      "Provenance": "Pinned third-party metadata library",
       "SizeBytes": 970752
     },
     {
       "Name": "de4dot.blocks.dll",
       "Version": "3.1.41592.3405",
-      "LogicalPath": "C:\\Users\\acer\\claude\\xp_src\\ConfuserExKillerRunner\\de4dot.blocks.dll",
+      "LogicalPath": "ConfuserExKillerRunner/de4dot.blocks.dll",
+      "Category": "PinnedReference",
       "Sha256": "ba197b4b6a19ce6242256639a3f641575c77108a07d5fcd3ac13f1d38bfcf98f",
+      "Sha256Verified": true,
       "Provenance": "Pinned third-party deobfuscation library",
       "SizeBytes": 146432
     },
     {
       "Name": "ConfuserExKillerRunner.dll",
       "Version": "1.0.0.0",
-      "LogicalPath": "C:\\Users\\acer\\claude\\xp_src\\ConfuserExKillerRunner.Tests\\bin\\Release\\net8.0-windows\\ConfuserExKillerRunner.dll",
-      "Sha256": "38eb488574e9f28c2c53e50820cbfe39d02de520b75ada8226d94ee7738355cd",
+      "LogicalPath": "ConfuserExKillerRunner/bin/Release/net8.0-windows/ConfuserExKillerRunner.dll",
+      "Category": "DynamicCompilation",
+      "Sha256": "27dbe6e686e59eed62ab4991d6d706951185db95c1ac669374ecf41494848d9b",
+      "Sha256Verified": null,
       "Provenance": "Unconfuser deobfuscation engine runner",
-      "SizeBytes": 413696
+      "SizeBytes": 418816
     },
     {
       "Name": "System.Private.CoreLib.dll",
       "Version": "8.0.0.0",
-      "LogicalPath": "C:\\Program Files (x86)\\dotnet\\shared\\Microsoft.NETCore.App\\8.0.25\\System.Private.CoreLib.dll",
+      "LogicalPath": "runtime/System.Private.CoreLib.dll",
+      "Category": "RuntimeCoreLib",
       "Sha256": "3173a4728866149e6573094c0a532d6dd3a011eb6e616131ca1912da4fb60ec8",
+      "Sha256Verified": null,
       "Provenance": "Microsoft .NET 8.0 CoreCLR Reference BCL",
       "SizeBytes": 12536080
     }
   ],
+  "TextualNameMetrics": {
+    "TotalUniqueNames": 27547,
+    "PublicNamesCount": 9367,
+    "NonPublicNamesCount": 15993,
+    "AllNamesFalsePositiveCount": 47,
+    "AllNamesFalsePositiveRate": 0.0017061749010781574,
+    "PublicFalsePositiveCount": 3,
+    "PublicFalsePositiveRate": 0.00032027329988256647,
+    "NonPublicFalsePositiveCount": 38,
+    "NonPublicFalsePositiveRate": 0.0023760395172888137
+  },
+  "MetadataSymbolMetrics": {
+    "TotalMetadataSymbols": 86592,
+    "PublicSymbolsCount": 42080,
+    "NonPublicSymbolsCount": 44512,
+    "AllSymbolsFalsePositiveCount": 55,
+    "AllSymbolsFalsePositiveRate": 0.0006351626016260162,
+    "PublicFalsePositiveCount": 3,
+    "PublicFalsePositiveRate": 7.129277566539924E-05,
+    "NonPublicFalsePositiveCount": 52,
+    "NonPublicFalsePositiveRate": 0.0011682242990654205
+  },
+  "SymbolBreakdown": {
+    "Public": {
+      "Types": 1942,
+      "Methods": 17495,
+      "Fields": 4127,
+      "Properties": 3919,
+      "Events": 20
+    },
+    "NonPublic": {
+      "Types": 1219,
+      "Methods": 12525,
+      "Fields": 7058,
+      "Properties": 3640,
+      "Events": 13
+    },
+    "Parameters": 53200
+  },
   "FlaggedSample": [
-    "pmrImportDLL",
-    "mrImportDLL",
-    "hStdInput",
-    "dwCmpFlags",
-    "nStdHandle",
-    "szCSDVersion",
-    "m_pMethod",
-    "GetDayOfNNN",
-    "GetDayOfMNN",
-    "GetTimeOfNNN",
-    "GetDateOfDSN",
-    "GetDateOfNDS",
-    "GetDateOfNNDS",
-    "RFLCT_InvalidFieldFail",
-    "RFLCT_InvalidPropFail",
-    "RFLCT_Targ_ITargMismatch",
-    "RFLCT_Targ_StatFldReqTarg",
-    "RFLCT_Targ_StatMethReqTarg",
-    "s_crcTable",
-    "_sPM2359"
+    "dnlib.dll!dnlib.DotNet.Pdb.Dss.IMetaDataImport::GetPinvokeMap:Param:pmrImportDLL =\u003E pmrImportDLL",
+    "dnlib.dll!dnlib.DotNet.Pdb.Dss.IMetaDataEmit::DefinePinvokeMap:Param:mrImportDLL =\u003E mrImportDLL",
+    "dnlib.dll!dnlib.DotNet.Pdb.Dss.IMetaDataEmit::SetPinvokeMap:Param:mrImportDLL =\u003E mrImportDLL",
+    "dnlib.dll!dnlib.DotNet.Pdb.Dss.MDEmitter::dnlib.DotNet.Pdb.Dss.IMetaDataImport.GetPinvokeMap:Param:pmrImportDLL =\u003E pmrImportDLL",
+    "dnlib.dll!dnlib.DotNet.Pdb.Dss.MDEmitter::dnlib.DotNet.Pdb.Dss.IMetaDataEmit.DefinePinvokeMap:Param:mrImportDLL =\u003E mrImportDLL",
+    "dnlib.dll!dnlib.DotNet.Pdb.Dss.MDEmitter::dnlib.DotNet.Pdb.Dss.IMetaDataEmit.SetPinvokeMap:Param:mrImportDLL =\u003E mrImportDLL",
+    "ConfuserExKillerRunner.dll!ConfuserExKillerRunner.Core.JobObject/STARTUPINFO::Field:hStdInput:System.IntPtr =\u003E hStdInput",
+    "System.Private.CoreLib.dll!Interop/Kernel32::CompareStringEx:Param:dwCmpFlags =\u003E dwCmpFlags",
+    "System.Private.CoreLib.dll!Interop/Kernel32::GetStdHandle:Param:nStdHandle =\u003E nStdHandle",
+    "System.Private.CoreLib.dll!Interop/NtDll/RTL_OSVERSIONINFOEX::Field:szCSDVersion:Interop/NtDll/RTL_OSVERSIONINFOEX/\u003CszCSDVersion\u003Ee__FixedBuffer =\u003E szCSDVersion",
+    "System.Private.CoreLib.dll!System.Signature::Field:m_pMethod:System.RuntimeMethodHandleInternal =\u003E m_pMethod",
+    "System.Private.CoreLib.dll!System.DateTimeParse::Method:GetDayOfNNN(System.Boolean (System.DateTimeResult\u0026,System.DateTimeRawInfo\u0026,System.Globalization.DateTimeFormatInfo)) =\u003E GetDayOfNNN",
+    "System.Private.CoreLib.dll!System.DateTimeParse::Method:GetDayOfMNN(System.Boolean (System.DateTimeResult\u0026,System.DateTimeRawInfo\u0026,System.Globalization.DateTimeFormatInfo)) =\u003E GetDayOfMNN",
+    "System.Private.CoreLib.dll!System.DateTimeParse::Method:GetTimeOfNNN(System.Boolean (System.DateTimeResult\u0026,System.DateTimeRawInfo\u0026)) =\u003E GetTimeOfNNN",
+    "System.Private.CoreLib.dll!System.DateTimeParse::Method:GetDateOfDSN(System.Boolean (System.DateTimeResult\u0026,System.DateTimeRawInfo\u0026)) =\u003E GetDateOfDSN",
+    "System.Private.CoreLib.dll!System.DateTimeParse::Method:GetDateOfNDS(System.Boolean (System.DateTimeResult\u0026,System.DateTimeRawInfo\u0026)) =\u003E GetDateOfNDS",
+    "System.Private.CoreLib.dll!System.DateTimeParse::Method:GetDateOfNNDS(System.Boolean (System.DateTimeResult\u0026,System.DateTimeRawInfo\u0026,System.Globalization.DateTimeFormatInfo)) =\u003E GetDateOfNNDS",
+    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_InvalidFieldFail =\u003E RFLCT_InvalidFieldFail",
+    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_InvalidPropFail =\u003E RFLCT_InvalidPropFail",
+    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_Targ_ITargMismatch =\u003E RFLCT_Targ_ITargMismatch",
+    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_Targ_StatFldReqTarg =\u003E RFLCT_Targ_StatFldReqTarg",
+    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_Targ_StatMethReqTarg =\u003E RFLCT_Targ_StatMethReqTarg",
+    "System.Private.CoreLib.dll!System.Numerics.BitOperations/Crc32Fallback::Field:s_crcTable:System.UInt32[] =\u003E s_crcTable",
+    "System.Private.CoreLib.dll!System.Globalization.CultureData::Field:_sPM2359:System.String =\u003E _sPM2359",
+    "System.Private.CoreLib.dll!System.Globalization.DateTimeFormatInfo::Field:s_zhtwDTFI:System.Globalization.DateTimeFormatInfo modreq(System.Runtime.CompilerServices.IsVolatile) =\u003E s_zhtwDTFI"
   ],
-  "PublicFlagged": []
+  "PublicFlaggedSymbols": [
+    "System.Private.CoreLib.dll!System.Globalization.DateTimeFormatInfo::Property:RFC1123Pattern",
+    "System.Private.CoreLib.dll!System.Runtime.InteropServices.Marshal::Field:SystemMaxDBCSCharSize",
+    "System.Private.CoreLib.dll!System.Runtime.InteropServices.ComTypes.TYPEATTR::Field:cbSizeVft"
+  ]
 }
