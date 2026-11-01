@@ -31,12 +31,28 @@ The `JobLimits` class enforces defensive defaults against denial-of-service, for
 - **CPU Time Limit**: 60 seconds of CPU time (`JOB_OBJECT_LIMIT_PROCESS_TIME`).
 - **Die on Unhandled Exception**: Prevents crash dialog hangs (`JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION`).
 
-### 2.4 Dependency Isolation & Environment Sanitization
+### 2.4 Strict Environment Variable Allowlist (`CREATE_UNICODE_ENVIRONMENT`)
+- Rather than inheriting the parent process environment or relying on an incomplete denylist of known variables, Unconfuser constructs an explicit, minimal **allowlist** of environment variables passed via `CreateProcessW` with `CREATE_UNICODE_ENVIRONMENT`.
+- **Transmitted Variables (Strict Allowlist)**:
+  - System identification & runtime paths: `SYSTEMROOT`, `WINDIR`, `SYSTEMDRIVE`, `COMSPEC`, `PATH`, `PATHEXT`, `TEMP`, `TMP`.
+  - User and application profile roots: `USERNAME`, `USERPROFILE`, `LOCALAPPDATA`, `APPDATA`, `ALLUSERSPROFILE`, `PROGRAMDATA`, `PROGRAMFILES`, `PROGRAMFILES(X86)`, `PROGRAMW6432`, `COMMONPROGRAMFILES`, `COMMONPROGRAMFILES(X86)`.
+  - Hardware & CPU topology: `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `PROCESSOR_IDENTIFIER`, `PROCESSOR_LEVEL`, `PROCESSOR_REVISION`.
+  - Essential .NET runtime configurations: `DOTNET_ROOT`, `DOTNET_ROOT(X86)`, `DOTNET_MULTILEVEL_LOOKUP`, `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT`.
+- **Exclusion Policy**: All other parent variables (including CI tokens such as `GITHUB_TOKEN`, cloud credentials such as `AWS_*` / `AZURE_*`, NuGet keys, sensitive API tokens, and user credentials) are strictly excluded from the unmanaged environment block.
+- The environment block is allocated in unmanaged memory, sorted alphabetically in ordinal order, terminated by a double-null character (`\0\0`), and guaranteed to be released in `finally` blocks under both normal and error conditions.
+
+### 2.5 Explicit Handle Inheritance Restriction (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`)
+- By default in Win32, spawning a process with `bInheritHandles = TRUE` can inadvertently leak all inheritable handles open in the parent process (such as sockets, file locks, and internal IPC primitives).
+- Unconfuser utilizes `STARTUPINFOEX` with `EXTENDED_STARTUPINFO_PRESENT` and configures `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` via `InitializeProcThreadAttributeList` and `UpdateProcThreadAttribute`.
+- **Permitted Handles**: The inherited handle list is strictly confined to the three redirected standard stream handles (`hStdOutWrite`, `hStdErrWrite`, `hStdInRead`).
+- All other parent handles remain non-inheritable.
+- **Fail-Closed Policy**: If attribute list allocation or initialization fails, the launch is aborted immediately, resources are cleaned up, and execution fails closed.
+
+### 2.6 Dependency Isolation
 - By default, workers do not resolve dependencies from the target directory (`AllowTargetDirectoryDependencies = false`).
 - Dedicated `--allowed-dep-dir` switches restrict assembly resolution to safe, trusted dependency locations.
-- Sensitive environment variables (containing tokens, keys, credentials, or secrets) are scrubbed before worker launch.
 
-### 2.5 Cross-Platform Security Policy (Fail-Closed)
+### 2.7 Cross-Platform Security Policy (Fail-Closed)
 - Windows Job Objects are an exclusive feature of the Windows NT kernel (`PlatformID.Win32NT`).
 - On non-Windows platforms (e.g. Linux, macOS under Mono or .NET), Windows Job Object process containment is unavailable.
 - In accordance with Unconfuser's fail-closed security model, `ProcessRunner.RunIsolated` **strictly refuses** to execute untrusted targets when running on non-Windows platforms, immediately returning `ExitCode = -1` with an explicit diagnostic message rather than silently falling back to un-isolated execution.

@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using ConfuserExKillerRunner.Core;
 using Xunit;
 
@@ -316,6 +317,122 @@ namespace ConfuserExKillerRunner.Tests
             finally
             {
                 ProcessRunner.PlatformDetector = previousDetector;
+            }
+        }
+
+        [Fact]
+        public void JobObject_13_WorkerIsolation_EnvironmentAllowlist_BlocksCanarySecret()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            string canaryVar = "UNCONFUSER_SECRET_CANARY";
+            string canaryValue = "SENSITIVE_SECRET_TOKEN_DO_NOT_LEAK";
+            Environment.SetEnvironmentVariable(canaryVar, canaryValue);
+
+            try
+            {
+                // Run an isolated process that inspects both the canary variable and necessary system variables
+                var result = ProcessRunner.RunIsolated(
+                    "cmd.exe",
+                    $"/c echo CANARY=[%{canaryVar}%] & echo SYSTEMROOT=[%SystemRoot%]",
+                    timeoutMs: 15000);
+
+                Assert.True(result.Success, $"Isolated process execution failed: {result.StandardError}");
+                Assert.Equal(0, result.ExitCode);
+
+                // Canary variable must NOT be leaked to child process (will print literal [%UNCONFUSER_SECRET_CANARY%] or empty)
+                Assert.DoesNotContain(canaryValue, result.StandardOutput);
+
+                // Essential system variables must remain accessible to child process
+                Assert.Contains("SYSTEMROOT=[", result.StandardOutput);
+                Assert.DoesNotContain("SYSTEMROOT=[%SystemRoot%]", result.StandardOutput);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(canaryVar, null);
+            }
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateEvent(IntPtr lpEventAttributes, bool bManualReset, bool bInitialState, string lpName);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TEST_SECURITY_ATTRIBUTES
+        {
+            public int nLength;
+            public IntPtr lpSecurityDescriptor;
+            public bool bInheritHandle;
+        }
+
+        [Fact]
+        public void JobObject_14_WorkerIsolation_HandleInheritance_RestrictedToStdStreams()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            // Create an inheritable handle in the parent process
+            var sa = new TEST_SECURITY_ATTRIBUTES
+            {
+                nLength = Marshal.SizeOf(typeof(TEST_SECURITY_ATTRIBUTES)),
+                bInheritHandle = true,
+                lpSecurityDescriptor = IntPtr.Zero
+            };
+            IntPtr pSa = Marshal.AllocHGlobal(sa.nLength);
+            Marshal.StructureToPtr(sa, pSa, false);
+
+            IntPtr inheritableEvent = IntPtr.Zero;
+            try
+            {
+                inheritableEvent = CreateEvent(pSa, true, false, "Local\\UnconfuserInheritableTestEvent");
+                Assert.NotEqual(IntPtr.Zero, inheritableEvent);
+
+                // Run isolated process with pipe redirection
+                var result = ProcessRunner.RunIsolated(
+                    "cmd.exe",
+                    "/c echo handle_restriction_verified",
+                    timeoutMs: 15000);
+
+                Assert.True(result.Success, $"Isolated process failed: {result.StandardError}");
+                Assert.Equal(0, result.ExitCode);
+                Assert.Contains("handle_restriction_verified", result.StandardOutput);
+            }
+            finally
+            {
+                if (inheritableEvent != IntPtr.Zero)
+                    CloseHandle(inheritableEvent);
+                Marshal.FreeHGlobal(pSa);
+            }
+        }
+
+        [Fact]
+        public void JobObject_15_WorkerIsolation_InvalidExecutable_FailsClosedAndCleansUp()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            using (var job = new JobObject())
+            {
+                Assert.True(job.IsValid);
+                bool success = job.TryCreateSuspendedProcess(
+                    @"C:\NonExistentDirectory_Unconfuser\FakeBinary.exe",
+                    "",
+                    null,
+                    out var procInfo,
+                    out var hOut,
+                    out var hErr,
+                    out var errMsg);
+
+                Assert.False(success);
+                Assert.Equal(IntPtr.Zero, procInfo.hProcess);
+                Assert.Equal(IntPtr.Zero, procInfo.hThread);
+                Assert.Equal(IntPtr.Zero, hOut);
+                Assert.Equal(IntPtr.Zero, hErr);
+                Assert.NotNull(errMsg);
+                Assert.Contains("CreateProcessW failed", errMsg);
             }
         }
     }

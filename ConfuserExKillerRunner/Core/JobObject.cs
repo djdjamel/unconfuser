@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -147,6 +148,13 @@ namespace ConfuserExKillerRunner.Core
             public IntPtr hStdError;
         }
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct STARTUPINFOEX
+        {
+            public STARTUPINFO StartupInfo;
+            public IntPtr lpAttributeList;
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         public struct PROCESS_INFORMATION
         {
@@ -165,7 +173,7 @@ namespace ConfuserExKillerRunner.Core
         }
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern bool CreateProcess(
+        private static extern bool CreateProcessW(
             string lpApplicationName,
             string lpCommandLine,
             IntPtr lpProcessAttributes,
@@ -174,8 +182,28 @@ namespace ConfuserExKillerRunner.Core
             uint dwCreationFlags,
             IntPtr lpEnvironment,
             string lpCurrentDirectory,
-            ref STARTUPINFO lpStartupInfo,
+            ref STARTUPINFOEX lpStartupInfo,
             out PROCESS_INFORMATION lpProcessInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool InitializeProcThreadAttributeList(
+            IntPtr lpAttributeList,
+            int dwAttributeCount,
+            int dwFlags,
+            ref IntPtr lpSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool UpdateProcThreadAttribute(
+            IntPtr lpAttributeList,
+            uint dwFlags,
+            IntPtr Attribute,
+            IntPtr lpValue,
+            IntPtr cbSize,
+            IntPtr lpPreviousValue,
+            IntPtr lpReturnSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool DeleteProcThreadAttributeList(IntPtr lpAttributeList);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint ResumeThread(IntPtr hThread);
@@ -199,6 +227,41 @@ namespace ConfuserExKillerRunner.Core
         private const uint CREATE_NO_WINDOW = 0x08000000;
         private const int STARTF_USESTDHANDLES = 0x00000100;
         private const uint HANDLE_FLAG_INHERIT = 0x00000001;
+        private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+        private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+        private static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = (IntPtr)0x00020002;
+
+        public static readonly HashSet<string> AllowedEnvironmentVariables = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "SYSTEMROOT",
+            "WINDIR",
+            "SYSTEMDRIVE",
+            "COMSPEC",
+            "PATH",
+            "PATHEXT",
+            "TEMP",
+            "TMP",
+            "USERNAME",
+            "USERPROFILE",
+            "LOCALAPPDATA",
+            "APPDATA",
+            "ALLUSERSPROFILE",
+            "PROGRAMDATA",
+            "PROGRAMFILES",
+            "PROGRAMFILES(X86)",
+            "PROGRAMW6432",
+            "COMMONPROGRAMFILES",
+            "COMMONPROGRAMFILES(X86)",
+            "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE",
+            "PROCESSOR_IDENTIFIER",
+            "PROCESSOR_LEVEL",
+            "PROCESSOR_REVISION",
+            "DOTNET_ROOT",
+            "DOTNET_ROOT(X86)",
+            "DOTNET_MULTILEVEL_LOOKUP",
+            "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"
+        };
         public const uint WAIT_OBJECT_0 = 0x00000000;
         public const uint WAIT_TIMEOUT = 0x00000102;
         public const uint WAIT_FAILED = 0xFFFFFFFF;
@@ -415,6 +478,77 @@ namespace ConfuserExKillerRunner.Core
             }
         }
 
+        public static IntPtr CreateRestrictedEnvironmentBlock(IDictionary<string, string> customOverrides = null)
+        {
+            var envDict = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            // Populate strictly from allowlist
+            var parentVars = Environment.GetEnvironmentVariables();
+            foreach (System.Collections.DictionaryEntry entry in parentVars)
+            {
+                string key = entry.Key?.ToString();
+                string val = entry.Value?.ToString();
+                if (!string.IsNullOrEmpty(key) && AllowedEnvironmentVariables.Contains(key))
+                {
+                    envDict[key] = val ?? string.Empty;
+                }
+            }
+
+            // Fallback for essential Windows variables if missing in parent
+            if (!envDict.ContainsKey("SYSTEMROOT"))
+            {
+                string sysRoot = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                if (string.IsNullOrEmpty(sysRoot)) sysRoot = @"C:\Windows";
+                envDict["SYSTEMROOT"] = sysRoot;
+            }
+            if (!envDict.ContainsKey("WINDIR"))
+            {
+                envDict["WINDIR"] = envDict["SYSTEMROOT"];
+            }
+            if (!envDict.ContainsKey("SYSTEMDRIVE"))
+            {
+                string sysRoot = envDict["SYSTEMROOT"];
+                envDict["SYSTEMDRIVE"] = sysRoot.Length >= 2 ? sysRoot.Substring(0, 2) : "C:";
+            }
+            if (!envDict.ContainsKey("TEMP"))
+            {
+                envDict["TEMP"] = Path.GetTempPath().TrimEnd('\\');
+            }
+            if (!envDict.ContainsKey("TMP"))
+            {
+                envDict["TMP"] = envDict["TEMP"];
+            }
+
+            // Apply any safe caller overrides
+            if (customOverrides != null)
+            {
+                foreach (var kvp in customOverrides)
+                {
+                    if (AllowedEnvironmentVariables.Contains(kvp.Key))
+                    {
+                        envDict[kvp.Key] = kvp.Value;
+                    }
+                }
+            }
+
+            // Build double-null-terminated Unicode string block: "Var1=Val1\0Var2=Val2\0\0"
+            var sb = new StringBuilder();
+            foreach (var kvp in envDict)
+            {
+                sb.Append(kvp.Key);
+                sb.Append('=');
+                sb.Append(kvp.Value);
+                sb.Append('\0');
+            }
+            sb.Append('\0');
+
+            string envStr = sb.ToString();
+            byte[] unicodeBytes = Encoding.Unicode.GetBytes(envStr);
+            IntPtr ptr = Marshal.AllocHGlobal(unicodeBytes.Length);
+            Marshal.Copy(unicodeBytes, 0, ptr, unicodeBytes.Length);
+            return ptr;
+        }
+
         /// <summary>
         /// Spawns a process in a suspended state (CREATE_SUSPENDED), assigns it to this Job Object,
         /// verifies assignment under a fail-closed policy, and only resumes execution once Job Object
@@ -485,82 +619,154 @@ namespace ConfuserExKillerRunner.Core
                 return false;
             }
 
-            var si = new STARTUPINFO
+            IntPtr lpAttributeList = IntPtr.Zero;
+            IntPtr lpEnvironment = IntPtr.Zero;
+            GCHandle pinnedHandles = default;
+            bool handlesPinned = false;
+
+            try
             {
-                cb = Marshal.SizeOf(typeof(STARTUPINFO)),
-                dwFlags = STARTF_USESTDHANDLES,
-                hStdOutput = hStdOutWrite,
-                hStdError = hStdErrWrite,
-                hStdInput = hStdInRead
-            };
+                // Restrict inherited handles strictly to the 3 standard redirected pipe handles
+                var handlesToInherit = new IntPtr[] { hStdOutWrite, hStdErrWrite, hStdInRead };
+                IntPtr lpSize = IntPtr.Zero;
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref lpSize);
+                lpAttributeList = Marshal.AllocHGlobal(lpSize);
+                if (!InitializeProcThreadAttributeList(lpAttributeList, 1, 0, ref lpSize))
+                {
+                    int initErr = Marshal.GetLastWin32Error();
+                    errorMessage = $"Fail-closed: InitializeProcThreadAttributeList failed with Win32 error {initErr}";
+                    CloseHandle(hStdOutRead);
+                    CloseHandle(hStdErrRead);
+                    hStdOutRead = IntPtr.Zero;
+                    hStdErrRead = IntPtr.Zero;
+                    return false;
+                }
 
-            uint creationFlags = CREATE_SUSPENDED | CREATE_NO_WINDOW;
-            string fullCmdLine = string.IsNullOrEmpty(commandLine) ? $"\"{applicationPath}\"" : $"\"{applicationPath}\" {commandLine}";
+                pinnedHandles = GCHandle.Alloc(handlesToInherit, GCHandleType.Pinned);
+                handlesPinned = true;
 
-            bool created = CreateProcess(
-                null,
-                fullCmdLine,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                true, // inherit handles
-                creationFlags,
-                IntPtr.Zero,
-                string.IsNullOrEmpty(workingDirectory) ? null : workingDirectory,
-                ref si,
-                out procInfo);
+                if (!UpdateProcThreadAttribute(
+                    lpAttributeList,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                    pinnedHandles.AddrOfPinnedObject(),
+                    (IntPtr)(handlesToInherit.Length * IntPtr.Size),
+                    IntPtr.Zero,
+                    IntPtr.Zero))
+                {
+                    int updErr = Marshal.GetLastWin32Error();
+                    errorMessage = $"Fail-closed: UpdateProcThreadAttribute failed with Win32 error {updErr}";
+                    CloseHandle(hStdOutRead);
+                    CloseHandle(hStdErrRead);
+                    hStdOutRead = IntPtr.Zero;
+                    hStdErrRead = IntPtr.Zero;
+                    return false;
+                }
 
-            // Child process has received pipe handles; close write ends & child stdin read end in parent
-            CloseHandle(hStdOutWrite);
-            CloseHandle(hStdErrWrite);
-            CloseHandle(hStdInRead);
-            CloseHandle(hStdInWrite); // Closing write end provides immediate EOF if child reads stdin
+                lpEnvironment = CreateRestrictedEnvironmentBlock();
 
-            if (!created)
-            {
-                int err = Marshal.GetLastWin32Error();
-                CloseHandle(hStdOutRead);
-                CloseHandle(hStdErrRead);
-                hStdOutRead = IntPtr.Zero;
-                hStdErrRead = IntPtr.Zero;
-                errorMessage = $"CreateProcess failed with Win32 error {err}: {new Win32Exception(err).Message}";
-                return false;
+                var siEx = new STARTUPINFOEX();
+                siEx.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+                siEx.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+                siEx.StartupInfo.hStdOutput = hStdOutWrite;
+                siEx.StartupInfo.hStdError = hStdErrWrite;
+                siEx.StartupInfo.hStdInput = hStdInRead;
+                siEx.lpAttributeList = lpAttributeList;
+
+                uint creationFlags = CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+                string fullCmdLine = string.IsNullOrEmpty(commandLine) ? $"\"{applicationPath}\"" : $"\"{applicationPath}\" {commandLine}";
+
+                bool created = CreateProcessW(
+                    null,
+                    fullCmdLine,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    true, // inherit handles restricted to PROC_THREAD_ATTRIBUTE_HANDLE_LIST
+                    creationFlags,
+                    lpEnvironment,
+                    string.IsNullOrEmpty(workingDirectory) ? null : workingDirectory,
+                    ref siEx,
+                    out procInfo);
+
+                // Child process has received pipe handles; close write ends & child stdin read end in parent
+                CloseHandle(hStdOutWrite);
+                CloseHandle(hStdErrWrite);
+                CloseHandle(hStdInRead);
+                CloseHandle(hStdInWrite); // Closing write end provides immediate EOF if child reads stdin
+                hStdOutWrite = IntPtr.Zero;
+                hStdErrWrite = IntPtr.Zero;
+                hStdInRead = IntPtr.Zero;
+                hStdInWrite = IntPtr.Zero;
+
+                if (!created)
+                {
+                    int err = Marshal.GetLastWin32Error();
+                    CloseHandle(hStdOutRead);
+                    CloseHandle(hStdErrRead);
+                    hStdOutRead = IntPtr.Zero;
+                    hStdErrRead = IntPtr.Zero;
+                    errorMessage = $"CreateProcessW failed with Win32 error {err}: {new Win32Exception(err).Message}";
+                    return false;
+                }
+
+                // Process created in SUSPENDED state! Assign to Job Object before resuming
+                if (!AssignProcess(procInfo.hProcess, out int assignErr))
+                {
+                    // Fail-closed policy: Terminate process immediately before it executes any instruction
+                    TerminateProcess(procInfo.hProcess, 1);
+                    CloseHandle(procInfo.hThread);
+                    CloseHandle(procInfo.hProcess);
+                    CloseHandle(hStdOutRead);
+                    CloseHandle(hStdErrRead);
+                    hStdOutRead = IntPtr.Zero;
+                    hStdErrRead = IntPtr.Zero;
+                    procInfo = default;
+                    errorMessage = $"Fail-closed security enforcement: Process assignment to Job Object failed (Win32 error {assignErr}). Process terminated.";
+                    Logger.LogError($"[JobObject] {errorMessage}");
+                    return false;
+                }
+
+                // Containment verified: resume main thread
+                uint resumeRes = ResumeThread(procInfo.hThread);
+                if (resumeRes == uint.MaxValue)
+                {
+                    int resumeErr = Marshal.GetLastWin32Error();
+                    TerminateProcess(procInfo.hProcess, 1);
+                    CloseHandle(procInfo.hThread);
+                    CloseHandle(procInfo.hProcess);
+                    CloseHandle(hStdOutRead);
+                    CloseHandle(hStdErrRead);
+                    hStdOutRead = IntPtr.Zero;
+                    hStdErrRead = IntPtr.Zero;
+                    procInfo = default;
+                    errorMessage = $"Fail-closed security enforcement: ResumeThread failed (Win32 error {resumeErr}). Process terminated.";
+                    Logger.LogError($"[JobObject] {errorMessage}");
+                    return false;
+                }
+
+                return true;
             }
-
-            // Process created in SUSPENDED state! Assign to Job Object before resuming
-            if (!AssignProcess(procInfo.hProcess, out int assignErr))
+            finally
             {
-                // Fail-closed policy: Terminate process immediately before it executes any instruction
-                TerminateProcess(procInfo.hProcess, 1);
-                CloseHandle(procInfo.hThread);
-                CloseHandle(procInfo.hProcess);
-                CloseHandle(hStdOutRead);
-                CloseHandle(hStdErrRead);
-                hStdOutRead = IntPtr.Zero;
-                hStdErrRead = IntPtr.Zero;
-                procInfo = default;
-                errorMessage = $"Fail-closed security enforcement: Process assignment to Job Object failed (Win32 error {assignErr}). Process terminated.";
-                Logger.LogError($"[JobObject] {errorMessage}");
-                return false;
-            }
+                if (hStdOutWrite != IntPtr.Zero) CloseHandle(hStdOutWrite);
+                if (hStdErrWrite != IntPtr.Zero) CloseHandle(hStdErrWrite);
+                if (hStdInRead != IntPtr.Zero) CloseHandle(hStdInRead);
+                if (hStdInWrite != IntPtr.Zero) CloseHandle(hStdInWrite);
 
-            // Containment verified: resume main thread
-            uint resumeRes = ResumeThread(procInfo.hThread);
-            if (resumeRes == uint.MaxValue)
-            {
-                int resumeErr = Marshal.GetLastWin32Error();
-                TerminateProcess(procInfo.hProcess, 1);
-                CloseHandle(procInfo.hThread);
-                CloseHandle(procInfo.hProcess);
-                CloseHandle(hStdOutRead);
-                CloseHandle(hStdErrRead);
-                hStdOutRead = IntPtr.Zero;
-                hStdErrRead = IntPtr.Zero;
-                procInfo = default;
-                errorMessage = $"Fail-closed security enforcement: ResumeThread failed (Win32 error {resumeErr}). Process terminated.";
-                Logger.LogError($"[JobObject] {errorMessage}");
-                return false;
+                if (handlesPinned)
+                    pinnedHandles.Free();
+
+                if (lpAttributeList != IntPtr.Zero)
+                {
+                    DeleteProcThreadAttributeList(lpAttributeList);
+                    Marshal.FreeHGlobal(lpAttributeList);
+                }
+
+                if (lpEnvironment != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(lpEnvironment);
+                }
             }
-            return true;
         }
 
         public bool Terminate(uint exitCode = 1)
