@@ -422,8 +422,10 @@ namespace ConfuserExKillerRunner.Tests
                 Assert.True(result.Success, $"Isolated process failed: {result.StandardError}");
                 Assert.Equal(0, result.ExitCode);
 
-                // Child confirms that the arbitrary parent handle was NOT inherited (error 6: ERROR_INVALID_HANDLE)
-                Assert.Contains("[HANDLE_TEST_CHILD] SUCCESS: Handle is NOT inherited", result.StandardOutput);
+                // Child confirms that the arbitrary parent handle was NOT inherited and object identity was verified
+                Assert.Contains("[HANDLE_TEST_CHILD] SUCCESS:", result.StandardOutput);
+                Assert.Contains("NamedEventOpened=True", result.StandardOutput);
+                Assert.Contains("SameAsParentEvent=False", result.StandardOutput);
                 Assert.Contains("Err=6", result.StandardOutput);
 
                 // Verify that standard streams (stdout and stderr) worked reliably
@@ -475,23 +477,55 @@ namespace ConfuserExKillerRunner.Tests
             // Verify that AllowedEnvironmentVariables is an immutable collection type
             var allowlist = JobObject.AllowedEnvironmentVariables;
             Assert.NotNull(allowlist);
+            Assert.Equal(23, allowlist.Count);
 
-            // Attempting reflection-based modification or type cast to mutable collection must be guarded
-            Assert.False(allowlist is System.Collections.IList, "Allowlist must not implement mutable IList");
+            // 1. Must NOT return the internal mutable HashSet<string>
+            Assert.False(allowlist is HashSet<string>, "Allowlist must not be the internal mutable HashSet<string>");
+            Assert.Throws<InvalidCastException>(() => (HashSet<string>)allowlist);
 
-            // Verify essential runtime variables are included
+            // 2. Must be wrapped in a read-only collection that blocks modification via ICollection<string>
+            var col = (ICollection<string>)allowlist;
+            Assert.True(col.IsReadOnly);
+            Assert.Throws<NotSupportedException>(() => col.Add("GITHUB_TOKEN"));
+            Assert.Throws<NotSupportedException>(() => col.Remove("PATH"));
+            Assert.Throws<NotSupportedException>(() => col.Clear());
+
+            // 3. Verify internal allowlist lookup is protected against unauthorized additions
+            Assert.False(JobObject.IsEnvironmentVariableAllowed("GITHUB_TOKEN"));
+            Assert.False(JobObject.IsEnvironmentVariableAllowed("AWS_SECRET_ACCESS_KEY"));
+            Assert.False(JobObject.IsEnvironmentVariableAllowed("USERPROFILE"));
+
+            // 4. Verify essential runtime variables are present
             Assert.Contains("SYSTEMROOT", allowlist);
             Assert.Contains("WINDIR", allowlist);
             Assert.Contains("PATH", allowlist);
             Assert.Contains("TEMP", allowlist);
+            Assert.Contains("DOTNET_ROOT", allowlist);
 
-            // Verify sensitive user profile and cloud credentials are NOT in allowlist
+            // 5. Verify sensitive user profile and cloud credentials are NOT in allowlist
             Assert.DoesNotContain("USERPROFILE", allowlist);
             Assert.DoesNotContain("LOCALAPPDATA", allowlist);
             Assert.DoesNotContain("APPDATA", allowlist);
             Assert.DoesNotContain("USERNAME", allowlist);
             Assert.DoesNotContain("GITHUB_TOKEN", allowlist);
             Assert.DoesNotContain("AWS_SECRET_ACCESS_KEY", allowlist);
+
+            // 6. Verify child process environment isolation is completely uncompromised
+            string testDisallowedKey = "UNCONFUSER_DISALLOWED_TOKEN_999";
+            Environment.SetEnvironmentVariable(testDisallowedKey, "SENSITIVE_SECRET_DATA");
+            try
+            {
+                var result = ProcessRunner.RunIsolated(
+                    "cmd.exe",
+                    $"/c echo VAR=[%{testDisallowedKey}%]",
+                    timeoutMs: 15000);
+                Assert.True(result.Success);
+                Assert.DoesNotContain("SENSITIVE_SECRET_DATA", result.StandardOutput);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(testDisallowedKey, null);
+            }
         }
 
         [Fact]

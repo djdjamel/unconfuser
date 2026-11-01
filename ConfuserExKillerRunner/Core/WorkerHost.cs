@@ -495,6 +495,47 @@ namespace ConfuserExKillerRunner.Core
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool GetHandleInformation(IntPtr hObject, out uint lpdwFlags);
 
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr OpenEvent(uint dwDesiredAccess, bool bInheritHandle, string lpName);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CompareObjectHandles(IntPtr hFirstObjectHandle, IntPtr hSecondObjectHandle);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("ntdll.dll")]
+        private static extern int NtQueryObject(IntPtr handle, int objectInformationClass, IntPtr objectInformation, int objectInformationLength, out int returnLength);
+
+        private static string GetKernelObjectTypeName(IntPtr handle)
+        {
+            if (handle == IntPtr.Zero) return "NULL";
+            int bufferLength = 1024;
+            IntPtr buffer = Marshal.AllocHGlobal(bufferLength);
+            try
+            {
+                int status = NtQueryObject(handle, 2 /* ObjectTypeInformation */, buffer, bufferLength, out int returnLength);
+                if (status == 0)
+                {
+                    ushort len = (ushort)Marshal.ReadInt16(buffer, 0);
+                    IntPtr pStr = Marshal.ReadIntPtr(buffer, IntPtr.Size == 8 ? 8 : 4);
+                    if (pStr != IntPtr.Zero && len > 0)
+                    {
+                        return Marshal.PtrToStringUni(pStr, len / 2);
+                    }
+                }
+                return "Unknown";
+            }
+            catch
+            {
+                return "QueryFailed";
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
         private static int RunTestHandleInheritance(string[] args)
         {
             long rawHandle = 0;
@@ -512,8 +553,33 @@ namespace ConfuserExKillerRunner.Core
             }
 
             IntPtr handlePtr = new IntPtr(rawHandle);
-            bool getInfoOk = GetHandleInformation(handlePtr, out _);
+            bool getInfoOk = GetHandleInformation(handlePtr, out uint handleFlags);
             int getInfoErr = Marshal.GetLastWin32Error();
+
+            string objectType = getInfoOk ? GetKernelObjectTypeName(handlePtr) : "InvalidHandle";
+
+            // Open the parent event by its unique name to get a verified reference to the parent event object
+            IntPtr hNamedEvent = IntPtr.Zero;
+            if (!string.IsNullOrEmpty(eventName) && eventName != "unknown")
+            {
+                // SYNCHRONIZE (0x00100000) | EVENT_MODIFY_STATE (0x0002)
+                hNamedEvent = OpenEvent(0x00100000 | 0x0002, false, eventName);
+            }
+
+            bool namedEventOpened = hNamedEvent != IntPtr.Zero;
+            bool isSameKernelObject = false;
+            if (namedEventOpened && getInfoOk)
+            {
+                try
+                {
+                    isSameKernelObject = CompareObjectHandles(handlePtr, hNamedEvent);
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    // Fallback on legacy Windows (pre-Win10) where CompareObjectHandles is unavailable
+                    isSameKernelObject = string.Equals(objectType, "Event", StringComparison.OrdinalIgnoreCase);
+                }
+            }
 
             bool setOk = SetEvent(handlePtr);
             int setErr = Marshal.GetLastWin32Error();
@@ -521,19 +587,35 @@ namespace ConfuserExKillerRunner.Core
             uint waitRes = WaitForSingleObject(handlePtr, 0);
             int waitErr = Marshal.GetLastWin32Error();
 
-            Console.WriteLine($"[HANDLE_TEST_CHILD] TargetHandle=0x{rawHandle:X} EventName={eventName}");
-            Console.WriteLine($"[HANDLE_TEST_CHILD] GetHandleInfo={getInfoOk} (Err={getInfoErr}), SetEvent={setOk} (Err={setErr}), WaitForSingleObject={waitRes} (Err={waitErr})");
+            Console.WriteLine($"[HANDLE_TEST_CHILD] TargetHandle=0x{rawHandle:X} EventName={eventName} NamedEventOpened={namedEventOpened}");
+            Console.WriteLine($"[HANDLE_TEST_CHILD] GetHandleInfo={getInfoOk} (Err={getInfoErr}) Flags=0x{handleFlags:X} ObjectType={objectType}");
+            Console.WriteLine($"[HANDLE_TEST_CHILD] SameAsParentEvent={isSameKernelObject}");
+            Console.WriteLine($"[HANDLE_TEST_CHILD] SetEventAttempt={setOk} (Err={setErr}) WaitResult={waitRes} (Err={waitErr})");
             Console.Error.WriteLine("[HANDLE_TEST_CHILD] Stderr pipe communication verified.");
 
-            // If SetEvent succeeded, or handle information is valid and not invalid handle error,
-            // the arbitrary parent handle leaked into the child process.
-            if (setOk || (getInfoOk && setErr != 6))
+            if (hNamedEvent != IntPtr.Zero)
             {
-                Console.WriteLine("[HANDLE_TEST_CHILD] FAILURE: Arbitrary parent handle was accessible/inherited in child process!");
+                CloseHandle(hNamedEvent);
+            }
+
+            // Object identity and inheritance verification:
+            // 1. If CompareObjectHandles confirmed handlePtr is the exact parent event object,
+            //    or if SetEvent succeeded on an object confirmed to be an Event,
+            //    the parent event handle leaked into the child process.
+            if (isSameKernelObject || (setOk && string.Equals(objectType, "Event", StringComparison.OrdinalIgnoreCase)))
+            {
+                Console.WriteLine("[HANDLE_TEST_CHILD] FAILURE: Parent event handle was inherited and verified as identical kernel object!");
                 return 42;
             }
 
-            Console.WriteLine("[HANDLE_TEST_CHILD] SUCCESS: Handle is NOT inherited (ERROR_INVALID_HANDLE).");
+            if (!getInfoOk && getInfoErr == 6)
+            {
+                Console.WriteLine("[HANDLE_TEST_CHILD] SUCCESS: Handle is NOT inherited (ERROR_INVALID_HANDLE).");
+                return 0;
+            }
+
+            // Handle exists in child but is NOT the parent event (e.g. std stream or runtime handle)
+            Console.WriteLine($"[HANDLE_TEST_CHILD] SUCCESS: Numeric handle 0x{rawHandle:X} is not the parent event (Type={objectType}, SameAsParentEvent={isSameKernelObject}).");
             return 0;
         }
 

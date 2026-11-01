@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -259,7 +260,16 @@ namespace ConfuserExKillerRunner.Core
             "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"
         };
 
-        public static IReadOnlyCollection<string> AllowedEnvironmentVariables => _allowedEnvironmentVariables;
+        private static readonly ReadOnlyCollection<string> _readOnlyAllowedEnvironmentVariables =
+            new ReadOnlyCollection<string>(_allowedEnvironmentVariables.ToList());
+
+        public static IReadOnlyCollection<string> AllowedEnvironmentVariables => _readOnlyAllowedEnvironmentVariables;
+
+        public static bool IsEnvironmentVariableAllowed(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            return _allowedEnvironmentVariables.Contains(name);
+        }
         public const uint WAIT_OBJECT_0 = 0x00000000;
         public const uint WAIT_TIMEOUT = 0x00000102;
         public const uint WAIT_FAILED = 0xFFFFFFFF;
