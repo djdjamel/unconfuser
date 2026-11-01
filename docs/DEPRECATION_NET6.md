@@ -6,58 +6,63 @@ Au 1er novembre 2026, l'alignement sur la politique officielle de support Micros
 
 | Cible | Statut Officiel Microsoft | Statut Projet Unconfuser | Fin de Support Officielle | Rôle et Stratégie |
 | :--- | :--- | :--- | :--- | :--- |
-| **`net10.0-windows`** | **LTS Active (Recommandée)** | **Cible moderne pérenne cible** | **14 Novembre 2028** | Cible LTS principale à adopter pour l'exécution moderne 64-bit et l'analyse statique. |
-| **`net8.0-windows`** | **LTS en fin de support (Maintenance)** | **Cible de transition** | **10 Novembre 2026** | Conservée temporairement pour la compatibilité avec les environnements de build n'ayant pas encore déployé le SDK .NET 10. Ne doit plus être présentée comme pérenne. |
-| **`net6.0-windows`** | **End of Life (EOL)** | **Déprécié (Phase d'extinction)** | **12 Novembre 2024** | Conservée uniquement pour rétro-compatibilité binaire des workers existants. Génère l'avertissement de build documenté `NETSDK1138`. |
-| **`net48`** | **Actif (Composant OS Windows)** | **Cible x86 32-bit requise** | **Cycle de vie de Windows** | Cible indispensable pour l'exécution dynamique des protections historiques 32-bit (`AntiTamper`, `Constants`). |
+| **`net10.0-windows`** | **LTS Active (Recommandée)** | **Cible cible v2.0 (Non activée dans les .csproj actuels)** | **14 Novembre 2028** | Cible LTS future planifiée pour la v2.0. Le SDK .NET 10 est déployé en CI, mais la cible n'est pas encore déclarée dans `<TargetFrameworks>`. |
+| **`net8.0-windows`** | **LTS en fin de support (Maintenance)** | **Cible de transition active actuelle (AnyCPU)** | **10 Novembre 2026** | Cible moderne active actuellement déclarée, compilée et exécutée par la suite de tests et les benchmarks. Ne doit plus être présentée comme pérenne. |
+| **`net6.0-windows`** | **End of Life (EOL)** | **Déprécié (Phase d'extinction)** | **12 Novembre 2024** | Conservée temporairement pour la rétro-compatibilité binaire des workers existants. Génère l'avertissement de build documenté `NETSDK1138`. |
+| **`net48`** | **Actif (Composant OS Windows)** | **Cible x86 32-bit active requise** | **Cycle de vie de Windows** | Cible indispensable pour l'exécution dynamique des protections historiques 32-bit (`AntiTamper`, `Constants`). |
 
 ---
 
-## 2. Analyse et Justification Technique
+## 2. Analyse Technique et Niveaux de Support
 
-1. **Fin de vie imminente de .NET 8 :**
-   .NET 8.0 atteint sa fin de support officielle le 10 novembre 2026. Bien qu'il serve actuellement de cible par défaut dans la branche courante, il ne constitue plus une solution pérenne à moyen et long terme.
+Afin d'éviter toute ambiguïté technique, trois niveaux distincts sont définis et respectés :
 
-2. **Adoption de .NET 10 LTS :**
-   .NET 10.0 est la version LTS active actuelle, bénéficiant d'un support complet jusqu'au 14 novembre 2028.
-   L'étude de faisabilité confirme que l'ensemble du moteur (`ConfuserExKillerRunner`), ses dépendances épinglées (`dnlib`, `de4dot.blocks`) et les API Win32 (Job Objects, `kernelbase.dll`, `NtQueryObject`) compilent et fonctionnent de manière identique sous .NET 10.
+1. **Niveau 1 — Outillage de compilation (SDK .NET 10) :**
+   - Le workflow CI (`.github/workflows/ci.yml`) installe explicitement le SDK .NET 10 (`10.0.x`) aux côtés des SDKs 8 et 6.
+   - La solution actuelle est compilée avec succès sous le compilateur MSBuild du SDK .NET 10 (SDK 10.0.403).
 
-3. **Préservation de `net48` (x86 32-bit) :**
-   La compatibilité avec les assemblies protégés par ConfuserEx historique 32-bit requiert impérativement un runtime CLR 32-bit natif. `net48` assure cette fonction sans dépendre d'un runtime .NET Core obsolète.
+2. **Niveau 2 — Ciblage de framework (`TargetFrameworks`) :**
+   - Les fichiers de projet (`ConfuserExKillerRunner.csproj`, etc.) conservent à ce stade le multi-ciblage `net48;net8.0-windows;net6.0-windows`.
+   - La cible `net10.0-windows` n'est **pas encore ajoutée** dans les balises `<TargetFrameworks>` afin d'éviter les ruptures de build (`NETSDK1045`) sur les postes de développement disposant uniquement du SDK 8.
+
+3. **Niveau 3 — Exécution et validation runtime :**
+   - Les tests unitaires, tests d'intégration et benchmarks s'exécutent sous le runtime `net8.0-windows` (AnyCPU) et `net48` (x86 natif).
+   - Le projet **ne revendique pas** de validation d'exécution sous le runtime natif .NET 10 tant qu'un véritable `TargetFramework` `net10.0-windows` n'a pas été formellement intégré et testé de bout en bout.
 
 4. **Gestion de l'avertissement `NETSDK1138` :**
-   Lors de la compilation avec un SDK moderne (.NET 8 ou .NET 10), le ciblage de `net6.0-windows` produit l'avertissement suivant :
+   Lors de la compilation avec un SDK moderne (.NET 8 ou .NET 10), le ciblage de `net6.0-windows` produit l'avertissement documenté :
    ```text
    warning NETSDK1138: La version cible de .NET Framework ('net6.0-windows') n'est pas prise en charge et ne recevra pas les mises à jour de sécurité.
    ```
-   Cet avertissement est attendu et traçable tant que `net6.0-windows` est maintenu dans `<TargetFrameworks>` pour des motifs de compatibilité transitoire.
+   Cet avertissement est attendu tant que `net6.0-windows` subsiste pour des motifs de compatibilité transitoire.
 
 ---
 
-## 3. Calendrier de Transition et Feuille de Route
+## 3. Feuille de Route et Calendrier de Retrait
 
-### Étape 1 : Préparation de l'Infrastructure CI (Actuel)
-- Mise à jour du workflow CI (`.github/workflows/ci.yml`) pour installer explicitement le SDK .NET 10 (`10.0.x`) aux côtés du SDK 8 et du SDK 6.
-- Validation de la compilation de la solution sous le compilateur .NET 10 SDK 10.0.403.
-- Maintien transitoire de `net48;net8.0-windows;net6.0-windows` pour garantir qu'aucun build existant ne soit brisé.
+### Étape 1 : Préparation de l'Infrastructure CI (Statut actuel — Post-CI #48)
+- Déploiement du SDK .NET 10 (`10.0.x`) en CI pour garantir la compatibilité de l'outillage.
+- Maintien transitoire strict de `net48;net8.0-windows;net6.0-windows` dans les fichiers `.csproj`.
+- Les tests s'exécutent sous `net8.0-windows` et `net48`.
 
-### Étape 2 : Retrait de `net6.0-windows` et Généralisation de `net10.0-windows` (Prochaine Release Majeure v2.0)
-- Remplacement du multi-ciblage par :
+### Étape 2 : Retrait de `net6.0-windows` et Ajout de `net10.0-windows` (Release Majeure v2.0)
+- Ajout formel de `net10.0-windows` dans `<TargetFrameworks>` :
   ```xml
   <TargetFrameworks>net48;net10.0-windows;net8.0-windows</TargetFrameworks>
   ```
 - Retrait définitif de `net6.0-windows`, éliminant l'avertissement `NETSDK1138`.
-- Migration progressive des tests et benchmarks vers `net10.0-windows`.
+- Exécution et validation complètes de la suite de tests sous le runtime .NET 10.
 
 ### Étape 3 : Retrait de `net8.0-windows` (Postérieurement au 10 Novembre 2026)
-- Retrait de `net8.0-windows` une fois que l'ensemble des postes de développement et runners CI auront migré vers .NET 10 SDK.
-- Cibles finales stabilisées : `net48` (x86) et `net10.0-windows` (AnyCPU/x64).
+- Retrait de `net8.0-windows` une fois la transition des environnements achevée.
+- Cibles finales stabilisées : `net48` (x86 32-bit) et `net10.0-windows` (AnyCPU/x64).
 
 ---
 
-## 4. Recommandations Pratiques
+## 4. Recommandations Utilisateurs et Développeurs
 
-- **Pour les nouveaux déploiements et intégrations CI :** Installer le SDK .NET 10 LTS (`10.0.x`) et exécuter le runtime sous .NET 10 ou .NET 8 (transition).
-- **Pour l'analyse de binaires 32-bit obfusqués :** Utiliser systématiquement l'exécutable compilé pour `net48` (`bin/Release/net48/ConfuserExKillerRunner.exe`).
-- **Pour le développement local :** Les développeurs disposant du SDK .NET 10 peuvent d'ores et déjà compiler et exécuter l'ensemble des composants de manière transparente.
+- **Postes de développement :** Continuer d'utiliser le SDK .NET 8.0 ou le SDK .NET 10.0 indifféremment pour compiler la branche courante.
+- **Exécution 32-bit native :** Utiliser systématiquement l'exécutable compilé pour `net48` (`bin/Release/net48/ConfuserExKillerRunner.exe`).
+- **Nouveaux déploiements :** Prévoir le déploiement du SDK .NET 10 LTS en vue de la future release v2.0.
+
 
