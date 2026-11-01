@@ -153,20 +153,228 @@ namespace ConfuserExKillerRunner.Killers
             public HashSet<string> ExplicitMemberNames { get; } = new HashSet<string>(StringComparer.Ordinal);
             public List<(Instruction Instruction, string TargetName)> TypeGetTypeCalls { get; } = new List<(Instruction, string)>();
             public bool HasUnresolvableDynamicReflection { get; set; }
+            public bool HasUnresolvableModuleScopeReflection { get; set; }
             public HashSet<TypeDef> UnresolvableDynamicReflectionTypes { get; } = new HashSet<TypeDef>();
+            public List<string> UnresolvedDynamicPatterns { get; } = new List<string>();
         }
 
-        private static int GetLocalIndex(Instruction ins)
+        private static int GetStoreLocalIndex(Instruction ins)
         {
             if (ins == null) return -1;
             var op = ins.OpCode;
-            if (op == OpCodes.Stloc_0 || op == OpCodes.Ldloc_0) return 0;
-            if (op == OpCodes.Stloc_1 || op == OpCodes.Ldloc_1) return 1;
-            if (op == OpCodes.Stloc_2 || op == OpCodes.Ldloc_2) return 2;
-            if (op == OpCodes.Stloc_3 || op == OpCodes.Ldloc_3) return 3;
-            if ((op == OpCodes.Stloc_S || op == OpCodes.Stloc || op == OpCodes.Ldloc_S || op == OpCodes.Ldloc) && ins.Operand is Local loc)
+            if (op == OpCodes.Stloc_0) return 0;
+            if (op == OpCodes.Stloc_1) return 1;
+            if (op == OpCodes.Stloc_2) return 2;
+            if (op == OpCodes.Stloc_3) return 3;
+            if ((op == OpCodes.Stloc_S || op == OpCodes.Stloc) && ins.Operand is Local loc)
                 return loc.Index;
             return -1;
+        }
+
+        private static int GetLoadLocalIndex(Instruction ins)
+        {
+            if (ins == null) return -1;
+            var op = ins.OpCode;
+            if (op == OpCodes.Ldloc_0) return 0;
+            if (op == OpCodes.Ldloc_1) return 1;
+            if (op == OpCodes.Ldloc_2) return 2;
+            if (op == OpCodes.Ldloc_3) return 3;
+            if ((op == OpCodes.Ldloc_S || op == OpCodes.Ldloc) && ins.Operand is Local loc)
+                return loc.Index;
+            return -1;
+        }
+
+        private static int GetArgIndex(Instruction ins)
+        {
+            if (ins == null) return -1;
+            var op = ins.OpCode;
+            if (op == OpCodes.Ldarg_0) return 0;
+            if (op == OpCodes.Ldarg_1) return 1;
+            if (op == OpCodes.Ldarg_2) return 2;
+            if (op == OpCodes.Ldarg_3) return 3;
+            if ((op == OpCodes.Ldarg || op == OpCodes.Ldarg_S) && ins.Operand is Parameter p)
+                return p.Index;
+            return -1;
+        }
+
+        private static int FindStackProducer(IList<Instruction> instrs, int beforeIdx, int targetDepth)
+        {
+            if (beforeIdx <= 0 || beforeIdx > instrs.Count) return -1;
+            int currentDepth = targetDepth;
+
+            for (int j = beforeIdx - 1; j >= 0; j--)
+            {
+                var ins = instrs[j];
+                ins.CalculateStackUsage(out int pushes, out int pops);
+
+                if (pushes > 0)
+                {
+                    if (currentDepth < pushes)
+                    {
+                        return j;
+                    }
+                    currentDepth = currentDepth - pushes + pops;
+                }
+                else
+                {
+                    currentDepth += pops;
+                }
+
+                if (currentDepth < 0) return -1;
+            }
+
+            return -1;
+        }
+
+        private static bool TryResolveStringValue(
+            IList<Instruction> instrs,
+            int producerIdx,
+            Dictionary<int, string> unambiguousLocals,
+            out string resolvedStr)
+        {
+            resolvedStr = null;
+            if (producerIdx < 0 || producerIdx >= instrs.Count) return false;
+
+            var ins = instrs[producerIdx];
+
+            // 1. Direct ldstr
+            if (ins.OpCode == OpCodes.Ldstr && ins.Operand is string s)
+            {
+                resolvedStr = s;
+                return true;
+            }
+
+            // 2. Local variable with single unambiguous constant assignment
+            int locIdx = GetLoadLocalIndex(ins);
+            if (locIdx >= 0 && unambiguousLocals.TryGetValue(locIdx, out var locVal))
+            {
+                resolvedStr = locVal;
+                return true;
+            }
+
+            // 3. Static constant field
+            if (ins.OpCode == OpCodes.Ldsfld && ins.Operand is IField fld)
+            {
+                var fDef = fld as FieldDef ?? fld.ResolveFieldDef();
+                if (fDef?.Constant?.Value is string fStr)
+                {
+                    resolvedStr = fStr;
+                    return true;
+                }
+            }
+
+            // 4. String.Concat(s1, s2)
+            if (ins.OpCode == OpCodes.Call && ins.Operand is IMethod concatM &&
+                concatM.DeclaringType?.FullName == "System.String" && concatM.Name == "Concat")
+            {
+                int numParams = concatM.MethodSig?.Params?.Count ?? 0;
+                if (numParams == 2)
+                {
+                    int p1 = FindStackProducer(instrs, producerIdx, targetDepth: 1);
+                    int p2 = FindStackProducer(instrs, producerIdx, targetDepth: 0);
+                    if (p1 >= 0 && p2 >= 0 &&
+                        TryResolveStringValue(instrs, p1, unambiguousLocals, out string s1) &&
+                        TryResolveStringValue(instrs, p2, unambiguousLocals, out string s2))
+                    {
+                        resolvedStr = s1 + s2;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static TypeDef TryResolveTargetType(
+            ModuleDef module,
+            TypeDef declaringType,
+            MethodDef currentMethod,
+            IList<Instruction> instrs,
+            int typeProducerIdx)
+        {
+            if (typeProducerIdx < 0 || typeProducerIdx >= instrs.Count) return null;
+            var ins = instrs[typeProducerIdx];
+
+            // Case 1: typeof(Target) -> ldtoken Target + call Type.GetTypeFromHandle
+            if (ins.OpCode == OpCodes.Call && ins.Operand is IMethod handleM &&
+                handleM.DeclaringType?.FullName == "System.Type" && handleM.Name == "GetTypeFromHandle")
+            {
+                int tokenIdx = FindStackProducer(instrs, typeProducerIdx, targetDepth: 0);
+                if (tokenIdx >= 0 && instrs[tokenIdx].OpCode == OpCodes.Ldtoken)
+                {
+                    if (instrs[tokenIdx].Operand is ITypeDefOrRef tdr)
+                    {
+                        return tdr.ResolveTypeDef() ?? (tdr as TypeDef);
+                    }
+                }
+            }
+
+            // Case 2: obj.GetType() -> callvirt Object.GetType()
+            if (ins.OpCode == OpCodes.Callvirt && ins.Operand is IMethod objGetType &&
+                objGetType.DeclaringType?.FullName == "System.Object" && objGetType.Name == "GetType")
+            {
+                int objIdx = FindStackProducer(instrs, typeProducerIdx, targetDepth: 0);
+                if (objIdx >= 0)
+                {
+                    var objIns = instrs[objIdx];
+                    int argIdx = GetArgIndex(objIns);
+                    if (argIdx >= 0)
+                    {
+                        if (argIdx == 0 && currentMethod.HasThis)
+                        {
+                            return declaringType;
+                        }
+                        if (argIdx < currentMethod.Parameters.Count)
+                        {
+                            var pType = currentMethod.Parameters[argIdx].Type?.ToTypeDefOrRef();
+                            var resolved = pType?.ResolveTypeDef() ?? (pType as TypeDef);
+                            if (resolved != null && resolved.FullName != "System.Object")
+                                return resolved;
+                        }
+                    }
+
+                    int locIdx = GetLoadLocalIndex(objIns);
+                    if (locIdx >= 0 && currentMethod.Body.Variables.Count > locIdx)
+                    {
+                        var locType = currentMethod.Body.Variables[locIdx].Type?.ToTypeDefOrRef();
+                        var resolved = locType?.ResolveTypeDef() ?? (locType as TypeDef);
+                        if (resolved != null && resolved.FullName != "System.Object")
+                            return resolved;
+                    }
+
+                    if (objIns.OpCode == OpCodes.Newobj && objIns.Operand is IMethod ctor)
+                    {
+                        return ctor.DeclaringType?.ResolveTypeDef() ?? (ctor.DeclaringType as TypeDef);
+                    }
+
+                    if ((objIns.OpCode == OpCodes.Ldfld || objIns.OpCode == OpCodes.Ldsfld) && objIns.Operand is IField fld)
+                    {
+                        var fType = fld.FieldSig?.Type?.ToTypeDefOrRef();
+                        var resolved = fType?.ResolveTypeDef() ?? (fType as TypeDef);
+                        if (resolved != null && resolved.FullName != "System.Object")
+                            return resolved;
+                    }
+                }
+            }
+
+            // Case 3: Type.GetType("MyNamespace.MyType")
+            if (ins.OpCode == OpCodes.Call && ins.Operand is IMethod typeGetType &&
+                typeGetType.DeclaringType?.FullName == "System.Type" && typeGetType.Name == "GetType")
+            {
+                int strIdx = FindStackProducer(instrs, typeProducerIdx, targetDepth: 0);
+                if (strIdx >= 0 && instrs[strIdx].OpCode == OpCodes.Ldstr && instrs[strIdx].Operand is string tName)
+                {
+                    return module.Find(tName, isReflectionName: true);
+                }
+            }
+
+            // Case 4: direct ldtoken without GetTypeFromHandle
+            if (ins.OpCode == OpCodes.Ldtoken && ins.Operand is ITypeDefOrRef rawTdr)
+            {
+                return rawTdr.ResolveTypeDef() ?? (rawTdr as TypeDef);
+            }
+
+            return null;
         }
 
         private static ReflectionReferenceMap BuildReflectionReferenceMap(ModuleDef module)
@@ -180,16 +388,40 @@ namespace ConfuserExKillerRunner.Killers
                     if (!method.HasBody || method.Body.Instructions == null) continue;
                     var instrs = method.Body.Instructions;
 
-                    // Track local variable assignments of string literals: local index -> string value
-                    var localStringMap = new Dictionary<int, string>();
-                    for (int k = 0; k < instrs.Count - 1; k++)
+                    // Analyze local variables: detect locals with exactly one store of a constant string
+                    var storeCounts = new Dictionary<int, int>();
+                    var storeIndices = new Dictionary<int, int>();
+                    for (int k = 0; k < instrs.Count; k++)
                     {
-                        if (instrs[k].OpCode == OpCodes.Ldstr && instrs[k].Operand is string sVal)
+                        int locIdx = GetStoreLocalIndex(instrs[k]);
+                        if (locIdx >= 0)
                         {
-                            int locIdx = GetLocalIndex(instrs[k + 1]);
-                            if (locIdx >= 0)
+                            storeCounts[locIdx] = storeCounts.TryGetValue(locIdx, out int c) ? c + 1 : 1;
+                            storeIndices[locIdx] = k;
+                        }
+                    }
+
+                    var unambiguousLocals = new Dictionary<int, string>();
+                    foreach (var kvp in storeCounts)
+                    {
+                        if (kvp.Value == 1)
+                        {
+                            int storeIdx = storeIndices[kvp.Key];
+                            int valProducer = FindStackProducer(instrs, storeIdx, targetDepth: 0);
+                            if (valProducer >= 0)
                             {
-                                localStringMap[locIdx] = sVal;
+                                if (instrs[valProducer].OpCode == OpCodes.Ldstr && instrs[valProducer].Operand is string sVal)
+                                {
+                                    unambiguousLocals[kvp.Key] = sVal;
+                                }
+                                else if (instrs[valProducer].OpCode == OpCodes.Ldsfld && instrs[valProducer].Operand is IField fld)
+                                {
+                                    var fDef = fld as FieldDef ?? fld.ResolveFieldDef();
+                                    if (fDef?.Constant?.Value is string fStr)
+                                    {
+                                        unambiguousLocals[kvp.Key] = fStr;
+                                    }
+                                }
                             }
                         }
                     }
@@ -232,50 +464,47 @@ namespace ConfuserExKillerRunner.Killers
                                              mName == "GetRuntimeMethod" || mName == "GetRuntimeProperty" ||
                                              mName == "GetRuntimeField" || mName == "GetRuntimeEvent")
                                     {
+                                        MethodSig msig = called.MethodSig;
+                                        int paramCount = msig?.Params?.Count ?? 0;
+                                        int totalArgs = (msig != null && msig.HasThis ? 1 : 0) + paramCount;
+                                        int nameStackDepth = totalArgs - 2;
+                                        int typeStackDepth = totalArgs - 1;
+
                                         bool resolvedMember = false;
-                                        for (int j = i - 1; j >= Math.Max(0, i - 20); j--)
+                                        if (nameStackDepth >= 0)
                                         {
-                                            // 1. Direct string literal
-                                            if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
+                                            int nameProducer = FindStackProducer(instrs, i, nameStackDepth);
+                                            if (nameProducer >= 0 && TryResolveStringValue(instrs, nameProducer, unambiguousLocals, out string sVal))
                                             {
-                                                map.ExplicitMemberNames.Add(strVal);
+                                                map.ExplicitMemberNames.Add(sVal);
                                                 resolvedMember = true;
-                                            }
-                                            // 2. Computed string concatenation (e.g. "Get" + "Data")
-                                            else if (instrs[j].OpCode == OpCodes.Call && instrs[j].Operand is IMethod concatM &&
-                                                     concatM.DeclaringType?.FullName == "System.String" && concatM.Name == "Concat")
-                                            {
-                                                if (j >= 2 && instrs[j - 2].OpCode == OpCodes.Ldstr && instrs[j - 2].Operand is string s1 &&
-                                                    instrs[j - 1].OpCode == OpCodes.Ldstr && instrs[j - 1].Operand is string s2)
-                                                {
-                                                    string combined = s1 + s2;
-                                                    map.ExplicitMemberNames.Add(combined);
-                                                    resolvedMember = true;
-                                                }
-                                            }
-                                            // 3. String loaded from local variable (tracked from prior ldstr)
-                                            else if (GetLocalIndex(instrs[j]) >= 0 && localStringMap.TryGetValue(GetLocalIndex(instrs[j]), out string locStr))
-                                            {
-                                                map.ExplicitMemberNames.Add(locStr);
-                                                resolvedMember = true;
-                                            }
-                                            // 4. String loaded from static field constant
-                                            else if (instrs[j].OpCode == OpCodes.Ldsfld && instrs[j].Operand is IField fld)
-                                            {
-                                                var fDef = fld as FieldDef ?? fld.ResolveFieldDef();
-                                                if (fDef?.Constant?.Value is string fStr)
-                                                {
-                                                    map.ExplicitMemberNames.Add(fStr);
-                                                    resolvedMember = true;
-                                                }
                                             }
                                         }
 
-                                        // 5. Unresolvable dynamic reflection call: mark type as containing dynamic reflection
+                                        TypeDef targetTypeDef = null;
+                                        if (typeStackDepth >= 0)
+                                        {
+                                            int typeProducer = FindStackProducer(instrs, i, typeStackDepth);
+                                            if (typeProducer >= 0)
+                                            {
+                                                targetTypeDef = TryResolveTargetType(module, type, method, instrs, typeProducer);
+                                            }
+                                        }
+
                                         if (!resolvedMember)
                                         {
                                             map.HasUnresolvableDynamicReflection = true;
-                                            map.UnresolvableDynamicReflectionTypes.Add(type);
+                                            if (targetTypeDef != null)
+                                            {
+                                                map.UnresolvableDynamicReflectionTypes.Add(targetTypeDef);
+                                                map.UnresolvedDynamicPatterns.Add($"Dynamic member reflection on type '{targetTypeDef.FullName}' in method '{type.FullName}::{method.Name}'.");
+                                            }
+                                            else
+                                            {
+                                                // Target type cannot be determined statically: conservative module scope fallback
+                                                map.HasUnresolvableModuleScopeReflection = true;
+                                                map.UnresolvedDynamicPatterns.Add($"Unresolvable target type for dynamic reflection in method '{type.FullName}::{method.Name}'.");
+                                            }
                                         }
                                     }
                                     else if (mName == "GetNestedType")
@@ -1525,8 +1754,8 @@ namespace ConfuserExKillerRunner.Killers
                 if (refMap.ExplicitTypeNames.Contains(type.Name.String) || refMap.ExplicitTypeNames.Contains(type.FullName))
                     continue;
 
-                // Safety rule: if type contains unresolvable dynamic reflection, preserve methods and fields conservatively
-                if (refMap.UnresolvableDynamicReflectionTypes.Contains(type))
+                // Safety rule: if type or module contains unresolvable dynamic reflection, preserve methods and fields conservatively
+                if (refMap.HasUnresolvableModuleScopeReflection || refMap.UnresolvableDynamicReflectionTypes.Contains(type))
                 {
                     result.Decisions.Add(new RenameDecision
                     {
@@ -1534,7 +1763,9 @@ namespace ConfuserExKillerRunner.Killers
                         NewName = type.FullName,
                         SymbolType = "Type",
                         Confidence = RenameConfidence.Ambiguous,
-                        Justification = $"Type '{type.FullName}' contains unresolvable dynamic reflection call; members preserved conservatively.",
+                        Justification = refMap.HasUnresolvableModuleScopeReflection
+                            ? $"Module contains unresolvable dynamic reflection call with unknown target type; type '{type.FullName}' members preserved conservatively."
+                            : $"Type '{type.FullName}' contains unresolvable dynamic reflection call; members preserved conservatively.",
                         Applied = false
                     });
                     continue;

@@ -1546,7 +1546,240 @@ namespace ConfuserExKillerRunner.Tests
             var result = SemanticRenamer.Execute(module, verbose: false);
 
             // Type with unresolvable dynamic reflection must have its symbols preserved conservatively
+            Assert.Equal("\u200B\u200CUnknownMethod", methodToPreserve.Name.String);
             Assert.Contains(result.Decisions, d => d.Confidence == RenameConfidence.Ambiguous && d.Justification.Contains("unresolvable dynamic reflection"));
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29H_ReflectionProtection_CallerDistinctFromTarget_TargetPreserved()
+        {
+            var module = new ModuleDefUser("CallerTargetDistinctTest.dll");
+
+            // Target type with mangled method
+            var targetType = new TypeDefUser("MyApp.Domain", "TargetType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(targetType);
+
+            var secretMethod = new MethodDefUser("\u200B\u200CSecretMethod", MethodSig.CreateInstance(module.CorLibTypes.Void), MethodAttributes.Private)
+            {
+                Body = new CilBody()
+            };
+            secretMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            targetType.Methods.Add(secretMethod);
+
+            // Caller type distinct from target type
+            var callerType = new TypeDefUser("MyApp.Services", "CallerType", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+
+            // Caller method: void InvokeTarget(TargetType target, string dynamicName) -> target.GetType().GetMethod(dynamicName)
+            var callerMethod = new MethodDefUser("InvokeTarget",
+                MethodSig.CreateInstance(module.CorLibTypes.Void, targetType.ToTypeSig(), module.CorLibTypes.String))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var objectRef = module.CorLibTypes.Object.TypeDefOrRef;
+            var objGetTypeRef = new MemberRefUser(
+                module,
+                "GetType",
+                MethodSig.CreateInstance(typeRef.ToTypeSig()),
+                objectRef);
+            var getMethodRef = new MemberRefUser(
+                module,
+                "GetMethod",
+                MethodSig.CreateInstance(typeRef.ToTypeSig(), module.CorLibTypes.String),
+                typeRef);
+
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, objGetTypeRef));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_2));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(callerMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // TargetType's secret method must remain intact
+            Assert.Equal("\u200B\u200CSecretMethod", secretMethod.Name.String);
+
+            // Decision for TargetType must be Ambiguous
+            var targetDecision = result.Decisions.FirstOrDefault(d => d.OriginalName == targetType.FullName && d.Confidence == RenameConfidence.Ambiguous);
+            Assert.NotNull(targetDecision);
+            Assert.Contains("dynamic reflection", targetDecision.Justification, StringComparison.OrdinalIgnoreCase);
+
+            // CallerType must not be falsely marked as containing unresolvable reflection
+            Assert.DoesNotContain(result.Decisions, d => d.OriginalName == callerType.FullName && d.Confidence == RenameConfidence.Ambiguous);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29I_ReflectionProtection_UnrelatedLogString_ClassifiedAmbiguous()
+        {
+            var module = new ModuleDefUser("UnrelatedStringTest.dll");
+
+            var targetType = new TypeDefUser("MyApp.Domain", "WorkerTarget", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(targetType);
+
+            var targetMethod = new MethodDefUser("\u200B\u200CDoWork", MethodSig.CreateInstance(module.CorLibTypes.Void), MethodAttributes.Private)
+            {
+                Body = new CilBody()
+            };
+            targetMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            targetType.Methods.Add(targetMethod);
+
+            var callerType = new TypeDefUser("MyApp.Services", "WorkerInvoker", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+
+            var invokeMethod = new MethodDefUser("InvokeWithLog",
+                MethodSig.CreateInstance(module.CorLibTypes.Void, targetType.ToTypeSig(), module.CorLibTypes.String))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var getMethodRef = new MemberRefUser(
+                module,
+                "GetMethod",
+                MethodSig.CreateInstance(typeRef.ToTypeSig(), module.CorLibTypes.String),
+                typeRef);
+
+            var logMethod = new MethodDefUser("LogMessage", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.String))
+            {
+                Body = new CilBody()
+            };
+            logMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(logMethod);
+
+            // 1. Unrelated string literal passed to diagnostic logger
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "Diagnostics: preparing reflection dispatch"));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, logMethod));
+
+            // 2. Dynamic reflection call using parameter dynamicName (ldarg.2)
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, targetType));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(typeRef.ToTypeSig(), new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()), typeRef)));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_2));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(invokeMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // Scanner must NOT confuse the unrelated log string with the member name
+            Assert.DoesNotContain("Diagnostics: preparing reflection dispatch", result.Decisions.Select(d => d.OriginalName));
+
+            // Case must be classified as Ambiguous and target method preserved
+            Assert.Equal("\u200B\u200CDoWork", targetMethod.Name.String);
+            Assert.Contains(result.Decisions, d => d.Confidence == RenameConfidence.Ambiguous && d.Justification.Contains("dynamic reflection"));
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29J_ReflectionProtection_LocalVariable_MultipleAssignments_ClassifiedAmbiguous()
+        {
+            var module = new ModuleDefUser("MultiAssignLocalTest.dll");
+
+            var targetType = new TypeDefUser("MyApp.Domain", "DynamicService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(targetType);
+
+            var secretMethod = new MethodDefUser("\u200B\u200CExecuteTask", MethodSig.CreateInstance(module.CorLibTypes.Void), MethodAttributes.Private)
+            {
+                Body = new CilBody()
+            };
+            secretMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            targetType.Methods.Add(secretMethod);
+
+            var callerType = new TypeDefUser("MyApp.Services", "MultiAssignCaller", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+
+            var callMethod = new MethodDefUser("CallMultiAssign", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Boolean))
+            {
+                Body = new CilBody { InitLocals = true }
+            };
+            callMethod.Body.Variables.Add(new Local(module.CorLibTypes.String));
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var getMethodRef = new MemberRefUser(
+                module,
+                "GetMethod",
+                MethodSig.CreateInstance(typeRef.ToTypeSig(), module.CorLibTypes.String),
+                typeRef);
+
+            var branchTarget = Instruction.Create(OpCodes.Ldstr, "MethodB");
+            var callBlock = Instruction.Create(OpCodes.Ldtoken, targetType);
+
+            // if (arg0) name = "MethodA"; else name = "MethodB";
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Brfalse, branchTarget));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "MethodA"));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Br, callBlock));
+
+            callMethod.Body.Instructions.Add(branchTarget);
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+
+            callMethod.Body.Instructions.Add(callBlock);
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(typeRef.ToTypeSig(), new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()), typeRef)));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(callMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // Scanner must detect multiple assignments to local and not resolve to a single constant
+            Assert.Equal("\u200B\u200CExecuteTask", secretMethod.Name.String);
+            Assert.Contains(result.Decisions, d => d.Confidence == RenameConfidence.Ambiguous && d.Justification.Contains("dynamic reflection"));
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29K_ReflectionProtection_GetEvent_Preserved()
+        {
+            var module = new ModuleDefUser("GetEventTest.dll");
+
+            var targetType = new TypeDefUser("MyApp.Events", "EventPublisher", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(targetType);
+
+            var eventHandlerType = new TypeRefUser(module, "System", "EventHandler", module.CorLibTypes.AssemblyRef);
+            var targetEvent = new EventDefUser("\u200B\u200COnPayloadReceived", eventHandlerType);
+            targetType.Events.Add(targetEvent);
+
+            var callerType = new TypeDefUser("MyApp.Events", "EventSubscriber", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+
+            var subMethod = new MethodDefUser("SubscribeDynamically", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var eventInfoRef = new TypeRefUser(module, "System.Reflection", "EventInfo", module.CorLibTypes.AssemblyRef);
+            var getEventRef = new MemberRefUser(
+                module,
+                "GetEvent",
+                MethodSig.CreateInstance(eventInfoRef.ToTypeSig(), module.CorLibTypes.String),
+                typeRef);
+
+            subMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, targetType));
+            subMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(typeRef.ToTypeSig(), new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()), typeRef)));
+            subMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "\u200B\u200COnPayloadReceived"));
+            subMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getEventRef));
+            subMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            subMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(subMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // Target event name must be preserved intact
+            Assert.Equal("\u200B\u200COnPayloadReceived", targetEvent.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
         }
 
         [Fact]
