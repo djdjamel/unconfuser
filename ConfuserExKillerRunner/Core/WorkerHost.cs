@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using ConfuserExKillerRunner.Killers;
 using ConfuserExTools.ConstantKiller;
@@ -40,6 +41,9 @@ namespace ConfuserExKillerRunner.Core
 
                     case "fieldrva":
                         return RunFieldRva(args);
+
+                    case "test-handle-inheritance":
+                        return RunTestHandleInheritance(args);
 
                     default:
                         Console.Error.WriteLine($"[WorkerHost] Unknown worker command: {command}");
@@ -480,6 +484,57 @@ namespace ConfuserExKillerRunner.Core
             sb.AppendLine("}");
 
             File.WriteAllText(path, sb.ToString());
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetEvent(IntPtr hEvent);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetHandleInformation(IntPtr hObject, out uint lpdwFlags);
+
+        private static int RunTestHandleInheritance(string[] args)
+        {
+            long rawHandle = 0;
+            string eventName = "unknown";
+            for (int i = 2; i < args.Length; i++)
+            {
+                if (args[i] == "--handle" && i + 1 < args.Length)
+                {
+                    long.TryParse(args[++i], out rawHandle);
+                }
+                else if (args[i] == "--event-name" && i + 1 < args.Length)
+                {
+                    eventName = args[++i];
+                }
+            }
+
+            IntPtr handlePtr = new IntPtr(rawHandle);
+            bool getInfoOk = GetHandleInformation(handlePtr, out _);
+            int getInfoErr = Marshal.GetLastWin32Error();
+
+            bool setOk = SetEvent(handlePtr);
+            int setErr = Marshal.GetLastWin32Error();
+
+            uint waitRes = WaitForSingleObject(handlePtr, 0);
+            int waitErr = Marshal.GetLastWin32Error();
+
+            Console.WriteLine($"[HANDLE_TEST_CHILD] TargetHandle=0x{rawHandle:X} EventName={eventName}");
+            Console.WriteLine($"[HANDLE_TEST_CHILD] GetHandleInfo={getInfoOk} (Err={getInfoErr}), SetEvent={setOk} (Err={setErr}), WaitForSingleObject={waitRes} (Err={waitErr})");
+            Console.Error.WriteLine("[HANDLE_TEST_CHILD] Stderr pipe communication verified.");
+
+            // If SetEvent succeeded, or handle information is valid and not invalid handle error,
+            // the arbitrary parent handle leaked into the child process.
+            if (setOk || (getInfoOk && setErr != 6))
+            {
+                Console.WriteLine("[HANDLE_TEST_CHILD] FAILURE: Arbitrary parent handle was accessible/inherited in child process!");
+                return 42;
+            }
+
+            Console.WriteLine("[HANDLE_TEST_CHILD] SUCCESS: Handle is NOT inherited (ERROR_INVALID_HANDLE).");
+            return 0;
         }
 
         private static string EscapeJson(string s)

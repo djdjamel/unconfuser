@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -231,7 +232,7 @@ namespace ConfuserExKillerRunner.Core
         private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
         private static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = (IntPtr)0x00020002;
 
-        public static readonly HashSet<string> AllowedEnvironmentVariables = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        private static readonly HashSet<string> _allowedEnvironmentVariables = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "SYSTEMROOT",
             "WINDIR",
@@ -241,27 +242,24 @@ namespace ConfuserExKillerRunner.Core
             "PATHEXT",
             "TEMP",
             "TMP",
-            "USERNAME",
-            "USERPROFILE",
-            "LOCALAPPDATA",
-            "APPDATA",
-            "ALLUSERSPROFILE",
+            "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE",
+            "PROCESSOR_IDENTIFIER",
+            "PROCESSOR_LEVEL",
+            "PROCESSOR_REVISION",
             "PROGRAMDATA",
             "PROGRAMFILES",
             "PROGRAMFILES(X86)",
             "PROGRAMW6432",
             "COMMONPROGRAMFILES",
             "COMMONPROGRAMFILES(X86)",
-            "NUMBER_OF_PROCESSORS",
-            "PROCESSOR_ARCHITECTURE",
-            "PROCESSOR_IDENTIFIER",
-            "PROCESSOR_LEVEL",
-            "PROCESSOR_REVISION",
             "DOTNET_ROOT",
             "DOTNET_ROOT(X86)",
             "DOTNET_MULTILEVEL_LOOKUP",
             "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"
         };
+
+        public static IReadOnlyCollection<string> AllowedEnvironmentVariables => _allowedEnvironmentVariables;
         public const uint WAIT_OBJECT_0 = 0x00000000;
         public const uint WAIT_TIMEOUT = 0x00000102;
         public const uint WAIT_FAILED = 0xFFFFFFFF;
@@ -478,17 +476,17 @@ namespace ConfuserExKillerRunner.Core
             }
         }
 
-        public static IntPtr CreateRestrictedEnvironmentBlock(IDictionary<string, string> customOverrides = null)
+        internal static IntPtr CreateRestrictedEnvironmentBlock()
         {
             var envDict = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-            // Populate strictly from allowlist
+            // Populate strictly from internal immutable allowlist
             var parentVars = Environment.GetEnvironmentVariables();
             foreach (System.Collections.DictionaryEntry entry in parentVars)
             {
                 string key = entry.Key?.ToString();
                 string val = entry.Value?.ToString();
-                if (!string.IsNullOrEmpty(key) && AllowedEnvironmentVariables.Contains(key))
+                if (!string.IsNullOrEmpty(key) && _allowedEnvironmentVariables.Contains(key))
                 {
                     envDict[key] = val ?? string.Empty;
                 }
@@ -519,17 +517,38 @@ namespace ConfuserExKillerRunner.Core
                 envDict["TMP"] = envDict["TEMP"];
             }
 
-            // Apply any safe caller overrides
-            if (customOverrides != null)
+            // Controlled system PATH: construct sanitized path containing strictly verified system directories
+            string root = envDict["SYSTEMROOT"];
+            var controlledPathList = new List<string>
             {
-                foreach (var kvp in customOverrides)
-                {
-                    if (AllowedEnvironmentVariables.Contains(kvp.Key))
-                    {
-                        envDict[kvp.Key] = kvp.Value;
-                    }
-                }
+                Path.Combine(root, "System32"),
+                root,
+                Path.Combine(root, "System32", "Wbem"),
+                Path.Combine(root, "System32", "WindowsPowerShell", "v1.0")
+            };
+
+            // Include system-wide .NET installation directories if present
+            string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            if (!string.IsNullOrEmpty(progFiles))
+            {
+                string dotnetDir = Path.Combine(progFiles, "dotnet");
+                if (Directory.Exists(dotnetDir))
+                    controlledPathList.Add(dotnetDir);
             }
+            string progFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            if (!string.IsNullOrEmpty(progFilesX86))
+            {
+                string dotnetX86 = Path.Combine(progFilesX86, "dotnet");
+                if (Directory.Exists(dotnetX86))
+                    controlledPathList.Add(dotnetX86);
+            }
+            string dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+            if (!string.IsNullOrEmpty(dotnetRoot) && Directory.Exists(dotnetRoot))
+            {
+                controlledPathList.Add(dotnetRoot);
+            }
+
+            envDict["PATH"] = string.Join(";", controlledPathList.Distinct(StringComparer.OrdinalIgnoreCase));
 
             // Build double-null-terminated Unicode string block: "Var1=Val1\0Var2=Val2\0\0"
             var sb = new StringBuilder();

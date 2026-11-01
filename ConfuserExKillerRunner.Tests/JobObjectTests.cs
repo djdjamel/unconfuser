@@ -360,6 +360,9 @@ namespace ConfuserExKillerRunner.Tests
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool CloseHandle(IntPtr hObject);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
         [StructLayout(LayoutKind.Sequential)]
         private struct TEST_SECURITY_ATTRIBUTES
         {
@@ -374,7 +377,9 @@ namespace ConfuserExKillerRunner.Tests
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
                 return;
 
-            // Create an inheritable handle in the parent process
+            string uniqueEventName = "Local\\Unconfuser_IsolatedTestEvent_" + Guid.NewGuid().ToString("N");
+
+            // Create an inheritable event handle in the parent process (initially non-signaled)
             var sa = new TEST_SECURITY_ATTRIBUTES
             {
                 nLength = Marshal.SizeOf(typeof(TEST_SECURITY_ATTRIBUTES)),
@@ -387,18 +392,46 @@ namespace ConfuserExKillerRunner.Tests
             IntPtr inheritableEvent = IntPtr.Zero;
             try
             {
-                inheritableEvent = CreateEvent(pSa, true, false, "Local\\UnconfuserInheritableTestEvent");
+                inheritableEvent = CreateEvent(pSa, true, false, uniqueEventName);
                 Assert.NotEqual(IntPtr.Zero, inheritableEvent);
 
+                // Initial state in parent must be non-signaled (WAIT_TIMEOUT)
+                uint initialWait = WaitForSingleObject(inheritableEvent, 0);
+                Assert.Equal(JobObject.WAIT_TIMEOUT, initialWait);
+
+                // Resolve worker executable (ConfuserExKillerRunner)
+                string workerExe = WorkerClient.ResolveWorkerExecutable();
+                Assert.True(File.Exists(workerExe), $"Worker executable not found: {workerExe}");
+
+                string appName;
+                string args;
+                if (workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                {
+                    appName = "dotnet";
+                    args = $"\"{workerExe}\" --internal-worker test-handle-inheritance --handle {(long)inheritableEvent} --event-name {uniqueEventName}";
+                }
+                else
+                {
+                    appName = workerExe;
+                    args = $"--internal-worker test-handle-inheritance --handle {(long)inheritableEvent} --event-name {uniqueEventName}";
+                }
+
                 // Run isolated process with pipe redirection
-                var result = ProcessRunner.RunIsolated(
-                    "cmd.exe",
-                    "/c echo handle_restriction_verified",
-                    timeoutMs: 15000);
+                var result = ProcessRunner.RunIsolated(appName, args, timeoutMs: 15000);
 
                 Assert.True(result.Success, $"Isolated process failed: {result.StandardError}");
                 Assert.Equal(0, result.ExitCode);
-                Assert.Contains("handle_restriction_verified", result.StandardOutput);
+
+                // Child confirms that the arbitrary parent handle was NOT inherited (error 6: ERROR_INVALID_HANDLE)
+                Assert.Contains("[HANDLE_TEST_CHILD] SUCCESS: Handle is NOT inherited", result.StandardOutput);
+                Assert.Contains("Err=6", result.StandardOutput);
+
+                // Verify that standard streams (stdout and stderr) worked reliably
+                Assert.Contains("[HANDLE_TEST_CHILD] Stderr pipe communication verified.", result.StandardError);
+
+                // Invariant: The event in the parent process was NEVER signaled by the child
+                uint postWait = WaitForSingleObject(inheritableEvent, 0);
+                Assert.Equal(JobObject.WAIT_TIMEOUT, postWait);
             }
             finally
             {
@@ -433,6 +466,59 @@ namespace ConfuserExKillerRunner.Tests
                 Assert.Equal(IntPtr.Zero, hErr);
                 Assert.NotNull(errMsg);
                 Assert.Contains("CreateProcessW failed", errMsg);
+            }
+        }
+
+        [Fact]
+        public void JobObject_16_WorkerIsolation_Allowlist_CannotBeMutatedByExternalCaller()
+        {
+            // Verify that AllowedEnvironmentVariables is an immutable collection type
+            var allowlist = JobObject.AllowedEnvironmentVariables;
+            Assert.NotNull(allowlist);
+
+            // Attempting reflection-based modification or type cast to mutable collection must be guarded
+            Assert.False(allowlist is System.Collections.IList, "Allowlist must not implement mutable IList");
+
+            // Verify essential runtime variables are included
+            Assert.Contains("SYSTEMROOT", allowlist);
+            Assert.Contains("WINDIR", allowlist);
+            Assert.Contains("PATH", allowlist);
+            Assert.Contains("TEMP", allowlist);
+
+            // Verify sensitive user profile and cloud credentials are NOT in allowlist
+            Assert.DoesNotContain("USERPROFILE", allowlist);
+            Assert.DoesNotContain("LOCALAPPDATA", allowlist);
+            Assert.DoesNotContain("APPDATA", allowlist);
+            Assert.DoesNotContain("USERNAME", allowlist);
+            Assert.DoesNotContain("GITHUB_TOKEN", allowlist);
+            Assert.DoesNotContain("AWS_SECRET_ACCESS_KEY", allowlist);
+        }
+
+        [Fact]
+        public void JobObject_17_WorkerIsolation_UserProfileAndSensitiveVarsExcluded()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            string sensitiveKey = "USER_SECRET_PROFILE_DATA";
+            string sensitiveVal = "SECRET_CREDENTIALS_12345";
+            Environment.SetEnvironmentVariable(sensitiveKey, sensitiveVal);
+
+            try
+            {
+                var result = ProcessRunner.RunIsolated(
+                    "cmd.exe",
+                    $"/c echo SECRET=[%{sensitiveKey}%] & echo SYSTEMROOT=[%SystemRoot%]",
+                    timeoutMs: 15000);
+
+                Assert.True(result.Success, $"Isolated process failed: {result.StandardError}");
+                Assert.Equal(0, result.ExitCode);
+                Assert.DoesNotContain(sensitiveVal, result.StandardOutput);
+                Assert.Contains("SYSTEMROOT=[", result.StandardOutput);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(sensitiveKey, null);
             }
         }
     }

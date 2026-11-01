@@ -32,13 +32,15 @@ The `JobLimits` class enforces defensive defaults against denial-of-service, for
 - **Die on Unhandled Exception**: Prevents crash dialog hangs (`JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION`).
 
 ### 2.4 Strict Environment Variable Allowlist (`CREATE_UNICODE_ENVIRONMENT`)
-- Rather than inheriting the parent process environment or relying on an incomplete denylist of known variables, Unconfuser constructs an explicit, minimal **allowlist** of environment variables passed via `CreateProcessW` with `CREATE_UNICODE_ENVIRONMENT`.
-- **Transmitted Variables (Strict Allowlist)**:
-  - System identification & runtime paths: `SYSTEMROOT`, `WINDIR`, `SYSTEMDRIVE`, `COMSPEC`, `PATH`, `PATHEXT`, `TEMP`, `TMP`.
-  - User and application profile roots: `USERNAME`, `USERPROFILE`, `LOCALAPPDATA`, `APPDATA`, `ALLUSERSPROFILE`, `PROGRAMDATA`, `PROGRAMFILES`, `PROGRAMFILES(X86)`, `PROGRAMW6432`, `COMMONPROGRAMFILES`, `COMMONPROGRAMFILES(X86)`.
+- Rather than inheriting the parent process environment or relying on an incomplete denylist of known variables, Unconfuser constructs an explicit, minimal **allowlist** of 23 environment variables passed via `CreateProcessW` with `CREATE_UNICODE_ENVIRONMENT`.
+- The allowlist is strictly immutable to external callers (`IReadOnlyCollection<string>`) to prevent tampering.
+- **Transmitted Variables (Strict Allowlist - 23 Essential Variables)**:
+  - System identification & runtime paths: `SYSTEMROOT`, `WINDIR`, `SYSTEMDRIVE`, `COMSPEC`, `PATHEXT`, `TEMP`, `TMP`.
+  - Controlled System PATH: Rather than copying the arbitrary parent `PATH`, a sanitized path containing only verified system directories (`System32`, `Wbem`, `WindowsPowerShell`, and the `dotnet` host directory) is constructed.
+  - System application roots: `ALLUSERSPROFILE`, `PROGRAMDATA`, `PROGRAMFILES`, `PROGRAMFILES(X86)`, `PROGRAMW6432`, `COMMONPROGRAMFILES`, `COMMONPROGRAMFILES(X86)`.
   - Hardware & CPU topology: `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `PROCESSOR_IDENTIFIER`, `PROCESSOR_LEVEL`, `PROCESSOR_REVISION`.
-  - Essential .NET runtime configurations: `DOTNET_ROOT`, `DOTNET_ROOT(X86)`, `DOTNET_MULTILEVEL_LOOKUP`, `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT`.
-- **Exclusion Policy**: All other parent variables (including CI tokens such as `GITHUB_TOKEN`, cloud credentials such as `AWS_*` / `AZURE_*`, NuGet keys, sensitive API tokens, and user credentials) are strictly excluded from the unmanaged environment block.
+  - Essential .NET runtime configurations: `DOTNET_ROOT`, `DOTNET_MULTILEVEL_LOOKUP`, `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT`.
+- **Sensitive User Profiles Excluded**: Sensitive personal profile variables (`USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `USERNAME`) and all parent credentials/tokens (`GITHUB_TOKEN`, cloud keys, API secrets) are strictly excluded from the worker environment.
 - The environment block is allocated in unmanaged memory, sorted alphabetically in ordinal order, terminated by a double-null character (`\0\0`), and guaranteed to be released in `finally` blocks under both normal and error conditions.
 
 ### 2.5 Explicit Handle Inheritance Restriction (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`)
