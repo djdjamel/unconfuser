@@ -1187,16 +1187,34 @@ namespace ConfuserExKillerRunner
             {
                 exitCode = 1;
                 finalStatus = "FAILED";
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("[!] FAILED: Explicit symbol mapping export could not be written.");
+                Console.ResetColor();
             }
             else if (isIndeterminate)
             {
                 exitCode = 2;
                 finalStatus = "INDETERMINATE";
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("[!] WARNING: Result is INDETERMINATE. Deobfuscation could not reach a confirmed state.");
+                Console.ResetColor();
             }
-            else if (matrix != null && (!matrix.IsComplete || matrix.HasRequiresDynamicSkipped || matrix.HasUnsupported || matrix.HasNotEvaluated || matrix.HasPartiallyProcessed))
+            else if (matrix != null && matrix.HasNotEvaluated)
             {
+                finalStatus = "UNCONFIRMED";
+                // UNCONFIRMED is exit code 2 by default unless --allow-partial-exit-zero is explicitly specified
                 exitCode = strictExitCodes ? 2 : 0;
-                finalStatus = matrix.HasNotEvaluated ? "UNCONFIRMED" : "PARTIAL_SUCCESS";
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("[!] WARNING: Result is UNCONFIRMED. Structural or behavioral verification is incomplete. Do not treat this execution as a fully verified success.");
+                Console.ResetColor();
+            }
+            else if (matrix != null && (!matrix.IsComplete || matrix.HasRequiresDynamicSkipped || matrix.HasUnsupported || matrix.HasPartiallyProcessed))
+            {
+                finalStatus = "PARTIAL_SUCCESS";
+                exitCode = strictExitCodes ? 2 : 0;
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("[!] WARNING: Result is PARTIAL_SUCCESS. Some protections were skipped or partially processed.");
+                Console.ResetColor();
             }
             else
             {
