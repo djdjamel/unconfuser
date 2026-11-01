@@ -2130,12 +2130,35 @@ namespace ConfuserExKillerRunner.Tests
 
             // Distinct metadata symbols (metric 2)
             var allSymbols = new Dictionary<string, (string Assembly, string Type, string Kind, string Name, bool IsPublic)>(StringComparer.Ordinal);
-            int publicTypesCount = 0, nonPublicTypesCount = 0;
-            int publicMethodsCount = 0, nonPublicMethodsCount = 0;
-            int publicFieldsCount = 0, nonPublicFieldsCount = 0;
-            int publicPropsCount = 0, nonPublicPropsCount = 0;
-            int publicEventsCount = 0, nonPublicEventsCount = 0;
-            int parametersCount = 0;
+            int rawMetadataOccurrences = 0;
+            int collisionCount = 0;
+            var collisions = new List<string>();
+
+            void AddMetadataSymbol(string key, string asm, string type, string kind, string name, bool isPublic)
+            {
+                rawMetadataOccurrences++;
+                if (allSymbols.ContainsKey(key))
+                {
+                    collisionCount++;
+                    collisions.Add(key);
+                    return; // Explicitly reject collision: never overwrite and never count as unique
+                }
+                allSymbols.Add(key, (asm, type, kind, name, isPublic));
+            }
+
+            static bool IsTypeEffectivelyPublic(TypeDef type)
+            {
+                if (type == null) return false;
+                var curr = type;
+                while (curr.IsNested)
+                {
+                    if (!curr.IsNestedPublic)
+                        return false;
+                    curr = curr.DeclaringType;
+                    if (curr == null) return false;
+                }
+                return curr.IsPublic;
+            }
 
             // Process pinned assemblies first and assert exact hash verification
             foreach (var pinned in pinnedManifest)
@@ -2167,8 +2190,7 @@ namespace ConfuserExKillerRunner.Tests
             // Process dynamic compilation and runtime assemblies
             foreach (var dyn in dynamicSources)
             {
-                if (!File.Exists(dyn.FilePath))
-                    continue;
+                Assert.True(File.Exists(dyn.FilePath), $"Mandatory dynamic source assembly not found: {dyn.FilePath}");
 
                 byte[] fileBytes = File.ReadAllBytes(dyn.FilePath);
                 string actualHash = BitConverter.ToString(sha256.ComputeHash(fileBytes)).Replace("-", "").ToLowerInvariant();
@@ -2196,14 +2218,14 @@ namespace ConfuserExKillerRunner.Tests
                     if (string.IsNullOrEmpty(t.Name) || SemanticRenamer.IsCompilerGeneratedIdentifier(t.Name))
                         continue;
 
-                    bool isTypePublic = t.IsPublic || t.IsNestedPublic;
-                    if (isTypePublic) publicTypesCount++; else nonPublicTypesCount++;
+                    bool isTypePublic = IsTypeEffectivelyPublic(t);
 
                     allTextualNames.Add(t.Name.String);
                     if (isTypePublic) publicTextualNames.Add(t.Name.String); else nonPublicTextualNames.Add(t.Name.String);
 
-                    string typeKey = $"{asmName}!{t.FullName}::Type:{t.Name.String}";
-                    allSymbols[typeKey] = (asmName, t.FullName, "Type", t.Name.String, isTypePublic);
+                    string typeKind = t.IsInterface ? "Interface" : (t.IsEnum ? "Enum" : (t.IsValueType ? "Struct" : "Class"));
+                    string typeKey = $"{asmName}!{t.FullName}::Type:{typeKind}:{t.Name.String}";
+                    AddMetadataSymbol(typeKey, asmName, t.FullName, "Type", t.Name.String, isTypePublic);
 
                     foreach (var m in t.Methods)
                     {
@@ -2211,23 +2233,22 @@ namespace ConfuserExKillerRunner.Tests
                             continue;
 
                         bool isMethodPublic = (m.IsPublic || m.IsFamily || m.IsFamilyOrAssembly) && isTypePublic;
-                        if (isMethodPublic) publicMethodsCount++; else nonPublicMethodsCount++;
 
                         allTextualNames.Add(m.Name.String);
                         if (isMethodPublic) publicTextualNames.Add(m.Name.String); else nonPublicTextualNames.Add(m.Name.String);
 
                         string mSig = m.MethodSig?.ToString() ?? "";
                         string methodKey = $"{asmName}!{t.FullName}::Method:{m.Name.String}({mSig})";
-                        allSymbols[methodKey] = (asmName, t.FullName, "Method", m.Name.String, isMethodPublic);
+                        AddMetadataSymbol(methodKey, asmName, t.FullName, "Method", m.Name.String, isMethodPublic);
 
                         foreach (var p in m.Parameters)
                         {
                             if (!string.IsNullOrEmpty(p.Name) && !SemanticRenamer.IsCompilerGeneratedIdentifier(p.Name))
                             {
-                                parametersCount++;
                                 allTextualNames.Add(p.Name);
-                                string paramKey = $"{asmName}!{t.FullName}::{m.Name.String}:Param:{p.Name}";
-                                allSymbols[paramKey] = (asmName, t.FullName, "Parameter", p.Name, isMethodPublic);
+                                string pType = p.Type?.ToString() ?? "";
+                                string paramKey = $"{asmName}!{t.FullName}::{m.Name.String}({mSig}):Param[{p.Index}]:{pType}:{p.Name}";
+                                AddMetadataSymbol(paramKey, asmName, t.FullName, "Parameter", p.Name, isMethodPublic);
                             }
                         }
                     }
@@ -2239,14 +2260,13 @@ namespace ConfuserExKillerRunner.Tests
 
                         // Classify field by its true metadata visibility
                         bool isFieldPublic = (f.IsPublic || f.IsFamily || f.IsFamilyOrAssembly) && isTypePublic;
-                        if (isFieldPublic) publicFieldsCount++; else nonPublicFieldsCount++;
 
                         allTextualNames.Add(f.Name.String);
                         if (isFieldPublic) publicTextualNames.Add(f.Name.String); else nonPublicTextualNames.Add(f.Name.String);
 
-                        string fSig = f.FieldSig?.ToString() ?? "";
+                        string fSig = f.FieldSig?.Type?.ToString() ?? f.FieldSig?.ToString() ?? "";
                         string fieldKey = $"{asmName}!{t.FullName}::Field:{f.Name.String}:{fSig}";
-                        allSymbols[fieldKey] = (asmName, t.FullName, "Field", f.Name.String, isFieldPublic);
+                        AddMetadataSymbol(fieldKey, asmName, t.FullName, "Field", f.Name.String, isFieldPublic);
                     }
 
                     foreach (var prop in t.Properties)
@@ -2257,13 +2277,13 @@ namespace ConfuserExKillerRunner.Tests
                         // Classify property by its getter/setter visibility
                         bool isPropPublic = ((prop.GetMethod != null && (prop.GetMethod.IsPublic || prop.GetMethod.IsFamily)) ||
                                              (prop.SetMethod != null && (prop.SetMethod.IsPublic || prop.SetMethod.IsFamily))) && isTypePublic;
-                        if (isPropPublic) publicPropsCount++; else nonPublicPropsCount++;
 
                         allTextualNames.Add(prop.Name.String);
                         if (isPropPublic) publicTextualNames.Add(prop.Name.String); else nonPublicTextualNames.Add(prop.Name.String);
 
-                        string propKey = $"{asmName}!{t.FullName}::Property:{prop.Name.String}";
-                        allSymbols[propKey] = (asmName, t.FullName, "Property", prop.Name.String, isPropPublic);
+                        string propSig = prop.PropertySig?.ToString() ?? "";
+                        string propKey = $"{asmName}!{t.FullName}::Property:{prop.Name.String}({propSig})";
+                        AddMetadataSymbol(propKey, asmName, t.FullName, "Property", prop.Name.String, isPropPublic);
                     }
 
                     foreach (var ev in t.Events)
@@ -2274,16 +2294,49 @@ namespace ConfuserExKillerRunner.Tests
                         // Classify event by its add/remove method visibility
                         bool isEventPublic = ((ev.AddMethod != null && (ev.AddMethod.IsPublic || ev.AddMethod.IsFamily)) ||
                                               (ev.RemoveMethod != null && (ev.RemoveMethod.IsPublic || ev.RemoveMethod.IsFamily))) && isTypePublic;
-                        if (isEventPublic) publicEventsCount++; else nonPublicEventsCount++;
 
                         allTextualNames.Add(ev.Name.String);
                         if (isEventPublic) publicTextualNames.Add(ev.Name.String); else nonPublicTextualNames.Add(ev.Name.String);
 
-                        string eventKey = $"{asmName}!{t.FullName}::Event:{ev.Name.String}";
-                        allSymbols[eventKey] = (asmName, t.FullName, "Event", ev.Name.String, isEventPublic);
+                        string evType = ev.EventType?.FullName ?? "";
+                        string eventKey = $"{asmName}!{t.FullName}::Event:{ev.Name.String}:{evType}";
+                        AddMetadataSymbol(eventKey, asmName, t.FullName, "Event", ev.Name.String, isEventPublic);
                     }
                 }
             }
+
+            // Breakdown calculated strictly from genuinely unique symbols
+            int uniquePublicTypes = allSymbols.Values.Count(s => s.Kind == "Type" && s.IsPublic);
+            int uniqueNonPublicTypes = allSymbols.Values.Count(s => s.Kind == "Type" && !s.IsPublic);
+
+            int uniquePublicMethods = allSymbols.Values.Count(s => s.Kind == "Method" && s.IsPublic);
+            int uniqueNonPublicMethods = allSymbols.Values.Count(s => s.Kind == "Method" && !s.IsPublic);
+
+            int uniquePublicFields = allSymbols.Values.Count(s => s.Kind == "Field" && s.IsPublic);
+            int uniqueNonPublicFields = allSymbols.Values.Count(s => s.Kind == "Field" && !s.IsPublic);
+
+            int uniquePublicProps = allSymbols.Values.Count(s => s.Kind == "Property" && s.IsPublic);
+            int uniqueNonPublicProps = allSymbols.Values.Count(s => s.Kind == "Property" && !s.IsPublic);
+
+            int uniquePublicEvents = allSymbols.Values.Count(s => s.Kind == "Event" && s.IsPublic);
+            int uniqueNonPublicEvents = allSymbols.Values.Count(s => s.Kind == "Event" && !s.IsPublic);
+
+            int uniquePublicParams = allSymbols.Values.Count(s => s.Kind == "Parameter" && s.IsPublic);
+            int uniqueNonPublicParams = allSymbols.Values.Count(s => s.Kind == "Parameter" && !s.IsPublic);
+
+            int totalUniqueCategoriesSum = uniquePublicTypes + uniqueNonPublicTypes +
+                                           uniquePublicMethods + uniqueNonPublicMethods +
+                                           uniquePublicFields + uniqueNonPublicFields +
+                                           uniquePublicProps + uniqueNonPublicProps +
+                                           uniquePublicEvents + uniqueNonPublicEvents +
+                                           uniquePublicParams + uniqueNonPublicParams;
+
+            // Mandatory assertions:
+            // 1. Strict equality: total unique metadata symbols equals sum of all unique categories
+            Assert.Equal(allSymbols.Count, totalUniqueCategoriesSum);
+
+            // 2. Strict ZERO silent collisions on complete metadata identities across the reference corpus
+            Assert.Equal(0, collisionCount);
 
             // Assert corpus scale: distinct metadata symbols >= 15000 and distinct textual names >= 15000
             Assert.True(allSymbols.Count >= 15000, $"Metadata symbols corpus size too small: {allSymbols.Count}");
@@ -2335,6 +2388,8 @@ namespace ConfuserExKillerRunner.Tests
                 MetadataSymbolMetrics = new
                 {
                     TotalMetadataSymbols = allSymbols.Count,
+                    RawOccurrences = rawMetadataOccurrences,
+                    CollisionCount = collisionCount,
                     PublicSymbolsCount = publicSymbols.Count,
                     NonPublicSymbolsCount = nonPublicSymbols.Count,
                     AllSymbolsFalsePositiveCount = allFlaggedSymbols.Count,
@@ -2348,21 +2403,24 @@ namespace ConfuserExKillerRunner.Tests
                 {
                     Public = new
                     {
-                        Types = publicTypesCount,
-                        Methods = publicMethodsCount,
-                        Fields = publicFieldsCount,
-                        Properties = publicPropsCount,
-                        Events = publicEventsCount
+                        Types = uniquePublicTypes,
+                        Methods = uniquePublicMethods,
+                        Fields = uniquePublicFields,
+                        Properties = uniquePublicProps,
+                        Events = uniquePublicEvents,
+                        Parameters = uniquePublicParams
                     },
                     NonPublic = new
                     {
-                        Types = nonPublicTypesCount,
-                        Methods = nonPublicMethodsCount,
-                        Fields = nonPublicFieldsCount,
-                        Properties = nonPublicPropsCount,
-                        Events = nonPublicEventsCount
+                        Types = uniqueNonPublicTypes,
+                        Methods = uniqueNonPublicMethods,
+                        Fields = uniqueNonPublicFields,
+                        Properties = uniqueNonPublicProps,
+                        Events = uniqueNonPublicEvents,
+                        Parameters = uniqueNonPublicParams
                     },
-                    Parameters = parametersCount
+                    TotalUniqueSymbols = allSymbols.Count,
+                    SumOfCategories = totalUniqueCategoriesSum
                 },
                 FlaggedSample = allFlaggedSymbols.Take(25).Select(s => $"{s.Key} => {s.Value.Name}").ToList(),
                 PublicFlaggedSymbols = publicFlaggedSymbols.Select(s => $"{s.Assembly}!{s.Type}::{s.Kind}:{s.Name}").ToList()
@@ -2450,6 +2508,136 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Equal("PostMqttTelemetry", postMethod.Name.String);
             Assert.Equal("BgpMqttGateway", gatewayType.Name.String);
             Assert.Equal("StartTcpUdpStream", startMethod.Name.String);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_34_MetadataSymbolIdentity_DisambiguationAndCollisionDetection()
+        {
+            var module = new ModuleDefUser("DisambiguationTest.dll");
+
+            // 1. Two overloaded methods with a parameter bearing the exact same name
+            var workerType = new TypeDefUser("TestApp", "WorkerService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(workerType);
+
+            var methodInt = new MethodDefUser("Execute", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.Int32));
+            var param1 = new ParamDefUser("timeout", 1);
+            methodInt.ParamDefs.Add(param1);
+            methodInt.Parameters[1].Name = "timeout";
+            workerType.Methods.Add(methodInt);
+
+            var methodString = new MethodDefUser("Execute", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String));
+            var param2 = new ParamDefUser("timeout", 1);
+            methodString.ParamDefs.Add(param2);
+            methodString.Parameters[1].Name = "timeout";
+            workerType.Methods.Add(methodString);
+
+            // Compute full metadata parameter keys
+            string sigInt = methodInt.MethodSig.ToString();
+            string sigStr = methodString.MethodSig.ToString();
+            string keyParamInt = $"TestAsm!TestApp.WorkerService::Execute({sigInt}):Param[1]:System.Int32:timeout";
+            string keyParamStr = $"TestAsm!TestApp.WorkerService::Execute({sigStr}):Param[1]:System.String:timeout";
+
+            Assert.NotEqual(keyParamInt, keyParamStr);
+
+            // 2. Two indexers/properties bearing the same name but distinct signatures
+            var indexerInt = new PropertyDefUser("Item", new PropertySig(true, module.CorLibTypes.Int32, module.CorLibTypes.Int32));
+            var indexerStr = new PropertyDefUser("Item", new PropertySig(true, module.CorLibTypes.String, module.CorLibTypes.String));
+            workerType.Properties.Add(indexerInt);
+            workerType.Properties.Add(indexerStr);
+
+            string keyPropInt = $"TestAsm!TestApp.WorkerService::Property:Item({indexerInt.PropertySig})";
+            string keyPropStr = $"TestAsm!TestApp.WorkerService::Property:Item({indexerStr.PropertySig})";
+
+            Assert.NotEqual(keyPropInt, keyPropStr);
+
+            // 3. Two events of same name in distinct metadata contexts (different declaring types)
+            var publisherType = new TypeDefUser("TestApp", "Publisher", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(publisherType);
+            var eventA = new EventDefUser("StatusChanged", new TypeRefUser(module, "System", "EventHandler", module.CorLibTypes.AssemblyRef));
+            workerType.Events.Add(eventA);
+            var eventB = new EventDefUser("StatusChanged", new TypeRefUser(module, "System", "EventHandler", module.CorLibTypes.AssemblyRef));
+            publisherType.Events.Add(eventB);
+
+            string keyEventA = $"TestAsm!TestApp.WorkerService::Event:StatusChanged:{eventA.EventType?.FullName}";
+            string keyEventB = $"TestAsm!TestApp.Publisher::Event:StatusChanged:{eventB.EventType?.FullName}";
+
+            Assert.NotEqual(keyEventA, keyEventB);
+
+            // 4. Public type nested inside a non-public container
+            var internalOuter = new TypeDefUser("TestApp", "InternalOuter", module.CorLibTypes.Object.TypeDefOrRef)
+            {
+                Attributes = TypeAttributes.NotPublic | TypeAttributes.Class
+            };
+            module.Types.Add(internalOuter);
+
+            var nestedPublic = new TypeDefUser("NestedPublic", module.CorLibTypes.Object.TypeDefOrRef)
+            {
+                Attributes = TypeAttributes.NestedPublic | TypeAttributes.Class
+            };
+            internalOuter.NestedTypes.Add(nestedPublic);
+
+            // Verify effective visibility logic: nested public within internal outer is NOT effectively public
+            static bool IsTypeEffectivelyPublic(TypeDef type)
+            {
+                if (type == null) return false;
+                var curr = type;
+                while (curr.IsNested)
+                {
+                    if (!curr.IsNestedPublic)
+                        return false;
+                    curr = curr.DeclaringType;
+                    if (curr == null) return false;
+                }
+                return curr.IsPublic;
+            }
+
+            Assert.True(nestedPublic.IsNestedPublic);
+            Assert.False(internalOuter.IsPublic);
+            Assert.False(IsTypeEffectivelyPublic(nestedPublic), "Public type nested in non-public container must NOT be effectively public.");
+
+            // 5 & 6. Verification of equality between total and sum of categories + collision detection
+            var testSymbols = new Dictionary<string, (string Asm, string Type, string Kind, string Name, bool IsPublic)>(StringComparer.Ordinal);
+            int detectedCollisions = 0;
+
+            void AddTestSymbol(string key, string asm, string type, string kind, string name, bool isPub)
+            {
+                if (testSymbols.ContainsKey(key))
+                {
+                    detectedCollisions++;
+                    return; // Reject overwrite
+                }
+                testSymbols.Add(key, (asm, type, kind, name, isPub));
+            }
+
+            AddTestSymbol(keyParamInt, "TestAsm", "WorkerService", "Parameter", "timeout", true);
+            AddTestSymbol(keyParamStr, "TestAsm", "WorkerService", "Parameter", "timeout", true);
+            AddTestSymbol(keyPropInt, "TestAsm", "WorkerService", "Property", "Item", true);
+            AddTestSymbol(keyPropStr, "TestAsm", "WorkerService", "Property", "Item", true);
+            AddTestSymbol(keyEventA, "TestAsm", "WorkerService", "Event", "StatusChanged", true);
+            AddTestSymbol(keyEventB, "TestAsm", "Publisher", "Event", "StatusChanged", true);
+            AddTestSymbol("TestAsm!TestApp.WorkerService::Type:Class:WorkerService", "TestAsm", "WorkerService", "Type", "WorkerService", true);
+            AddTestSymbol($"TestAsm!TestApp.WorkerService::Method:Execute({sigInt})", "TestAsm", "WorkerService", "Method", "Execute", true);
+            AddTestSymbol("TestAsm!TestApp.WorkerService::Field:_count:System.Int32", "TestAsm", "WorkerService", "Field", "_count", true);
+
+            // Verify collision detection by attempting to register duplicate key
+            Assert.Equal(0, detectedCollisions);
+            AddTestSymbol(keyParamInt, "TestAsm", "WorkerService", "Parameter", "timeout", true); // Duplicate attempt
+            Assert.Equal(1, detectedCollisions);
+
+            // Calculate category sum from unique symbols
+            int uTypes = testSymbols.Values.Count(s => s.Kind == "Type");
+            int uMethods = testSymbols.Values.Count(s => s.Kind == "Method");
+            int uFields = testSymbols.Values.Count(s => s.Kind == "Field");
+            int uProps = testSymbols.Values.Count(s => s.Kind == "Property");
+            int uEvents = testSymbols.Values.Count(s => s.Kind == "Event");
+            int uParams = testSymbols.Values.Count(s => s.Kind == "Parameter");
+
+            int sumCategories = uTypes + uMethods + uFields + uProps + uEvents + uParams;
+
+            // Strict equality assertion
+            Assert.Equal(testSymbols.Count, sumCategories);
+            Assert.Equal(9, testSymbols.Count);
         }
 
         #endregion

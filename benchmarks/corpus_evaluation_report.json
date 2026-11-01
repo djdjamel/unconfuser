@@ -1,5 +1,5 @@
 {
-  "EvaluationDate": "2026-11-01T13:43:09.8159755Z",
+  "EvaluationDate": "2026-11-01T16:24:15.2962897Z",
   "ManifestVerification": {
     "PinnedAssembliesVerified": true,
     "PinnedAssembliesCount": 2
@@ -30,10 +30,10 @@
       "Version": "1.0.0.0",
       "LogicalPath": "ConfuserExKillerRunner/bin/Release/net8.0-windows/ConfuserExKillerRunner.dll",
       "Category": "DynamicCompilation",
-      "Sha256": "f9d73b52f941a6657536d7d204a77a31f8bf17f0bb3712ab93db60cfb02aa991",
+      "Sha256": "d3741721b129e58f15817d4c55ec8c53ff6b885de4a1b72ee56f1049b5c54dc7",
       "Sha256Verified": null,
       "Provenance": "Unconfuser deobfuscation engine runner",
-      "SizeBytes": 418816
+      "SizeBytes": 423936
     },
     {
       "Name": "System.Private.CoreLib.dll",
@@ -47,54 +47,59 @@
     }
   ],
   "TextualNameMetrics": {
-    "TotalUniqueNames": 27547,
-    "PublicNamesCount": 9367,
-    "NonPublicNamesCount": 15993,
+    "TotalUniqueNames": 27562,
+    "PublicNamesCount": 9100,
+    "NonPublicNamesCount": 16272,
     "AllNamesFalsePositiveCount": 47,
-    "AllNamesFalsePositiveRate": 0.0017061749010781574,
+    "AllNamesFalsePositiveRate": 0.0017052463536753502,
     "PublicFalsePositiveCount": 3,
-    "PublicFalsePositiveRate": 0.00032027329988256647,
+    "PublicFalsePositiveRate": 0.00032967032967032967,
     "NonPublicFalsePositiveCount": 38,
-    "NonPublicFalsePositiveRate": 0.0023760395172888137
+    "NonPublicFalsePositiveRate": 0.002335299901671583
   },
   "MetadataSymbolMetrics": {
-    "TotalMetadataSymbols": 86592,
-    "PublicSymbolsCount": 42080,
-    "NonPublicSymbolsCount": 44512,
+    "TotalMetadataSymbols": 105181,
+    "RawOccurrences": 105181,
+    "CollisionCount": 0,
+    "PublicSymbolsCount": 58336,
+    "NonPublicSymbolsCount": 46845,
     "AllSymbolsFalsePositiveCount": 55,
-    "AllSymbolsFalsePositiveRate": 0.0006351626016260162,
+    "AllSymbolsFalsePositiveRate": 0.0005229081297953052,
     "PublicFalsePositiveCount": 3,
-    "PublicFalsePositiveRate": 7.129277566539924E-05,
+    "PublicFalsePositiveRate": 5.142622051563357E-05,
     "NonPublicFalsePositiveCount": 52,
-    "NonPublicFalsePositiveRate": 0.0011682242990654205
+    "NonPublicFalsePositiveRate": 0.0011100437613405913
   },
   "SymbolBreakdown": {
     "Public": {
-      "Types": 1942,
-      "Methods": 17495,
-      "Fields": 4127,
-      "Properties": 3919,
-      "Events": 20
+      "Types": 1908,
+      "Methods": 17492,
+      "Fields": 3843,
+      "Properties": 3914,
+      "Events": 20,
+      "Parameters": 31159
     },
     "NonPublic": {
-      "Types": 1219,
-      "Methods": 12525,
-      "Fields": 7058,
-      "Properties": 3640,
-      "Events": 13
+      "Types": 1254,
+      "Methods": 12533,
+      "Fields": 7342,
+      "Properties": 3650,
+      "Events": 13,
+      "Parameters": 22053
     },
-    "Parameters": 53200
+    "TotalUniqueSymbols": 105181,
+    "SumOfCategories": 105181
   },
   "FlaggedSample": [
-    "dnlib.dll!dnlib.DotNet.Pdb.Dss.IMetaDataImport::GetPinvokeMap:Param:pmrImportDLL =\u003E pmrImportDLL",
-    "dnlib.dll!dnlib.DotNet.Pdb.Dss.IMetaDataEmit::DefinePinvokeMap:Param:mrImportDLL =\u003E mrImportDLL",
-    "dnlib.dll!dnlib.DotNet.Pdb.Dss.IMetaDataEmit::SetPinvokeMap:Param:mrImportDLL =\u003E mrImportDLL",
-    "dnlib.dll!dnlib.DotNet.Pdb.Dss.MDEmitter::dnlib.DotNet.Pdb.Dss.IMetaDataImport.GetPinvokeMap:Param:pmrImportDLL =\u003E pmrImportDLL",
-    "dnlib.dll!dnlib.DotNet.Pdb.Dss.MDEmitter::dnlib.DotNet.Pdb.Dss.IMetaDataEmit.DefinePinvokeMap:Param:mrImportDLL =\u003E mrImportDLL",
-    "dnlib.dll!dnlib.DotNet.Pdb.Dss.MDEmitter::dnlib.DotNet.Pdb.Dss.IMetaDataEmit.SetPinvokeMap:Param:mrImportDLL =\u003E mrImportDLL",
+    "dnlib.dll!dnlib.DotNet.Pdb.Dss.IMetaDataImport::GetPinvokeMap(System.Void (System.UInt32,System.UInt32\u0026,System.IntPtr,System.UInt32,System.UInt32\u0026,System.UInt32\u0026)):Param[6]:System.UInt32\u0026:pmrImportDLL =\u003E pmrImportDLL",
+    "dnlib.dll!dnlib.DotNet.Pdb.Dss.IMetaDataEmit::DefinePinvokeMap(System.Void (System.UInt32,System.UInt32,System.String,System.UInt32)):Param[4]:System.UInt32:mrImportDLL =\u003E mrImportDLL",
+    "dnlib.dll!dnlib.DotNet.Pdb.Dss.IMetaDataEmit::SetPinvokeMap(System.Void (System.UInt32,System.UInt32,System.String,System.UInt32)):Param[4]:System.UInt32:mrImportDLL =\u003E mrImportDLL",
+    "dnlib.dll!dnlib.DotNet.Pdb.Dss.MDEmitter::dnlib.DotNet.Pdb.Dss.IMetaDataImport.GetPinvokeMap(System.Void (System.UInt32,System.UInt32\u0026,System.IntPtr,System.UInt32,System.UInt32\u0026,System.UInt32\u0026)):Param[6]:System.UInt32\u0026:pmrImportDLL =\u003E pmrImportDLL",
+    "dnlib.dll!dnlib.DotNet.Pdb.Dss.MDEmitter::dnlib.DotNet.Pdb.Dss.IMetaDataEmit.DefinePinvokeMap(System.Void (System.UInt32,System.UInt32,System.String,System.UInt32)):Param[4]:System.UInt32:mrImportDLL =\u003E mrImportDLL",
+    "dnlib.dll!dnlib.DotNet.Pdb.Dss.MDEmitter::dnlib.DotNet.Pdb.Dss.IMetaDataEmit.SetPinvokeMap(System.Void (System.UInt32,System.UInt32,System.String,System.UInt32)):Param[4]:System.UInt32:mrImportDLL =\u003E mrImportDLL",
     "ConfuserExKillerRunner.dll!ConfuserExKillerRunner.Core.JobObject/STARTUPINFO::Field:hStdInput:System.IntPtr =\u003E hStdInput",
-    "System.Private.CoreLib.dll!Interop/Kernel32::CompareStringEx:Param:dwCmpFlags =\u003E dwCmpFlags",
-    "System.Private.CoreLib.dll!Interop/Kernel32::GetStdHandle:Param:nStdHandle =\u003E nStdHandle",
+    "System.Private.CoreLib.dll!Interop/Kernel32::CompareStringEx(System.Int32 (System.Char*,System.UInt32,System.Char*,System.Int32,System.Char*,System.Int32,System.Void*,System.Void*,System.IntPtr)):Param[1]:System.UInt32:dwCmpFlags =\u003E dwCmpFlags",
+    "System.Private.CoreLib.dll!Interop/Kernel32::GetStdHandle(System.IntPtr (System.Int32)):Param[0]:System.Int32:nStdHandle =\u003E nStdHandle",
     "System.Private.CoreLib.dll!Interop/NtDll/RTL_OSVERSIONINFOEX::Field:szCSDVersion:Interop/NtDll/RTL_OSVERSIONINFOEX/\u003CszCSDVersion\u003Ee__FixedBuffer =\u003E szCSDVersion",
     "System.Private.CoreLib.dll!System.Signature::Field:m_pMethod:System.RuntimeMethodHandleInternal =\u003E m_pMethod",
     "System.Private.CoreLib.dll!System.DateTimeParse::Method:GetDayOfNNN(System.Boolean (System.DateTimeResult\u0026,System.DateTimeRawInfo\u0026,System.Globalization.DateTimeFormatInfo)) =\u003E GetDayOfNNN",
@@ -103,11 +108,11 @@
     "System.Private.CoreLib.dll!System.DateTimeParse::Method:GetDateOfDSN(System.Boolean (System.DateTimeResult\u0026,System.DateTimeRawInfo\u0026)) =\u003E GetDateOfDSN",
     "System.Private.CoreLib.dll!System.DateTimeParse::Method:GetDateOfNDS(System.Boolean (System.DateTimeResult\u0026,System.DateTimeRawInfo\u0026)) =\u003E GetDateOfNDS",
     "System.Private.CoreLib.dll!System.DateTimeParse::Method:GetDateOfNNDS(System.Boolean (System.DateTimeResult\u0026,System.DateTimeRawInfo\u0026,System.Globalization.DateTimeFormatInfo)) =\u003E GetDateOfNNDS",
-    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_InvalidFieldFail =\u003E RFLCT_InvalidFieldFail",
-    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_InvalidPropFail =\u003E RFLCT_InvalidPropFail",
-    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_Targ_ITargMismatch =\u003E RFLCT_Targ_ITargMismatch",
-    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_Targ_StatFldReqTarg =\u003E RFLCT_Targ_StatFldReqTarg",
-    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_Targ_StatMethReqTarg =\u003E RFLCT_Targ_StatMethReqTarg",
+    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_InvalidFieldFail(System.String ()) =\u003E RFLCT_InvalidFieldFail",
+    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_InvalidPropFail(System.String ()) =\u003E RFLCT_InvalidPropFail",
+    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_Targ_ITargMismatch(System.String ()) =\u003E RFLCT_Targ_ITargMismatch",
+    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_Targ_StatFldReqTarg(System.String ()) =\u003E RFLCT_Targ_StatFldReqTarg",
+    "System.Private.CoreLib.dll!System.SR::Property:RFLCT_Targ_StatMethReqTarg(System.String ()) =\u003E RFLCT_Targ_StatMethReqTarg",
     "System.Private.CoreLib.dll!System.Numerics.BitOperations/Crc32Fallback::Field:s_crcTable:System.UInt32[] =\u003E s_crcTable",
     "System.Private.CoreLib.dll!System.Globalization.CultureData::Field:_sPM2359:System.String =\u003E _sPM2359",
     "System.Private.CoreLib.dll!System.Globalization.DateTimeFormatInfo::Field:s_zhtwDTFI:System.Globalization.DateTimeFormatInfo modreq(System.Runtime.CompilerServices.IsVolatile) =\u003E s_zhtwDTFI"
