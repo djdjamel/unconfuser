@@ -1,10 +1,10 @@
 {
-  "EvaluationDate": "2026-11-01T08:38:21.1337369Z",
-  "TotalUniqueIdentifiers": 27518,
+  "EvaluationDate": "2026-11-01T08:40:00.7426346Z",
+  "TotalUniqueIdentifiers": 27521,
   "TotalPublicTypesAndMethods": 5234,
   "TotalNonPublicMembers": 16131,
   "AllIdentifiersFalsePositiveCount": 47,
-  "AllIdentifiersFalsePositiveRate": 0.0017079729631513919,
+  "AllIdentifiersFalsePositiveRate": 0.0017077867810035973,
   "PublicFalsePositiveCount": 0,
   "PublicFalsePositiveRate": 0,
   "NonPublicFalsePositiveCount": 35,
@@ -30,9 +30,9 @@
       "Name": "ConfuserExKillerRunner.dll",
       "Version": "1.0.0.0",
       "LogicalPath": "C:\\Users\\acer\\claude\\xp_src\\ConfuserExKillerRunner.Tests\\bin\\Release\\net8.0-windows\\ConfuserExKillerRunner.dll",
-      "Sha256": "510414fd91943c080070196e026edecadf04faa29974f9aed98013eff811bd99",
+      "Sha256": "38eb488574e9f28c2c53e50820cbfe39d02de520b75ada8226d94ee7738355cd",
       "Provenance": "Unconfuser deobfuscation engine runner",
-      "SizeBytes": 412672
+      "SizeBytes": 413696
     },
     {
       "Name": "System.Private.CoreLib.dll",

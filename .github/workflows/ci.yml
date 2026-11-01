@@ -66,6 +66,9 @@ jobs:
     - name: Verify Benign Baseline Reference Safely
       run: powershell -ExecutionPolicy Bypass -File scripts/Verify-DeobfuscatedBinary.ps1 -Target benchmarks/BenignSample/bin/Release/net48/BenignSample.exe -ReportJson benchmarks/verify_benign_report.json -CommitHash "${{ github.sha }}"
 
+    - name: Verify PEVerify Availability and Execute Official Runner Verification
+      run: powershell -ExecutionPolicy Bypass -File scripts/Verify-PEVerifyOnRunner.ps1 -Target benchmarks/BenignSample/bin/Release/net48/BenignSample.exe -LogPath benchmarks/peverify_runner_verification.log
+
     - name: Run Python Pytest Suite
       if: success() || failure()
       run: python -m pytest tests -v
@@ -84,5 +87,8 @@ jobs:
           benchmarks/benchmark_report.json
           benchmarks/verify_benign_report.json
           benchmarks/verify_deobfuscated_report.json
+          benchmarks/peverify_runner_verification.log
+          benchmarks/corpus_evaluation_report.json
+
 
 

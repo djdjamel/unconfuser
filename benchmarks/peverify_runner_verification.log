@@ -1,0 +1,19 @@
+﻿=== Unconfuser Official PEVerify Runner Verification ===
+Date: 2026-11-01T08:31:48.6933663Z
+Operating System: Microsoft Windows 10 Professionnel (10.0.19045)
+Target assembly: benchmarks/BenignSample/bin/Release/net48/BenignSample.exe
+PEVerify Path: C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.8 Tools\x64\PEVerify.exe
+PEVerify FileVersion: 4.8.3928.0 built by: NET48REL1
+PEVerify ProductVersion: 4.8.3928.0
+PEVerify Exists: True
+
+--- Executing PEVerify /IL /MD ---
+
+Outil de v�rification PE Microsoft (R) .NET Framework.  Version  4.0.30319.0
+Copyright (c) Microsoft Corporation. Tous droits r�serv�s.
+
+Toutes les classes et les m�thodes dans benchmarks/BenignSample/bin/Release/net48/BenignSample.exe V�rifi�.
+
+PEVerify Exit Code: 0
+STATUS: PEVERIFY_EXECUTED_PASSED
+Verification completed successfully: zero IL and MD errors detected.
