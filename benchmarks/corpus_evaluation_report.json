@@ -1,5 +1,5 @@
 {
-  "EvaluationDate": "2026-11-01T16:24:15.2962897Z",
+  "EvaluationDate": "2026-11-01T17:37:37.2974440Z",
   "ManifestVerification": {
     "PinnedAssembliesVerified": true,
     "PinnedAssembliesCount": 2
@@ -30,10 +30,10 @@
       "Version": "1.0.0.0",
       "LogicalPath": "ConfuserExKillerRunner/bin/Release/net8.0-windows/ConfuserExKillerRunner.dll",
       "Category": "DynamicCompilation",
-      "Sha256": "d3741721b129e58f15817d4c55ec8c53ff6b885de4a1b72ee56f1049b5c54dc7",
+      "Sha256": "98137c114c44cee6e73970dc7781114e14c60b65c754aa58af66a724a458b2d3",
       "Sha256Verified": null,
       "Provenance": "Unconfuser deobfuscation engine runner",
-      "SizeBytes": 423936
+      "SizeBytes": 424960
     },
     {
       "Name": "System.Private.CoreLib.dll",
@@ -47,28 +47,30 @@
     }
   ],
   "TextualNameMetrics": {
-    "TotalUniqueNames": 27562,
+    "TotalUniqueNames": 27567,
     "PublicNamesCount": 9100,
-    "NonPublicNamesCount": 16272,
+    "NonPublicNamesCount": 16278,
     "AllNamesFalsePositiveCount": 47,
-    "AllNamesFalsePositiveRate": 0.0017052463536753502,
+    "AllNamesFalsePositiveRate": 0.0017049370624297167,
     "PublicFalsePositiveCount": 3,
     "PublicFalsePositiveRate": 0.00032967032967032967,
     "NonPublicFalsePositiveCount": 38,
-    "NonPublicFalsePositiveRate": 0.002335299901671583
+    "NonPublicFalsePositiveRate": 0.0023344391202850473
   },
   "MetadataSymbolMetrics": {
-    "TotalMetadataSymbols": 105181,
-    "RawOccurrences": 105181,
+    "ScopeDescription": "Analyzed eligible metadata symbols (excluding compiler-generated members, anonymous parameters, and runtime special names; not the raw entirety of ECMA-335 tables)",
+    "TotalEligibleMetadataSymbols": 105184,
+    "TotalMetadataSymbols": 105184,
+    "RawOccurrences": 105184,
     "CollisionCount": 0,
     "PublicSymbolsCount": 58336,
-    "NonPublicSymbolsCount": 46845,
+    "NonPublicSymbolsCount": 46848,
     "AllSymbolsFalsePositiveCount": 55,
-    "AllSymbolsFalsePositiveRate": 0.0005229081297953052,
+    "AllSymbolsFalsePositiveRate": 0.000522893215698205,
     "PublicFalsePositiveCount": 3,
     "PublicFalsePositiveRate": 5.142622051563357E-05,
     "NonPublicFalsePositiveCount": 52,
-    "NonPublicFalsePositiveRate": 0.0011100437613405913
+    "NonPublicFalsePositiveRate": 0.0011099726775956283
   },
   "SymbolBreakdown": {
     "Public": {
@@ -80,15 +82,15 @@
       "Parameters": 31159
     },
     "NonPublic": {
-      "Types": 1254,
-      "Methods": 12533,
-      "Fields": 7342,
+      "Types": 1255,
+      "Methods": 12531,
+      "Fields": 7349,
       "Properties": 3650,
       "Events": 13,
-      "Parameters": 22053
+      "Parameters": 22050
     },
-    "TotalUniqueSymbols": 105181,
-    "SumOfCategories": 105181
+    "TotalUniqueSymbols": 105184,
+    "SumOfCategories": 105184
   },
   "FlaggedSample": [
     "dnlib.dll!dnlib.DotNet.Pdb.Dss.IMetaDataImport::GetPinvokeMap(System.Void (System.UInt32,System.UInt32\u0026,System.IntPtr,System.UInt32,System.UInt32\u0026,System.UInt32\u0026)):Param[6]:System.UInt32\u0026:pmrImportDLL =\u003E pmrImportDLL",

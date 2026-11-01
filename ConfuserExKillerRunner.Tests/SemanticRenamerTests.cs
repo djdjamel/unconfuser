@@ -2274,9 +2274,9 @@ namespace ConfuserExKillerRunner.Tests
                         if (string.IsNullOrEmpty(prop.Name) || SemanticRenamer.IsCompilerGeneratedIdentifier(prop.Name))
                             continue;
 
-                        // Classify property by its getter/setter visibility
-                        bool isPropPublic = ((prop.GetMethod != null && (prop.GetMethod.IsPublic || prop.GetMethod.IsFamily)) ||
-                                             (prop.SetMethod != null && (prop.SetMethod.IsPublic || prop.SetMethod.IsFamily))) && isTypePublic;
+                        // Classify property by its getter/setter visibility (Public, Family, FamilyOrAssembly; excludes FamilyAndAssembly)
+                        bool isPropPublic = ((prop.GetMethod != null && (prop.GetMethod.IsPublic || prop.GetMethod.IsFamily || prop.GetMethod.IsFamilyOrAssembly)) ||
+                                             (prop.SetMethod != null && (prop.SetMethod.IsPublic || prop.SetMethod.IsFamily || prop.SetMethod.IsFamilyOrAssembly))) && isTypePublic;
 
                         allTextualNames.Add(prop.Name.String);
                         if (isPropPublic) publicTextualNames.Add(prop.Name.String); else nonPublicTextualNames.Add(prop.Name.String);
@@ -2291,9 +2291,9 @@ namespace ConfuserExKillerRunner.Tests
                         if (string.IsNullOrEmpty(ev.Name) || SemanticRenamer.IsCompilerGeneratedIdentifier(ev.Name))
                             continue;
 
-                        // Classify event by its add/remove method visibility
-                        bool isEventPublic = ((ev.AddMethod != null && (ev.AddMethod.IsPublic || ev.AddMethod.IsFamily)) ||
-                                              (ev.RemoveMethod != null && (ev.RemoveMethod.IsPublic || ev.RemoveMethod.IsFamily))) && isTypePublic;
+                        // Classify event by its add/remove method visibility (Public, Family, FamilyOrAssembly; excludes FamilyAndAssembly)
+                        bool isEventPublic = ((ev.AddMethod != null && (ev.AddMethod.IsPublic || ev.AddMethod.IsFamily || ev.AddMethod.IsFamilyOrAssembly)) ||
+                                              (ev.RemoveMethod != null && (ev.RemoveMethod.IsPublic || ev.RemoveMethod.IsFamily || ev.RemoveMethod.IsFamilyOrAssembly))) && isTypePublic;
 
                         allTextualNames.Add(ev.Name.String);
                         if (isEventPublic) publicTextualNames.Add(ev.Name.String); else nonPublicTextualNames.Add(ev.Name.String);
@@ -2387,6 +2387,8 @@ namespace ConfuserExKillerRunner.Tests
                 },
                 MetadataSymbolMetrics = new
                 {
+                    ScopeDescription = "Analyzed eligible metadata symbols (excluding compiler-generated members, anonymous parameters, and runtime special names; not the raw entirety of ECMA-335 tables)",
+                    TotalEligibleMetadataSymbols = allSymbols.Count,
                     TotalMetadataSymbols = allSymbols.Count,
                     RawOccurrences = rawMetadataOccurrences,
                     CollisionCount = collisionCount,
@@ -2638,6 +2640,130 @@ namespace ConfuserExKillerRunner.Tests
             // Strict equality assertion
             Assert.Equal(testSymbols.Count, sumCategories);
             Assert.Equal(9, testSymbols.Count);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_35_PropertyAndEvent_FamilyOrAssembly_VisibilityClassification()
+        {
+            var module = new ModuleDefUser("VisibilityRulesTest.dll");
+
+            static bool IsTypeEffectivelyPublic(TypeDef type)
+            {
+                if (type == null) return false;
+                var curr = type;
+                while (curr.IsNested)
+                {
+                    if (!curr.IsNestedPublic)
+                        return false;
+                    curr = curr.DeclaringType;
+                    if (curr == null) return false;
+                }
+                return curr.IsPublic;
+            }
+
+            // Helper matching the exact visibility rules used in C10_32
+            static bool ClassifyProperty(PropertyDef prop, bool isTypePublic)
+            {
+                return ((prop.GetMethod != null && (prop.GetMethod.IsPublic || prop.GetMethod.IsFamily || prop.GetMethod.IsFamilyOrAssembly)) ||
+                        (prop.SetMethod != null && (prop.SetMethod.IsPublic || prop.SetMethod.IsFamily || prop.SetMethod.IsFamilyOrAssembly))) && isTypePublic;
+            }
+
+            static bool ClassifyEvent(EventDef ev, bool isTypePublic)
+            {
+                return ((ev.AddMethod != null && (ev.AddMethod.IsPublic || ev.AddMethod.IsFamily || ev.AddMethod.IsFamilyOrAssembly)) ||
+                        (ev.RemoveMethod != null && (ev.RemoveMethod.IsPublic || ev.RemoveMethod.IsFamily || ev.RemoveMethod.IsFamilyOrAssembly))) && isTypePublic;
+            }
+
+            // 1. Public enclosing type
+            var publicType = new TypeDefUser("TestApp", "PublicEntity", module.CorLibTypes.Object.TypeDefOrRef)
+            {
+                Attributes = TypeAttributes.Public | TypeAttributes.Class
+            };
+            module.Types.Add(publicType);
+            bool isPublicTypePublic = IsTypeEffectivelyPublic(publicType);
+            Assert.True(isPublicTypePublic);
+
+            // Property with FamORAssem getter (protected internal) -> MUST be Public
+            var propFamOrAssem = new PropertyDefUser("ProtectedInternalProp", new PropertySig(true, module.CorLibTypes.Int32));
+            var getterFamOrAssem = new MethodDefUser("get_ProtectedInternalProp", MethodSig.CreateInstance(module.CorLibTypes.Int32))
+            {
+                Attributes = MethodAttributes.FamORAssem | MethodAttributes.HideBySig | MethodAttributes.SpecialName
+            };
+            publicType.Methods.Add(getterFamOrAssem);
+            propFamOrAssem.GetMethod = getterFamOrAssem;
+            publicType.Properties.Add(propFamOrAssem);
+
+            Assert.True(getterFamOrAssem.IsFamilyOrAssembly);
+            Assert.True(ClassifyProperty(propFamOrAssem, isPublicTypePublic), "Property with FamORAssem getter on public type must be classified as Public.");
+
+            // Property with FamANDAssem getter (private protected) -> MUST NOT be Public (NonPublic)
+            var propFamAndAssem = new PropertyDefUser("PrivateProtectedProp", new PropertySig(true, module.CorLibTypes.Int32));
+            var getterFamAndAssem = new MethodDefUser("get_PrivateProtectedProp", MethodSig.CreateInstance(module.CorLibTypes.Int32))
+            {
+                Attributes = MethodAttributes.FamANDAssem | MethodAttributes.HideBySig | MethodAttributes.SpecialName
+            };
+            publicType.Methods.Add(getterFamAndAssem);
+            propFamAndAssem.GetMethod = getterFamAndAssem;
+            publicType.Properties.Add(propFamAndAssem);
+
+            Assert.True(getterFamAndAssem.IsFamilyAndAssembly);
+            Assert.False(ClassifyProperty(propFamAndAssem, isPublicTypePublic), "Property with FamANDAssem getter must NOT be classified as Public.");
+
+            // Event with FamORAssem add accessor -> MUST be Public
+            var eventFamOrAssem = new EventDefUser("ProtectedInternalEvent", new TypeRefUser(module, "System", "EventHandler", module.CorLibTypes.AssemblyRef));
+            var adderFamOrAssem = new MethodDefUser("add_ProtectedInternalEvent", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.Object))
+            {
+                Attributes = MethodAttributes.FamORAssem | MethodAttributes.HideBySig | MethodAttributes.SpecialName
+            };
+            publicType.Methods.Add(adderFamOrAssem);
+            eventFamOrAssem.AddMethod = adderFamOrAssem;
+            publicType.Events.Add(eventFamOrAssem);
+
+            Assert.True(adderFamOrAssem.IsFamilyOrAssembly);
+            Assert.True(ClassifyEvent(eventFamOrAssem, isPublicTypePublic), "Event with FamORAssem adder on public type must be classified as Public.");
+
+            // Event with FamANDAssem add accessor -> MUST NOT be Public (NonPublic)
+            var eventFamAndAssem = new EventDefUser("PrivateProtectedEvent", new TypeRefUser(module, "System", "EventHandler", module.CorLibTypes.AssemblyRef));
+            var adderFamAndAssem = new MethodDefUser("add_PrivateProtectedEvent", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.Object))
+            {
+                Attributes = MethodAttributes.FamANDAssem | MethodAttributes.HideBySig | MethodAttributes.SpecialName
+            };
+            publicType.Methods.Add(adderFamAndAssem);
+            eventFamAndAssem.AddMethod = adderFamAndAssem;
+            publicType.Events.Add(eventFamAndAssem);
+
+            Assert.True(adderFamAndAssem.IsFamilyAndAssembly);
+            Assert.False(ClassifyEvent(eventFamAndAssem, isPublicTypePublic), "Event with FamANDAssem adder must NOT be classified as Public.");
+
+            // 2. Nested public type within internal container: container hierarchy coherence
+            var internalContainer = new TypeDefUser("TestApp", "InternalContainer", module.CorLibTypes.Object.TypeDefOrRef)
+            {
+                Attributes = TypeAttributes.NotPublic | TypeAttributes.Class
+            };
+            module.Types.Add(internalContainer);
+
+            var nestedInInternal = new TypeDefUser("NestedInInternal", module.CorLibTypes.Object.TypeDefOrRef)
+            {
+                Attributes = TypeAttributes.NestedPublic | TypeAttributes.Class
+            };
+            internalContainer.NestedTypes.Add(nestedInInternal);
+
+            bool isNestedEffectivelyPublic = IsTypeEffectivelyPublic(nestedInInternal);
+            Assert.False(isNestedEffectivelyPublic, "Nested public type inside internal container is NOT effectively public.");
+
+            // Even if property has FamORAssem getter, its enclosing type is not effectively public
+            var propInNested = new PropertyDefUser("NestedProp", new PropertySig(true, module.CorLibTypes.Int32));
+            var getterInNested = new MethodDefUser("get_NestedProp", MethodSig.CreateInstance(module.CorLibTypes.Int32))
+            {
+                Attributes = MethodAttributes.FamORAssem | MethodAttributes.HideBySig | MethodAttributes.SpecialName
+            };
+            nestedInInternal.Methods.Add(getterInNested);
+            propInNested.GetMethod = getterInNested;
+            nestedInInternal.Properties.Add(propInNested);
+
+            Assert.False(ClassifyProperty(propInNested, isNestedEffectivelyPublic),
+                "Member on a type nested in non-public container must NOT be classified as Public regardless of member attributes.");
         }
 
         #endregion
