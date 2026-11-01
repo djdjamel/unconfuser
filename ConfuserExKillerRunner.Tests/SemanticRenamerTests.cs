@@ -1099,6 +1099,91 @@ namespace ConfuserExKillerRunner.Tests
             Assert.False(SemanticRenamer.IsMangledIdentifier("SshSessionManager"));
         }
 
+        [Fact]
+        public void C10_26_Execute_PreservesLegitimateNamesAndNormalizesObfuscated()
+        {
+            var module = new ModuleDefUser("IntegrationApp.dll");
+
+            // 1. Legitimate technical class with acronyms
+            var smtpType = new TypeDefUser("MailApp.Network", "SmtpTlsHandler", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(smtpType);
+            var sendMethod = new MethodDefUser("SendSecureMessage", MethodSig.CreateInstance(module.CorLibTypes.Void)) { Body = new CilBody() };
+            sendMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            smtpType.Methods.Add(sendMethod);
+
+            // 2. Legitimate technical compound classes with multiple acronyms
+            var sctpProcessorType = new TypeDefUser("MailApp.Network", "SctpRtpRtcpProcessor", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(sctpProcessorType);
+
+            var bridgeType = new TypeDefUser("MailApp.Bridge", "SftpScpNtpBridge", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(bridgeType);
+
+            // 3. Legitimate acronym class
+            var htmlType = new TypeDefUser("MailApp.Parsing", "HTMLParser", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(htmlType);
+
+            // 4. Legitimate business class with fields and methods
+            var repoType = new TypeDefUser("MailApp.Data", "CustomerRepository", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(repoType);
+
+            var getCustMethod = new MethodDefUser("GetCustomerById", MethodSig.CreateInstance(module.CorLibTypes.Object, module.CorLibTypes.Int32)) { Body = new CilBody() };
+            getCustMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+            getCustMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            repoType.Methods.Add(getCustMethod);
+
+            var processMethod = new MethodDefUser("ProcessOrder", MethodSig.CreateInstance(module.CorLibTypes.Void)) { Body = new CilBody() };
+            processMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            repoType.Methods.Add(processMethod);
+
+            var colorField = new FieldDefUser("RGBColor", new FieldSig(module.CorLibTypes.Int32), FieldAttributes.Private);
+            repoType.Fields.Add(colorField);
+
+            var ioField = new FieldDefUser("IOHelper", new FieldSig(module.CorLibTypes.Object), FieldAttributes.Private);
+            repoType.Fields.Add(ioField);
+
+            // 5. Truly obfuscated members (unprintable and decodable ConfuserEx patterns)
+            var unprintableType = new TypeDefUser("MailApp.Obfuscated", "\u200B\u200CType99", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(unprintableType);
+
+            var unprintableMethod = new MethodDefUser("\u200D\u200EmethodSecret", MethodSig.CreateInstance(module.CorLibTypes.Void)) { Body = new CilBody() };
+            unprintableMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            smtpType.Methods.Add(unprintableMethod);
+
+            var decodableType = new TypeDefUser("MailApp.Obfuscated", "_0001", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(decodableType);
+
+            var unprintableField = new FieldDefUser("\uFEFF\u200BsecretKey", new FieldSig(module.CorLibTypes.String), FieldAttributes.Private);
+            repoType.Fields.Add(unprintableField);
+
+            // 6. Random TitleCase consonant prefix with domain suffix (must be normalized)
+            var pseudoLegitType = new TypeDefUser("MailApp.Obfuscated", "KpxQtzVrmProcessor", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(pseudoLegitType);
+
+            // Execute SemanticRenamer pass
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // Verify legitimate names are 100% PRESERVED
+            Assert.Equal("SmtpTlsHandler", smtpType.Name.String);
+            Assert.Equal("SctpRtpRtcpProcessor", sctpProcessorType.Name.String);
+            Assert.Equal("SftpScpNtpBridge", bridgeType.Name.String);
+            Assert.Equal("SendSecureMessage", sendMethod.Name.String);
+            Assert.Equal("HTMLParser", htmlType.Name.String);
+            Assert.Equal("CustomerRepository", repoType.Name.String);
+            Assert.Equal("GetCustomerById", getCustMethod.Name.String);
+            Assert.Equal("ProcessOrder", processMethod.Name.String);
+            Assert.Equal("RGBColor", colorField.Name.String);
+            Assert.Equal("IOHelper", ioField.Name.String);
+
+            // Verify truly mangled items WERE normalized
+            Assert.NotEqual("\u200B\u200CType99", unprintableType.Name.String);
+            Assert.NotEqual("\u200D\u200EmethodSecret", unprintableMethod.Name.String);
+            Assert.NotEqual("_0001", decodableType.Name.String);
+            Assert.NotEqual("\uFEFF\u200BsecretKey", unprintableField.Name.String);
+            Assert.NotEqual("KpxQtzVrmProcessor", pseudoLegitType.Name.String);
+
+            Assert.True(result.UnprintableNormalized >= 4);
+        }
+
         [Theory]
         [InlineData("KPXProcessor", true)]
         [InlineData("QXZProcessor", true)]
@@ -1130,7 +1215,7 @@ namespace ConfuserExKillerRunner.Tests
 
         [Fact]
         [Trait("Category", "Unit")]
-        public void C10_29_ReflectionProtection_GetMethod_BindingFlags_Preserved()
+        public void C10_29A_ReflectionProtection_GetMethod_BindingFlags_Preserved()
         {
             var module = new ModuleDefUser("ReflectionBindingTest.dll");
             var serviceType = new TypeDefUser("MyApp.Services", "InternalService", module.CorLibTypes.Object.TypeDefOrRef);
@@ -1172,9 +1257,296 @@ namespace ConfuserExKillerRunner.Tests
 
             var result = SemanticRenamer.Execute(module, verbose: false);
 
-            // Target method name must be preserved because of explicit reflection call
             Assert.Equal("\u200B\u200CExecuteInternalAction", targetMethod.Name.String);
             Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29B_ReflectionProtection_GetMethod_TypeArrayOverload_Preserved()
+        {
+            var module = new ModuleDefUser("ReflectionTypeArrayTest.dll");
+            var serviceType = new TypeDefUser("MyApp.Services", "CalculationService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(serviceType);
+
+            var targetMethod = new MethodDefUser("\u200B\u200CComputeSum", MethodSig.CreateInstance(module.CorLibTypes.Int32, module.CorLibTypes.Int32, module.CorLibTypes.Int32), MethodAttributes.Private)
+            {
+                Body = new CilBody()
+            };
+            targetMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
+            targetMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            serviceType.Methods.Add(targetMethod);
+
+            // Caller calling Type.GetMethod("ComputeSum", new Type[] { typeof(int), typeof(int) })
+            var callerType = new TypeDefUser("MyApp.Services", "Invoker", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var invokeMethod = new MethodDefUser("InvokeOverload", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var typeArrayRef = new SZArraySig(typeRef.ToTypeSig());
+            var getMethodRef = new MemberRefUser(
+                module,
+                "GetMethod",
+                MethodSig.CreateInstance(typeRef.ToTypeSig(), module.CorLibTypes.String, typeArrayRef),
+                typeRef);
+
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, serviceType));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(typeRef.ToTypeSig(), new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()), typeRef)));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "\u200B\u200CComputeSum"));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_2));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Newarr, typeRef));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(invokeMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200CComputeSum", targetMethod.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29C_ReflectionProtection_GetProperty_GetField_GetEvent_Preserved()
+        {
+            var module = new ModuleDefUser("ReflectionMembersTest.dll");
+            var targetType = new TypeDefUser("MyApp.Data", "EntityData", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(targetType);
+
+            var field = new FieldDefUser("\u200B\u200C_entitySecret", new FieldSig(module.CorLibTypes.String), FieldAttributes.Private);
+            targetType.Fields.Add(field);
+
+            var callerType = new TypeDefUser("MyApp.Data", "Accessor", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var accessorMethod = new MethodDefUser("AccessField", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var fieldInfoRef = new TypeRefUser(module, "System.Reflection", "FieldInfo", module.CorLibTypes.AssemblyRef);
+            var getFieldRef = new MemberRefUser(
+                module,
+                "GetField",
+                MethodSig.CreateInstance(fieldInfoRef.ToTypeSig(), module.CorLibTypes.String),
+                typeRef);
+
+            accessorMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, targetType));
+            accessorMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(typeRef.ToTypeSig(), new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()), typeRef)));
+            accessorMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "\u200B\u200C_entitySecret"));
+            accessorMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getFieldRef));
+            accessorMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            accessorMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(accessorMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200C_entitySecret", field.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29D_ReflectionProtection_StringConcatenation_Preserved()
+        {
+            var module = new ModuleDefUser("ConcatReflectionTest.dll");
+            var serviceType = new TypeDefUser("MyApp.Services", "DataService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(serviceType);
+
+            var targetMethod = new MethodDefUser("\u200B\u200CFetchPayload", MethodSig.CreateInstance(module.CorLibTypes.Void), MethodAttributes.Private)
+            {
+                Body = new CilBody()
+            };
+            targetMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            serviceType.Methods.Add(targetMethod);
+
+            var callerType = new TypeDefUser("MyApp.Services", "Caller", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var callMethod = new MethodDefUser("CallDynamic", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var stringRef = module.CorLibTypes.String.TypeDefOrRef;
+            var concatRef = new MemberRefUser(
+                module,
+                "Concat",
+                MethodSig.CreateStatic(module.CorLibTypes.String, module.CorLibTypes.String, module.CorLibTypes.String),
+                stringRef);
+
+            var getMethodRef = new MemberRefUser(
+                module,
+                "GetMethod",
+                MethodSig.CreateInstance(typeRef.ToTypeSig(), module.CorLibTypes.String),
+                typeRef);
+
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, serviceType));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(typeRef.ToTypeSig(), new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()), typeRef)));
+            // Concatenation: "\u200B\u200CFetch" + "Payload" -> "\u200B\u200CFetchPayload"
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "\u200B\u200CFetch"));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "Payload"));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, concatRef));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(callMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200CFetchPayload", targetMethod.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29E_ReflectionProtection_LocalVariable_Preserved()
+        {
+            var module = new ModuleDefUser("LocalVarReflectionTest.dll");
+            var serviceType = new TypeDefUser("MyApp.Services", "ProcessorService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(serviceType);
+
+            var targetMethod = new MethodDefUser("\u200B\u200CRunTask", MethodSig.CreateInstance(module.CorLibTypes.Void), MethodAttributes.Private)
+            {
+                Body = new CilBody()
+            };
+            targetMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            serviceType.Methods.Add(targetMethod);
+
+            var callerType = new TypeDefUser("MyApp.Services", "Caller", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var callMethod = new MethodDefUser("CallViaLocal", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+            callMethod.Body.InitLocals = true;
+            callMethod.Body.Variables.Add(new Local(module.CorLibTypes.String));
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var getMethodRef = new MemberRefUser(
+                module,
+                "GetMethod",
+                MethodSig.CreateInstance(typeRef.ToTypeSig(), module.CorLibTypes.String),
+                typeRef);
+
+            // Store string in local 0, then load local 0 into GetMethod
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "\u200B\u200CRunTask"));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Stloc_0));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, serviceType));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(typeRef.ToTypeSig(), new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()), typeRef)));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldloc_0));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(callMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200CRunTask", targetMethod.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29F_ReflectionProtection_StaticField_Preserved()
+        {
+            var module = new ModuleDefUser("FieldConstantReflectionTest.dll");
+            var serviceType = new TypeDefUser("MyApp.Services", "WorkerService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(serviceType);
+
+            var targetMethod = new MethodDefUser("\u200B\u200CProcessBatch", MethodSig.CreateInstance(module.CorLibTypes.Void), MethodAttributes.Private)
+            {
+                Body = new CilBody()
+            };
+            targetMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            serviceType.Methods.Add(targetMethod);
+
+            var configType = new TypeDefUser("MyApp.Config", "ServiceConfig", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(configType);
+            var constField = new FieldDefUser("TargetActionName", new FieldSig(module.CorLibTypes.String), FieldAttributes.Public | FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.HasDefault)
+            {
+                Constant = new ConstantUser("\u200B\u200CProcessBatch")
+            };
+            configType.Fields.Add(constField);
+
+            var callerType = new TypeDefUser("MyApp.Services", "Caller", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var callMethod = new MethodDefUser("CallViaField", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var getMethodRef = new MemberRefUser(
+                module,
+                "GetMethod",
+                MethodSig.CreateInstance(typeRef.ToTypeSig(), module.CorLibTypes.String),
+                typeRef);
+
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, serviceType));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(typeRef.ToTypeSig(), new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()), typeRef)));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldsfld, constField));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            callMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(callMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200CProcessBatch", targetMethod.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_29G_ReflectionProtection_UnresolvableDynamicCase_PreservedConservatively()
+        {
+            var module = new ModuleDefUser("DynamicUnresolvableTest.dll");
+            var dynamicTargetType = new TypeDefUser("MyApp.Dynamic", "\u200B\u200CDynamicService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(dynamicTargetType);
+
+            var methodToPreserve = new MethodDefUser("\u200B\u200CUnknownMethod", MethodSig.CreateInstance(module.CorLibTypes.Void), MethodAttributes.Private)
+            {
+                Body = new CilBody()
+            };
+            methodToPreserve.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            dynamicTargetType.Methods.Add(methodToPreserve);
+
+            // A method calling Type.GetMethod with a parameter (completely dynamic, impossible to resolve statically)
+            var callerMethod = new MethodDefUser("InvokeDynamically", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var getMethodRef = new MemberRefUser(
+                module,
+                "GetMethod",
+                MethodSig.CreateInstance(typeRef.ToTypeSig(), module.CorLibTypes.String),
+                typeRef);
+
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, dynamicTargetType));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(typeRef.ToTypeSig(), new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()), typeRef)));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1)); // string method name passed as parameter!
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            callerMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            dynamicTargetType.Methods.Add(callerMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // Type with unresolvable dynamic reflection must have its symbols preserved conservatively
+            Assert.Contains(result.Decisions, d => d.Confidence == RenameConfidence.Ambiguous && d.Justification.Contains("unresolvable dynamic reflection"));
         }
 
         [Fact]
@@ -1213,22 +1585,72 @@ namespace ConfuserExKillerRunner.Tests
 
         [Fact]
         [Trait("Category", "Unit")]
-        public void C10_31_GenericWinForms_CustomComponentLibrary_Preserved()
+        public void C10_31_GenericWinForms_VisualControlsVsNonVisualComponents()
         {
-            var module = new ModuleDefUser("CustomUiTest.dll");
-            var baseControlType = new TypeDefUser("ThirdParty.UI", "CustomBaseControl", module.CorLibTypes.Object.TypeDefOrRef);
-            baseControlType.Interfaces.Add(new InterfaceImplUser(new TypeRefUser(module, "System.ComponentModel", "IComponent", module.CorLibTypes.AssemblyRef)));
-            module.Types.Add(baseControlType);
+            var module = new ModuleDefUser("WinFormsVisualVsNonVisualTest.dll");
 
-            var userFormType = new TypeDefUser("MyApp.Views", "DashboardView", baseControlType);
-            module.Types.Add(userFormType);
+            // --- POSITIVE CASES (True visual controls and forms) ---
 
-            Assert.True(SemanticRenamer.IsWinFormsControlOrForm(userFormType));
+            // 1. Class inheriting System.Windows.Forms.Control
+            var customControlType = new TypeDefUser("Custom.UI", "MyGridControl",
+                new TypeRefUser(module, "System.Windows.Forms", "Control", module.CorLibTypes.AssemblyRef));
+            module.Types.Add(customControlType);
+            Assert.True(SemanticRenamer.IsWinFormsControlOrForm(customControlType));
 
-            var setNameMethod = new MethodDefUser("set_Name", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String));
-            baseControlType.Methods.Add(setNameMethod);
+            // 2. Class inheriting System.Windows.Forms.UserControl
+            var userControlType = new TypeDefUser("Custom.UI", "UserEditor",
+                new TypeRefUser(module, "System.Windows.Forms", "UserControl", module.CorLibTypes.AssemblyRef));
+            module.Types.Add(userControlType);
+            Assert.True(SemanticRenamer.IsWinFormsControlOrForm(userControlType));
 
-            Assert.True(SemanticRenamer.IsControlSetName(setNameMethod));
+            // 3. Class inheriting System.Windows.Forms.Form
+            var customFormType = new TypeDefUser("Custom.Views", "MainDashboardForm",
+                new TypeRefUser(module, "System.Windows.Forms", "Form", module.CorLibTypes.AssemblyRef));
+            module.Types.Add(customFormType);
+            Assert.True(SemanticRenamer.IsWinFormsControlOrForm(customFormType));
+
+            // Control name setter on true visual control
+            var setControlName = new MethodDefUser("set_Name", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String));
+            customControlType.Methods.Add(setControlName);
+            Assert.True(SemanticRenamer.IsControlSetName(setControlName));
+
+            // --- NEGATIVE CASES (Non-visual components and arbitrary business classes) ---
+
+            // 4. Non-visual class deriving from System.ComponentModel.Component (e.g. Timer, BackgroundWorker)
+            var nonVisualComponentType = new TypeDefUser("Custom.Services", "DataWorkerComponent",
+                new TypeRefUser(module, "System.ComponentModel", "Component", module.CorLibTypes.AssemblyRef));
+            module.Types.Add(nonVisualComponentType);
+            Assert.False(SemanticRenamer.IsWinFormsControlOrForm(nonVisualComponentType),
+                "Non-visual Component must NOT be classified as a WinForms visual control.");
+
+            // 5. Class implementing IComponent without visual inheritance
+            var iComponentServiceType = new TypeDefUser("Custom.Services", "ServiceManager", module.CorLibTypes.Object.TypeDefOrRef);
+            iComponentServiceType.Interfaces.Add(new InterfaceImplUser(new TypeRefUser(module, "System.ComponentModel", "IComponent", module.CorLibTypes.AssemblyRef)));
+            module.Types.Add(iComponentServiceType);
+            Assert.False(SemanticRenamer.IsWinFormsControlOrForm(iComponentServiceType),
+                "Class implementing IComponent must NOT be classified as a WinForms visual control.");
+
+            // 6. Business classes whose names end in Item, Bar, Form, Control but have no relation to WinForms
+            var orderItemType = new TypeDefUser("Business.Orders", "OrderItem", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(orderItemType);
+            Assert.False(SemanticRenamer.IsWinFormsControlOrForm(orderItemType));
+
+            var progressBarBizType = new TypeDefUser("Business.Processing", "ProcessProgressBar", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(progressBarBizType);
+            Assert.False(SemanticRenamer.IsWinFormsControlOrForm(progressBarBizType));
+
+            var taxFormType = new TypeDefUser("Business.Finance", "TaxFormReport", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(taxFormType);
+            Assert.False(SemanticRenamer.IsWinFormsControlOrForm(taxFormType));
+
+            var accessControlType = new TypeDefUser("Business.Security", "AccessControlPolicy", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(accessControlType);
+            Assert.False(SemanticRenamer.IsWinFormsControlOrForm(accessControlType));
+
+            // Non-control set_Name method must NOT be recognized as a WinForms control setter
+            var bizSetName = new MethodDefUser("set_Name", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String));
+            orderItemType.Methods.Add(bizSetName);
+            Assert.False(SemanticRenamer.IsControlSetName(bizSetName));
         }
 
         [Fact]

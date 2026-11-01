@@ -152,6 +152,21 @@ namespace ConfuserExKillerRunner.Killers
             public HashSet<string> ExplicitTypeNames { get; } = new HashSet<string>(StringComparer.Ordinal);
             public HashSet<string> ExplicitMemberNames { get; } = new HashSet<string>(StringComparer.Ordinal);
             public List<(Instruction Instruction, string TargetName)> TypeGetTypeCalls { get; } = new List<(Instruction, string)>();
+            public bool HasUnresolvableDynamicReflection { get; set; }
+            public HashSet<TypeDef> UnresolvableDynamicReflectionTypes { get; } = new HashSet<TypeDef>();
+        }
+
+        private static int GetLocalIndex(Instruction ins)
+        {
+            if (ins == null) return -1;
+            var op = ins.OpCode;
+            if (op == OpCodes.Stloc_0 || op == OpCodes.Ldloc_0) return 0;
+            if (op == OpCodes.Stloc_1 || op == OpCodes.Ldloc_1) return 1;
+            if (op == OpCodes.Stloc_2 || op == OpCodes.Ldloc_2) return 2;
+            if (op == OpCodes.Stloc_3 || op == OpCodes.Ldloc_3) return 3;
+            if ((op == OpCodes.Stloc_S || op == OpCodes.Stloc || op == OpCodes.Ldloc_S || op == OpCodes.Ldloc) && ins.Operand is Local loc)
+                return loc.Index;
+            return -1;
         }
 
         private static ReflectionReferenceMap BuildReflectionReferenceMap(ModuleDef module)
@@ -164,6 +179,21 @@ namespace ConfuserExKillerRunner.Killers
                 {
                     if (!method.HasBody || method.Body.Instructions == null) continue;
                     var instrs = method.Body.Instructions;
+
+                    // Track local variable assignments of string literals: local index -> string value
+                    var localStringMap = new Dictionary<int, string>();
+                    for (int k = 0; k < instrs.Count - 1; k++)
+                    {
+                        if (instrs[k].OpCode == OpCodes.Ldstr && instrs[k].Operand is string sVal)
+                        {
+                            int locIdx = GetLocalIndex(instrs[k + 1]);
+                            if (locIdx >= 0)
+                            {
+                                localStringMap[locIdx] = sVal;
+                            }
+                        }
+                    }
+
                     for (int i = 0; i < instrs.Count; i++)
                     {
                         var ins = instrs[i];
@@ -202,12 +232,50 @@ namespace ConfuserExKillerRunner.Killers
                                              mName == "GetRuntimeMethod" || mName == "GetRuntimeProperty" ||
                                              mName == "GetRuntimeField" || mName == "GetRuntimeEvent")
                                     {
+                                        bool resolvedMember = false;
                                         for (int j = i - 1; j >= Math.Max(0, i - 20); j--)
                                         {
+                                            // 1. Direct string literal
                                             if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
                                             {
                                                 map.ExplicitMemberNames.Add(strVal);
+                                                resolvedMember = true;
                                             }
+                                            // 2. Computed string concatenation (e.g. "Get" + "Data")
+                                            else if (instrs[j].OpCode == OpCodes.Call && instrs[j].Operand is IMethod concatM &&
+                                                     concatM.DeclaringType?.FullName == "System.String" && concatM.Name == "Concat")
+                                            {
+                                                if (j >= 2 && instrs[j - 2].OpCode == OpCodes.Ldstr && instrs[j - 2].Operand is string s1 &&
+                                                    instrs[j - 1].OpCode == OpCodes.Ldstr && instrs[j - 1].Operand is string s2)
+                                                {
+                                                    string combined = s1 + s2;
+                                                    map.ExplicitMemberNames.Add(combined);
+                                                    resolvedMember = true;
+                                                }
+                                            }
+                                            // 3. String loaded from local variable (tracked from prior ldstr)
+                                            else if (GetLocalIndex(instrs[j]) >= 0 && localStringMap.TryGetValue(GetLocalIndex(instrs[j]), out string locStr))
+                                            {
+                                                map.ExplicitMemberNames.Add(locStr);
+                                                resolvedMember = true;
+                                            }
+                                            // 4. String loaded from static field constant
+                                            else if (instrs[j].OpCode == OpCodes.Ldsfld && instrs[j].Operand is IField fld)
+                                            {
+                                                var fDef = fld as FieldDef ?? fld.ResolveFieldDef();
+                                                if (fDef?.Constant?.Value is string fStr)
+                                                {
+                                                    map.ExplicitMemberNames.Add(fStr);
+                                                    resolvedMember = true;
+                                                }
+                                            }
+                                        }
+
+                                        // 5. Unresolvable dynamic reflection call: mark type as containing dynamic reflection
+                                        if (!resolvedMember)
+                                        {
+                                            map.HasUnresolvableDynamicReflection = true;
+                                            map.UnresolvableDynamicReflectionTypes.Add(type);
                                         }
                                     }
                                     else if (mName == "GetNestedType")
@@ -1457,6 +1525,21 @@ namespace ConfuserExKillerRunner.Killers
                 if (refMap.ExplicitTypeNames.Contains(type.Name.String) || refMap.ExplicitTypeNames.Contains(type.FullName))
                     continue;
 
+                // Safety rule: if type contains unresolvable dynamic reflection, preserve methods and fields conservatively
+                if (refMap.UnresolvableDynamicReflectionTypes.Contains(type))
+                {
+                    result.Decisions.Add(new RenameDecision
+                    {
+                        OriginalName = type.FullName,
+                        NewName = type.FullName,
+                        SymbolType = "Type",
+                        Confidence = RenameConfidence.Ambiguous,
+                        Justification = $"Type '{type.FullName}' contains unresolvable dynamic reflection call; members preserved conservatively.",
+                        Applied = false
+                    });
+                    continue;
+                }
+
                 // Normalize Type name
                 if (IsMangledIdentifier(type.Name.String))
                 {
@@ -1692,10 +1775,10 @@ namespace ConfuserExKillerRunner.Killers
             return false;
         }
 
-        public static bool IsWinFormsControlOrForm(TypeDef type)
+        public static bool IsWinFormsControlOrForm(ITypeDefOrRef type)
         {
             if (type == null) return false;
-            var curr = type.BaseType;
+            var curr = type;
             int depth = 0;
             while (curr != null && depth++ < 20)
             {
@@ -1704,9 +1787,6 @@ namespace ConfuserExKillerRunner.Killers
                     fn == "System.Windows.Forms.Form" ||
                     fn == "System.Windows.Forms.UserControl" ||
                     fn == "System.Windows.Forms.ContainerControl" ||
-                    fn == "System.ComponentModel.Component" ||
-                    fn.EndsWith("Form") ||
-                    fn.EndsWith("UserControl") ||
                     fn.StartsWith("DevExpress.XtraEditors.XtraForm") ||
                     fn.StartsWith("DevExpress.XtraEditors.XtraUserControl") ||
                     fn.StartsWith("DevExpress.XtraBars.Ribbon.RibbonForm"))
@@ -1717,8 +1797,6 @@ namespace ConfuserExKillerRunner.Killers
 
                 var td = curr.ResolveTypeDef();
                 if (td == null) break;
-                if (td.Interfaces != null && td.Interfaces.Any(i => i.Interface?.FullName == "System.ComponentModel.IComponent"))
-                    return true;
                 curr = td.BaseType;
             }
             return false;
@@ -1733,22 +1811,13 @@ namespace ConfuserExKillerRunner.Killers
             if (fn == "System.Windows.Forms.Control" ||
                 fn == "System.Windows.Forms.Form" ||
                 fn == "System.Windows.Forms.UserControl" ||
-                fn == "System.ComponentModel.IComponent" ||
-                fn == "System.ComponentModel.Component" ||
-                fn.EndsWith("Form") ||
-                fn.EndsWith("Control") ||
-                fn.EndsWith("Item") ||
-                fn.EndsWith("Bar") ||
-                fn.StartsWith("DevExpress.XtraEditors.") ||
-                fn.StartsWith("DevExpress.XtraBars."))
+                fn.StartsWith("DevExpress.XtraEditors.XtraForm") ||
+                fn.StartsWith("DevExpress.XtraEditors.XtraUserControl") ||
+                fn.StartsWith("DevExpress.XtraBars.Ribbon.RibbonForm"))
             {
                 return true;
             }
-            var td = (dt as TypeDef) ?? dt.ResolveTypeDef();
-            if (td != null && IsWinFormsControlOrForm(td))
-                return true;
-
-            return false;
+            return IsWinFormsControlOrForm(dt);
         }
 
         private static bool IsSerializationMember(IHasCustomAttribute member)
