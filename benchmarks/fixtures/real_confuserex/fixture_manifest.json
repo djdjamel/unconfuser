@@ -14,7 +14,7 @@
   },
   "source_module": {
     "name": "BenignSample.exe",
-    "sha256": "9ca8cfb41554ce520d1e51b683fcab315fe466e85721d56327a2c44a794e1385",
+    "sha256": "7cf3f73c78629786c7bab10d1482fb846b1fc9f784243b18fa2bd1ba55df40a4",
     "size_bytes": 7680
   },
   "protection_profile": {
@@ -30,8 +30,8 @@
   },
   "fixture": {
     "filename": "BenignSample.exe",
-    "sha256": "b7cccfe64fb7bca64451afbcf9526a5f87706904905b24b86f0c297119d03ca1",
-    "size_bytes": 43520
+    "sha256": "7eca485a5e338efada8ceb576c310006549f054e001ed5d6359fca2da5c433ca",
+    "size_bytes": 43008
   },
   "generation_steps": [
     "Build BenignSample.exe under .NET Framework 4.8",

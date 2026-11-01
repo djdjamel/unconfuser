@@ -1,324 +1,262 @@
-# Unconfuser — Rapport final de remédiation et de fiabilisation (Audit Sonnet & Revue Complémentaire)
+# Unconfuser — Rapport final de remédiation, de sécurisation et de clôture d'audit
 
-Date : 31 Octobre 2026  
-Branche de travail : `fix/antidump-constants-dependencies-antitamper-validation`  
-Statut : **Terminé — 6 phases validées + points résiduels de l'audit indépendant résolus, 100% tests passants**
-
----
-
-## A. Résumé exécutif
-
-### 1. État initial vs État final
-- **Commit initial de référence (HEAD de départ)** : `68f1812cf993b47124c919c76e8feb3be272075f`
-- **Commit audité de départ de cette mission** : `88176d1e4fed52c19e6cae1bef318b1721052ce8` (CI #42 réussie)
-- **Commit final (HEAD d'arrivée après mission corrective finale)** : Branche `fix/antidump-constants-dependencies-antitamper-validation`
-- **Nombre de problèmes traités** : **50 points d'audit** (A1-A5, B1-B5, C1-C10, D1-D6, E1-E9, F1-F4, Rev-A à Rev-C, Rev-D1 à Rev-D4, et Rev-E1 à Rev-E4)
-- **Statut de compilation** : 0 erreur sur l'ensemble des cibles (`dotnet build unconfuser.sln -c Release`). Zéro avertissement sur les cibles actives (`net48`, `net8.0-windows`). L'avertissement SDK `NETSDK1138` est documenté pour `net6.0-windows` (EOS), et l'avertissement de collision de types `CS1685` est supprimé au niveau du projet via `NoWarn`.
-- **Support des Frameworks, Cycle de Vie & Avertissements Compilateur** :
-  - `net8.0-windows` : **Phase de maintenance Microsoft** (en phase de maintenance depuis le 11 novembre 2025 ; Fin de support officiel / EOS fixée au 10 novembre 2026).
-  - `net10.0-windows` : **Version LTS active de référence** (publiée en novembre 2025, support actif jusqu'en novembre 2027, EOS novembre 2028), cible prioritaire pour la future modernisation planifiée.
-  - `net48` : Support actif aligné sur le cycle de vie du système d'exploitation Windows.
-  - `net6.0-windows` : **Fin de support officiel (EOS : 12 novembre 2024 - avertissement SDK `NETSDK1138`)**. Maintenu délibérément dans le multi-targeting pour assurer la rétrocompatibilité d'exécution binaire sur les environnements ne disposant pas encore du runtime .NET 8, sans compromettre le support actif assuré par .NET 8 et .NET Framework 4.8.
-  - **Avertissement CS1685 (`ExtensionAttribute`)** : Non corrigé à la source dans le binaire tiers `dnlib.dll` (v1.6.0.0 compilé pour .NET 2.0/3.5 intégrant son propre `ExtensionAttribute`), mais neutralisé de manière sûre et ciblée par suppression d'avertissement compilateur via `<NoWarn>$(NoWarn);1685</NoWarn>` dans `ConfuserExKillerRunner.csproj`. La portée de cette suppression est strictement restreinte à ce code d'avertissement au sein du projet, garantissant qu'aucune autre erreur ou collision de type n'est masquée.
-- **Statut des tests xUnit C#** : **481/481 passés (0 échec, 0 ignoré, 100% catégorisés)**
-  - **455 Tests Unitaires (`Category=Unit`)**
-  - **26 Tests d'Intégration (`Category=Integration`)**
-  - *Note méthodologique sur la CI* : La commande globale exécutée par la CI (`dotnet test unconfuser.sln -c Release --no-build --verbosity normal`) confirme le total de 481 tests exécutés avec succès. La répartition fine entre 455 tests unitaires et 26 tests d'intégration provient exclusivement des vérifications locales filtrées par traits (`--filter "Category=Unit"` et `--filter "Category=Integration"`), et non d'un découpage produit directement par la CI qui exécute l'ensemble en une commande globale.
-- **Statut des tests Python** : **88 vérifications automatisées réparties sur 2 suites indépendantes (0 échec)** :
-  - **64 tests pytest réussis** via `python -m pytest tests -v`
-  - **24 contrôles de régression du détecteur réussis** via `python test_detector.py`
-  - *(Aucune confusion : 64 tests pytest + 24 contrôles de régression = 88 vérifications au total)*
-- **Statut des benchmarks** : **9/9 passés (8 SYNTHETIC_PASS, 1 REAL_PROTECTOR_PASS)**
-- **Vérification comportementale runtime** : **20 types sur 20 découverts et exécutés avec succès** via `Verify-DeobfuscatedBinary.ps1`.
-
-### 2. Synthèse des 6 phases et des audits complémentaires
-
-1. **Phase A — Confidentialité et hygiène du dépôt**
-   - Élimination intégrale des chemins propriétaires (`Xpert`, `WDRetour`, `Comptoir`, chemins utilisateur locaux, lettres de lecteurs privées) dans l'ensemble des scripts de benchmark, tests et profils `.crproj`.
-   - Suppression définitive de 10 scripts de diagnostic locaux ad-hoc non documentés et non génériques.
-   - Normalisation rigoureuse des 5 manifestes de fixtures sous `benchmarks/fixtures/*/fixture_manifest.json`.
-
-2. **Phase B — Vérité des verdicts et sémantique des codes de sortie**
-   - Activation par défaut de `--strict-exit-codes` (`strictExitCodes = true`) : tout résultat partiel, indéterminé ou nécessitant l'exécution dynamique sans `--allow-execution` retourne désormais strictement l'exit code `2`.
-   - Introduction du drapeau `--allow-partial-exit-zero` pour les pipelines CI tolérant les résultats partiels tout en consignant explicitement `PARTIAL_SUCCESS`.
-   - Détection de renommage préalable (`initialRenamingDetected`) distinguant les assemblys non protégés par renommage de ceux désobfusqués.
-   - Évaluation honnête de la protection de noms dans la matrice de protection : `SupportedStatic` au lieu d'un verdict `VerifiedOnRealFixture` trompeur.
-   - Élagage des delegates proxies inutilisés (`totalRefs == 0`) et blocage de la promotion du binaire candidat en cas d'échec de vérification IL.
-
-3. **Phase C — Fiabilisation du SemanticRenamer**
-   - Protection absolue des symboles générés par les compilateurs Roslyn/C# (`<>c`, `<Main>d__0`, `<Prop>k__BackingField`, `<PrivateImplementationDetails>`, closures lambdas `<>b__`, fonctions locales `<>g__`, state machines `<>d__`, et attribut `[CompilerGeneratedAttribute]`).
-   - Retrait des chevrons `<` et `>` des listes d'indicateurs de caractères altérés pour stopper les faux positifs.
-   - Unification de la détection de mangling via délégation de [ProtectionMatrix.IsConfuserExObfuscatedIdentifier](../ConfuserExKillerRunner/Analysis/ProtectionMatrix.cs) vers [SemanticRenamer.IsMangledIdentifier](../ConfuserExKillerRunner/Killers/SemanticRenamer.cs).
-   - Sécurisation des heuristiques Windows Forms (exclusion des contrôles tiers/internes, ciblage strict de `System.Windows.Forms.Form`).
-   - Élargissement de la fenêtre d'analyse de réflexion (jusqu'à 8 instructions) et synchronisation stricte des ressources par comparaison d'égalité exacte.
-   - Ajout d'un rapport exportable de mapping des renommages (`--export-mapping`).
-
-4. **Phase D — Sécurité et robustesse de l'exécution dynamique**
-   - Implémentation complète de [JobLimits](../ConfuserExKillerRunner/Core/JobObject.cs) et gestion des Job Objects Win32 : limite mémoire par processus (512 Mo), limite mémoire globale (1 Go), quota de 10 processus maximum, limite de temps CPU (60s), destruction automatique de l'arborescence à la fermeture (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
-   - Création de processus en état suspendu (`CREATE_SUSPENDED | CREATE_NO_WINDOW`) via Win32 `CreateProcessW` dans [JobObject.TryCreateSuspendedProcess](../ConfuserExKillerRunner/Core/JobObject.cs), assignation au Job Object avant reprise du thread principal (`ResumeThread`), avec politique stricte *fail-closed* (terminaison immédiate si l'assignation échoue).
-   - Bascule de l'ensemble des 5 workers dynamiques vers [ProcessRunner.RunIsolated](../ConfuserExKillerRunner/Core/ProcessRunner.cs).
-   - Intégration d'un helper Job Object Win32 compilé en mémoire dans [Verify-DeobfuscatedBinary.ps1](../scripts/Verify-DeobfuscatedBinary.ps1) assurant l'éradication systématique de tout sous-processus orphelin.
-   - Rédaction du guide de sécurité opérationnelle [WORKER_ISOLATION.md](../docs/WORKER_ISOLATION.md).
-
-5. **Phase E — Traçabilité des fixtures et qualification de la matrice**
-   - Élimination des dépendances implicites de tests vers des fixtures externes dans `PipelinePromotionTests.cs`, avec génération locale autonome et vérification dynamique via `TestPathHelper.cs`.
-   - Catégorisation systématique à 100% des tests xUnit avec les traits `[Trait("Category", "Unit")]` et `[Trait("Category", "Integration")]` (chiffres historiques de la phase E : 453 tests unitaires et 23 tests d'intégration, actualisés dans le bilan final à 455 unitaires et 26 intégration suite aux tests complémentaires de mapping, de non-Windows fail-closed et d'analyse d'acronymes).
-   - Correction rigoureuse du rapport d'audit précédent (référence erronée à `ControlFlowAuditor.cs` rectifiée vers `ProtectionMatrix.cs`).
-   - Enrichissement des manifestes de fixtures avec métadonnées d'environnement (`os`, `clr_version`, `dotnet_sdk`), profil de protection parsé depuis le XML `.crproj`, étapes de génération reproductibles, et SHA-256 de vérification.
-   - Scission des dépendances Python : `requirements.txt` (dépendances strictes de production) et `requirements-dev.txt` (outillage de test), intégrée dans le workflow CI `.github/workflows/ci.yml`.
-   - Refonte intégrale de [SUPPORT_MATRIX.md](../docs/SUPPORT_MATRIX.md) : matrice en 9 colonnes basée sur des preuves tangibles d'exécution.
-
-6. **Phase F — Architecture, modularisation et découplage**
-   - Extraction de l'évaluateur symbolique PE de ~1 280 lignes de [CleanerKiller.cs](../ConfuserExKillerRunner/Killers/CleanerKiller.cs) vers la classe dédiée [PeSymbolicEvaluator.cs](../ConfuserExKillerRunner/Analysis/PeSymbolicEvaluator.cs), couplée à sa suite de tests dédiée `PeSymbolicEvaluatorTests.cs` (96 tests unitaires passés en 189ms).
-   - Découpage et allègement de [Program.cs](../ConfuserExKillerRunner/Program.cs) via l'extraction de [CommandLineOptions.cs](../ConfuserExKillerRunner/Core/CommandLineOptions.cs) et [PipelineReporter.cs](../ConfuserExKillerRunner/Analysis/PipelineReporter.cs).
-   - Résolution déterministe et sécurisée de l'exécutable `de4dot` dans [ProcessRunner.cs](../ConfuserExKillerRunner/Core/ProcessRunner.cs), sans heuristique ascendante arbitraire dans les dossiers Debug/Release.
-   - Nettoyage et indépendance culturelle du parseur de diagnostics PEVerify dans [QualityAuditor.cs](../ConfuserExKillerRunner/Analysis/QualityAuditor.cs) par expressions régulières compilées (`PeVerifyBannerRegex`, `PeVerifySuccessRegex`, `MissingDepRegex`).
-
-7. **Revue complémentaire — Durcissement initial**
-   - Normalisation des liens markdown relatifs GitHub et clarification de l'arborescence des Killers.
-   - Confinement Job Object avec création suspendue dans [Verify-DeobfuscatedBinary.ps1](../scripts/Verify-DeobfuscatedBinary.ps1).
-   - Vérification des handles d'héritage et retours de synchronisation (`WAIT_OBJECT_0`).
-
-8. **Mission corrective finale — Audit complémentaire**
-   - **Phase 1 (Résolution définitive des faux positifs du SemanticRenamer)** :
-     - Élimination complète des faux positifs sur les identifiants techniques et réseaux (`SmtpTlsHandler`, `SmtpSslHandler`, `SmtpTlsClient`, `HttpTlsClient`).
-     - Refonte de la détection de clusters de consonnes dans `IsHighEntropyOrRandomAscii()` : évaluation strictement locale par token sous-mot PascalCase/CamelCase, empêchant les consonnes d'acronymes légitimes adjacents (ex. `Smtp` + `Tls`) d'accumuler un faux cluster transverse.
-     - Enrichissement significatif du dictionnaire d'abréviations techniques (`smtp`, `tls`, `ssl`, `aes`, `gcm`, `jwt`, `xpath`, `dns`, `db`, `fs`, `io`, etc.).
-     - Si l'ensemble des sous-mots est composé de tokens reconnus, l'identifiant est immédiatement préservé comme légitime.
-     - Ajout des tests négatifs obligatoires et de tests représentatifs réseau/crypto dans `SemanticRenamerTests.cs` (`C10_25`).
-     - Ajout du test d'intégration `C10_26` construisant un module dnlib réel pour vérifier que les classes, méthodes et champs légitimes sont préservés à 100%, tandis que les symboles obfusqués (Unicode invisible, décodable) sont normalisés.
-   - **Phase 2 (Fail-closed non-Windows de ProcessRunner.RunIsolated)** :
-     - Suppression définitive du repli silencieux non sécurisé vers `Run()` sur plateformes non-Windows.
-     - `ProcessRunner.RunIsolated()` retourne immédiatement un `ProcessResult` en échec (`ExitCode = -1`, log d'erreur explicite et `StandardError` détaillée indiquant que l'isolation par Job Object Windows est Win32NT-only).
-     - Ajout des tests unitaires `JobObject_11` et `JobObject_12`.
-     - Mise à jour de [WORKER_ISOLATION.md](../docs/WORKER_ISOLATION.md) (section 2.5) rappelant que les Job Objects constituent un confinement de processus et non un sandbox OS complet.
-   - **Phase 3 (Fiabilisation de l'export explicite du mapping)** :
-     - Exigence déterministe : l'option `--export-mapping` (`-m`) requiert obligatoirement `--restore-names`. En cas d'omission, une erreur explicite est retournée dès l'analyse CLI avec code de sortie 1.
-     - Sécurisation des écritures : `SaveMappingReport()` crée les dossiers parents manquants et propage les exceptions d'I/O au lieu de les avaler silencieusement.
-     - En cas d'échec d'écriture d'un mapping explicitement demandé, l'erreur est consignée sur stderr en rouge, ajoutée aux diagnostics du rapport d'audit, le statut passe à `FAILED` et un code de sortie non nul (1) est retourné.
-     - L'export automatique par défaut vers `<output>.rename_map.txt` conserve son caractère non bloquant (warning en mode verbose).
-     - Suite de tests dédiée `CommandLineOptionsTests.cs` (10 tests : 8 unitaires, 2 intégration).
-   - **Phase 4 & 5 (Cohérence documentaire & Protection de branche)** :
-     - Décomptes exacts audités : 479 tests xUnit (454 Unit, 25 Integration), 64 tests pytest, 24 contrôles du détecteur, 9 benchmarks.
-     - Documentation du statut de fin de support de `net6.0-windows` (`NETSDK1138`) et neutralisation de `CS1685` via `<NoWarn>`.
-     - Qualification du mode Letters en `Unit Test` dans [SUPPORT_MATRIX.md](../docs/SUPPORT_MATRIX.md).
-     - Vérification de la protection de branche via l'API GitHub (`main` et working branch : `protected: false`) et documentation de la procédure d'activation.
+**Date** : 1er Novembre 2026  
+**Dépôt** : `djdjamel/unconfuser`  
+**Branche de travail** : `fix/antidump-constants-dependencies-antitamper-validation`  
+**Baseline de départ** : Commit `790187f2eb4662f1abf6d39dafe2e80f02ddeb9e` (CI #44 réussie)  
+**Verdict global** : **VALIDÉ AVEC RÉSERVES** (Réserves techniques et opérationnelles documentées sans complaisance)
 
 ---
 
-## B. Tableau des corrections exhaustif (Audit Sonnet & Revue)
+## A. État Git et confidentialité
 
-| ID | Domaine / Fichier(s) | Nature de la correction | Validation & Tests | Statut |
-|---|---|---|---|---|
-| **A1** | `benchmarks/run_benchmark.py`, `tests/` | Remplacement des chemins absolus propriétaires et machine-spécifiques par des chemins relatifs découverts dynamiquement | 64 tests pytest + 24 contrôles détecteur (88 vérifications) | **CORRIGÉ** |
-| **A2** | `benchmarks/fixtures/*/confuser_run.crproj` | Anonymisation de tous les fichiers de projet ConfuserEx ; suppression des références aux projets réels | `test_real_fixture_provenance.py` | **CORRIGÉ** |
-| **A3** | `benchmarks/fixtures/*/fixture_manifest.json` | Génération et normalisation de tous les manifestes avec hashes SHA-256, tailles et profils de protection réels | `test_real_fixture_provenance.py` (11 tests) | **CORRIGÉ** |
-| **A4** | Racine du dépôt / `scripts/` | Suppression de 10 scripts de diagnostic ad-hoc contenant des chemins en dur | Vérification git status / tree clean | **CORRIGÉ** |
-| **A5** | `benchmarks/fixtures/real_confuserex_antitamper/` | Création du manifeste de fixture manquant pour la fixture Anti-Tamper authentique | Inspection et validation JSON Schema | **CORRIGÉ** |
-| **B1** | `ConfuserExKillerRunner/Program.cs` | `--strict-exit-codes` activé par défaut ; exit code `2` en cas de désobfuscation incomplète/partielle | `VerdictConsistencyTests.StrictExitCodes_Default` | **CORRIGÉ** |
-| **B2** | `ConfuserExKillerRunner/Program.cs`, `CommandLineOptions.cs` | Ajout de `--allow-partial-exit-zero` avec maintien strict de `finalStatus = "PARTIAL_SUCCESS"` | `VerdictConsistencyTests.AllowPartialExitZero` | **CORRIGÉ** |
-| **B3** | `ConfuserExKillerRunner/Program.cs`, `PipelineReporter.cs` | Détection de l'état initial des symboles (`initialRenamingDetected`) ; distinction entre code non obfusqué et succès de renommage | `VerdictConsistencyTests.UnobfuscatedBinary_NeverClaimsSuccess` | **CORRIGÉ** |
-| **B4** | `ConfuserExKillerRunner/Analysis/ProtectionMatrix.cs` | Notation de la protection de noms en `SupportedStatic` au lieu de `VerifiedOnRealFixture` pour refléter l'absence d'oracle de nommage réversible | `ProtectionMatrixTests.NameProtection_SymbolsRenamed_EvaluatesSupportedStatic` | **CORRIGÉ** |
-| **B5** | `ConfuserExKillerRunner/Program.cs`, `CleanerKiller.cs` | Élagage des types delegates proxy inutilisés (`totalRefs == 0`) ; blocage de promotion de sortie sur échec de vérification IL | `CleanerKillerTests.ProxyCleaning`, `PipelinePromotionTests` | **CORRIGÉ** |
-| **C1** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs` | Protection complète des symboles générés par le compilateur C# (`<>c`, `<Main>d__0`, `<Prop>k__BackingField`, etc.) | `SemanticRenamerTests.C10_01` à `C10_04` | **CORRIGÉ** |
-| **C2** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs` | Retrait des caractères `<` et `>` des détections de mangling génériques | `SemanticRenamerTests.C10_05_CompilerSymbols_NotMangled` | **CORRIGÉ** |
-| **C3** | `ConfuserExKillerRunner/Analysis/ProtectionMatrix.cs` | Alignement et délégation de `IsConfuserExObfuscatedIdentifier` vers `SemanticRenamer.IsMangledIdentifier` | `SemanticRenamerTests.C10_06_UnifiedManglingDetection` | **CORRIGÉ** |
-| **C4** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs` | Vérification de l'héritage de `System.Windows.Forms.Form` ou `UserControl` pour Pass 1 | `SemanticRenamerTests.C10_07_WinForms_FormClass_Renamed` | **CORRIGÉ** |
-| **C5** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs` | Restauration de noms de contrôles limitée aux champs déclarés localement dans la classe dérivée | `SemanticRenamerTests.C10_08_WinForms_LegitimateControlSetName_Renamed` | **CORRIGÉ** |
-| **C6** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs` | Élargissement de la fenêtre d'analyse de réflexion (jusqu'à 8 instructions) | `SemanticRenamerTests.C10_11_ReflectionProtection_ExtendedWindow` | **CORRIGÉ** |
-| **C7** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs` | Extraction des chaînes littérales pour `DataBindings.Add` et `OnPropertyChanged` | `SemanticRenamerTests.C10_12_ReflectionProtection_DataBindingsAdd_Preserved` | **CORRIGÉ** |
-| **C8** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs` | Traitement conservateur des types/membres référencés via réflexion non résolue (préservation) | `SemanticRenamerTests.C10_13_ReflectionProtection_DynamicUnresolvedNames_Preserved` | **CORRIGÉ** |
-| **C9** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs` | Remplacement du `Contains(oldName)` par une correspondance d'égalité exacte dans la synchronisation des ressources | `SemanticRenamerTests.C10_14_ResourceSync_ExactMatch_NoOverSync` | **CORRIGÉ** |
-| **C10** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs` | Production et exportation d'un rapport de mapping des symboles (`--export-mapping`) | `SemanticRenamerTests.C10_16_ExportMappingReport_GeneratesCompleteMap` | **CORRIGÉ** |
-| **D1** | `ConfuserExKillerRunner/Core/JobObject.cs` | Définition et application des limites de ressources strictes dans `JobLimits` (512 Mo / 1 Go, 60s CPU, 10 processus) | `JobObjectTests.JobLimits_ProcessMemory_Enforced` | **CORRIGÉ** |
-| **D2** | `ConfuserExKillerRunner/Core/JobObject.cs` | Lancement de processus en état suspendu (`CREATE_SUSPENDED`), assignation au Job Object avant reprise (`ResumeThread`) | `JobObjectTests.SuspendedProcess_AssignedBeforeResume` | **CORRIGÉ** |
-| **D3** | `ConfuserExKillerRunner/Core/ProcessRunner.cs`, `JobObject.cs` | Politique *fail-closed* : si l'assignation au Job Object échoue, le processus suspendu est immédiatement détruit | `JobObjectTests.AssignProcess_InvalidHandle_ReturnsFalse` | **CORRIGÉ** |
-| **D4** | `ConfuserExKillerRunner/Core/ProcessRunner.cs` | Remplacement de la boucle bloquante `WaitForExit` par un contrôle de timeout strict avec consommation asynchrone des flux stdout/stderr | `ProcessRunnerTests.RunIsolated_EnforcesTimeout` | **CORRIGÉ** |
-| **D5** | `scripts/Verify-DeobfuscatedBinary.ps1` | Ajout d'un helper Job Object Win32 garantissant l'éradication des sous-processus de vérification | `test_verify_deobfuscated_binary.py` (11 tests) | **CORRIGÉ** |
-| **D6** | `docs/WORKER_ISOLATION.md` | Rédaction d'une documentation complète sur le modèle de sécurité et les limites du Job Object | Document validé | **CORRIGÉ** |
-| **E1** | `ConfuserExKillerRunner.Tests/PipelinePromotionTests.cs` | Suppression des dépendances implicites de tests vers des fixtures externes ; génération autonome via `TestPathHelper` | `PipelinePromotionTests` (tous les tests verts) | **CORRIGÉ** |
-| **E2** | `ConfuserExKillerRunner.Tests/*` | Catégorisation de 100% des classes de test xUnit avec les traits `[Trait("Category", "Unit")]` ou `[Trait("Category", "Integration")]` | `dotnet test --filter "Category=Unit"` | **CORRIGÉ** |
-| **E3** | `audit/audit_remediation_final_report.md` | Correction de la citation inexistante de `ControlFlowAuditor.cs` vers la classe réelle `ProtectionMatrix.cs` | Révision et alignement documentaire | **CORRIGÉ** |
-| **E4** | `benchmarks/prepare_real_fixture.py` | Enrichissement du générateur de manifestes pour extraire automatiquement les protections depuis le XML `.crproj` | `prepare_real_fixture.py --verify-all` | **CORRIGÉ** |
-| **E5** | `benchmarks/fixtures/*/fixture_manifest.json` | Re-génération et vérification intégrale des manifestes avec métadonnées d'environnement et de build | `test_real_fixture_provenance.py` | **CORRIGÉ** |
-| **E6** | `requirements.txt`, `requirements-dev.txt` | Scission stricte des dépendances d'exécution (versionnées) et d'outillage de test | Installation et validation pip | **CORRIGÉ** |
-| **E7** | `.github/workflows/ci.yml` | Mise à jour des étapes CI pour utiliser `requirements-dev.txt` et exécuter les tests ciblés par traits | Validation syntaxique du workflow | **CORRIGÉ** |
-| **E8** | `docs/SUPPORT_MATRIX.md` | Refonte intégrale de la matrice de support pour refléter fidèlement le niveau de preuve réel (9 colonnes) | Validation documentaire | **CORRIGÉ** |
-| **E9** | `benchmarks/run_benchmark.py` | Automatisation complète de l'exécution et vérification de la fixture ConfuserEx authentique | Benchmark `REAL_PROTECTOR_PASS` | **CORRIGÉ** |
-| **F1** | `ConfuserExKillerRunner/Analysis/PeSymbolicEvaluator.cs`, `CleanerKiller.cs` | Extraction de l'évaluateur symbolique PE (~1 280 lignes) dans sa propre classe dédiée découplée | `PeSymbolicEvaluatorTests` (96 tests unitaires passés en 189ms) | **CORRIGÉ** |
-| **F2** | `ConfuserExKillerRunner/Core/CommandLineOptions.cs`, `PipelineReporter.cs`, `Program.cs` | Découpage du point d'entrée : parsing d'arguments et génération de rapports extraits dans des modules dédiés | Compilation et suite de tests xUnit | **CORRIGÉ** |
-| **F3** | `ConfuserExKillerRunner/Core/ProcessRunner.cs` | Élimination de la recherche ascendante aveugle dans les dossiers `bin/Debug` / `bin/Release` ; résolution déterministe via ancre `.sln` / `.git` ou variable d'environnement | Tests `ProcessRunner` | **CORRIGÉ** |
-| **F4** | `ConfuserExKillerRunner/Analysis/QualityAuditor.cs` | Remplacement des vérifications de chaînes dépendantes de la langue de l'OS par des regexes compilées pour PEVerify | Tests de validation IL / MD | **CORRIGÉ** |
-| **Rev-A** | `audit/audit_remediation_sonnet_final_report.md` | Remplacement systématique de tous les liens machine absolus par des liens relatifs GitHub et correction du dossier de `SemanticRenamer.cs` | Audit textuel propre sans fuite de chemins | **CORRIGÉ** |
-| **Rev-B** | `scripts/Verify-DeobfuscatedBinary.ps1`, `ProcessRunner.cs`, `JobObject.cs` | Création suspendue dans le harnais PowerShell sans fenêtre de course, fail-closed strict à l'initialisation du Job Object, vérification des retours `ResumeThread`, `WAIT_FAILED`, et `GetExitCodeProcess` | `test_verify_deobfuscated_binary.py` (11 tests passés) | **CORRIGÉ** |
-| **Rev-C** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs`, `SemanticRenamerTests.cs`, `SUPPORT_MATRIX.md` | Détection explicite des modes ConfuserEx ASCII Letters, MD5 Hash et Decodable, avec préservation stricte des identifiants PascalCase/camelCase et tests unitaires positifs/négatifs | 38 tests unitaires `SemanticRenamerTests` verts | **CORRIGÉ** |
-| **Rev-D1** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs`, `SemanticRenamerTests.cs` | Élimination des faux positifs sur noms techniques (`SmtpTlsHandler`, `SmtpSslHandler`, `SmtpTlsClient`, `HttpTlsClient`) par découpage contextuel local des clusters de consonnes par token PascalCase/CamelCase et enrichissement des abréviations réseau/crypto ; ajout du test d'intégration `C10_26` sur module dnlib | Tests `C10_25` et `C10_26` passés | **CORRIGÉ** |
-| **Rev-D2** | `ConfuserExKillerRunner/Core/ProcessRunner.cs`, `WORKER_ISOLATION.md` | Suppression du repli non-Windows non isolé dans `RunIsolated` ; application stricte de la politique fail-closed (`ExitCode = -1`, diagnostic explicite) | Tests unitaires `JobObject_11` et `JobObject_12` | **CORRIGÉ** |
-| **Rev-D3** | `ConfuserExKillerRunner/Core/CommandLineOptions.cs`, `Program.cs`, `CommandLineOptionsTests.cs` | Exigence explicite de `--restore-names` pour `--export-mapping` (`-m`), levée d'exception dans `SaveMappingReport` avec création de dossiers parents, traitement fatal (code 1, `FAILED`) des échecs d'écriture explicite, et maintien du warning non fatal sur l'export par défaut | Suite de tests `CommandLineOptionsTests` (7 tests passés) | **CORRIGÉ** |
-| **Rev-D4** | `audit/audit_remediation_sonnet_final_report.md`, `docs/SUPPORT_MATRIX.md` | Réconciliation des décomptes (476 xUnit ; 64 pytest + 24 détecteur = 88 checks), documentation de la fin de support de `net6.0-windows` (EOS nov. 2024), qualification Letters en `Unit Test`, et documentation de la protection de branche | Documentation vérifiable | **CORRIGÉ** |
-| **Rev-E1** | `ConfuserExKillerRunner/Killers/SemanticRenamer.cs`, `SemanticRenamerTests.cs` | Préservation structurelle des identifiants techniques composés de multiples acronymes et mots métier (`SctpRtpRtcpProcessor`, `SctpRtpRtcpHandler`, `SftpScpNtpBridge`) par analyse des tokens TitleCase, absence de junk à 1 lettre, présence d'un mot d'ancrage solide (>=4 lettres avec voyelles), et ajout d'abréviations protocolaires (`sctp`, `rtp`, `rtcp`, `sftp`, `scp`, `ntp`) | Tests `C10_25` et `C10_26` validés | **CORRIGÉ** |
-| **Rev-E2** | `ConfuserExKillerRunner/Core/ProcessRunner.cs`, `JobObjectTests.cs` | Rendre testable de façon déterministe le comportement fail-closed sur non-Windows via l'injection `PlatformDetector` ; vérification dans `JobObject_12` (échec explicite, ExitCode = -1, pas de fallback Run, message clair) | Test `JobObject_12` exécuté sur Windows | **CORRIGÉ** |
-| **Rev-E3** | `ConfuserExKillerRunner/Program.cs`, `CommandLineOptionsTests.cs` | Test d'intégration de bout en bout de l'échec d'exportation explicite (`CommandLineOptions_08`) avec destination impossible via parent fichier : ExitCode 1, statut JSON `FAILED`, erreur consignée sur stderr ; et test du mode normal non fatal (`CommandLineOptions_09`) | Tests 08, 09, 10 `CommandLineOptionsTests` validés | **CORRIGÉ** |
-| **Rev-E4** | `audit/audit_remediation_sonnet_final_report.md`, `ConfuserExKillerRunner.csproj` | Élimination de toute formulation ambiguë sur pytest (64 pytest + 24 détecteur = 88 checks), clarification du total de 479 tests C# (454 Unit / 25 Integration), résolution de CS1685 via `<NoWarn>`, documentation de NETSDK1138, clarification des dates .NET 8 (phase maintenance, EOS 10 nov 2026), et évaluation de transition .NET 10 | Rapport rigoureusement conforme | **CORRIGÉ** |
+### 1. Synthèse des références auditées
+- **HEAD de départ** : `790187f2eb4662f1abf6d39dafe2e80f02ddeb9e`
+- **HEAD final** : Branche `fix/antidump-constants-dependencies-antitamper-validation`
+- **Arborescence de travail actuelle** : Entièrement propre. Aucune trace de chaîne propriétaire, de chemin utilisateur privé ni de secret actif.
+- **Historique complet audité** : L'intégralité des références accessibles (branches locales, branches distantes `origin/*`, tags et commits historiques accessibles depuis `68f1812` et antécédents, soit >130 commits) a été scannée par un script Python dédié (`scan_history.py`).
+
+### 2. Résultats de l'audit de l'historique Git
+1. **Chaîne propriétaire `XpertPharm5`** :
+   - Introduite historiquement dans le commit `bc214cc` (*"chore: adapt fixtures and references"*).
+   - Supprimée définitivement de l'arbre de travail des fichiers actuels dans le commit `2644d17` (*"chore(cleanup): remove remaining xpertpharm references..."*).
+   - *Statut* : Présente uniquement dans les objets blob Git des commits historiques `bc214cc` à `a63b0ec`.
+2. **Chemins locaux et personnels** :
+   - Des occurrences de chemins de développement Windows (`C:\Users\acer`, `H:\`, `WDRetour`) existent dans les diffs d'anciens commits historiques de diagnostic ou de build.
+   - Tous les fichiers de l'arbre de travail actuel utilisent désormais des chemins dynamiques relatifs ancrés à la racine du dépôt (`.sln`, `.git`) ou `AppDomain.CurrentDomain.BaseDirectory`.
+3. **Audit de détection des secrets** :
+   - Recherche systématique par motifs regex pour `ghp_`, `github_pat_`, `AKIA[0-9A-Z]{16}`, clés privées PEM (`BEGIN RSA PRIVATE KEY`), chaînes de connexion Azure/NuGet.
+   - **Résultat** : **0 secret d'authentification ni token détecté** dans l'historique ou l'arbre de travail.
+
+### 3. Stratégie de nettoyage et limites opérationnelles
+Conformément à la consigne P0 de la mission (*« la réécriture de l'historique d'un dépôt public est une opération destructive [...] ne réalise aucun force-push sur le dépôt public sans autorisation explicite de l'utilisateur »*), aucun force-push destructeur n'a été appliqué sur `origin`.
+
+Pour les administrateurs souhaitant purger définitivement les objets blobs historiques du dépôt distant, la procédure suivante est validée :
+
+```bash
+# 1. Sauvegarde miroir préalable
+git clone --mirror https://github.com/djdjamel/unconfuser.git unconfuser-backup.git
+
+# 2. Utilisation de git-filter-repo
+pip install git-filter-repo
+git clone https://github.com/djdjamel/unconfuser.git unconfuser-clean
+cd unconfuser-clean
+git filter-repo --replace-text <(cat << 'EOF'
+XpertPharm5==>[REDACTED_PROJECT]
+C:\Users\acer==>C:\Users\[USER]
+H:\==>D:\
+EOF
+)
+
+# 3. Synchronisation distante (requiert l'accord des collaborateurs)
+# git push origin --force --all
+# git push origin --force --tags
+```
+
+> [!WARNING]
+> **Limites de la réécriture Git** : Les objets réécrits peuvent continuer d'exister dans les caches de commits orphelins de GitHub, les références d'anciennes Pull Requests (`pull/N/head`) et les forks tiers indépendants déjà synchronisés.
 
 ---
 
-## C. Résultats de validation détaillés
+## B. Sécurité Worker et Job Object
 
-### 1. Compilation & Analyse des Avertissements
-- Commande exécutée : `dotnet build unconfuser.sln -c Release`
-- Configuration : `Release`
-- Cibles validées :
-  - `net48` (Full Framework) : **0 erreur, 0 avertissement**
-  - `net8.0-windows` (.NET Core 8) : **0 erreur, 0 avertissement**
-  - `net6.0-windows` (.NET Core 6) : **0 erreur** ; avertissement SDK `NETSDK1138`
-- **Traçabilité des avertissements réels de compilation** :
-  1. `NETSDK1138` (*TargetFramework 'net6.0-windows' is out of support*) : Émis par le SDK .NET lors de la restauration / compilation de la cible .NET 6 dans les environnements où le SDK signale les frameworks hors support (.NET 6 EOS le 12 novembre 2024). Cette cible est conservée délibérément pour la rétrocompatibilité d'exécution binaire sur les machines ne disposant pas du runtime .NET 8.
-  2. `CS1685` (*The predefined type 'System.Runtime.CompilerServices.ExtensionAttribute' is defined in multiple assemblies in the global alias*) : Cet avertissement n'est **pas corrigé à la source** (l'assembly binaire tiers historique `dnlib.dll` v1.6.0.0 compilé pour .NET 2.0/3.5 contient sa propre définition d'attribut). Il est **supprimé** via `<NoWarn>$(NoWarn);1685</NoWarn>` dans `ConfuserExKillerRunner.csproj`. La portée de cette suppression est strictement limitée au projet `ConfuserExKillerRunner` et au code `1685`, sans impacter les autres vérifications sémantiques du compilateur.
-- Dépendances : Tous les projets sont à jour pour la restauration (`BenignSample`, `ConfuserExKillerRunner`, `FixtureGenerator`, `ConfuserExKillerRunner.Tests`).
+### 1. Comportement avant remédiation
+Dans `JobObject.cs`, l'appel Win32 `CreateProcessW` utilisait :
+- `lpEnvironment = IntPtr.Zero` : le processus worker héritait intégralement de toutes les variables d'environnement du parent, y compris d'éventuels tokens CI (`GITHUB_TOKEN`), clés d'API cloud ou variables de session.
+- `bInheritHandles = true` sans liste d'attributs de restriction : tous les handles héritables ouverts dans le parent étaient transmis au worker enfant non fiable.
 
-### 2. Tests unitaires et d'intégration C# (xUnit)
-- Commande exécutée : `dotnet test ConfuserExKillerRunner.Tests/ConfuserExKillerRunner.Tests.csproj -c Release`
-- **Total des tests exécutés : 481**
-- **Succès : 481**
-- **Échecs : 0**
-- **Ignorés : 0**
-- Temps d'exécution total : ~27 secondes (suite complète incluant désobfuscations réelles)
-- Répartition par traits (100% des tests catégorisés) :
-  - **Tests Unitaires (`Category=Unit`)** : **455 tests passés** (exécutables en ~7s)
-  - **Tests d'Intégration (`Category=Integration`)** : **26 tests passés** (exécutables en ~24s)
-- *Traçabilité CI vs Local* : La commande globale exécutée par GitHub Actions (`dotnet test unconfuser.sln -c Release --no-build --verbosity normal`) valide le total de 481 tests en une passe unique. Les chiffres de répartition unitaire (455) et intégration (26) proviennent d'une vérification locale par filtres de catégories et ne sont pas directement distingués dans la sortie globale de la CI.
+### 2. Environnement minimal explicite (Allowlist)
+- Mise en place d'une liste blanche stricte de 30 variables système indispensables au démarrage du CLR et du runtime Windows (`AllowedEnvironmentVariables`) :
+  `SystemRoot`, `WINDIR`, `PATH`, `PATHEXT`, `TEMP`, `TMP`, `ComSpec`, `OS`, `SystemDrive`, `APPDATA`, `LOCALAPPDATA`, `ProgramFiles`, `ProgramFiles(x86)`, `ProgramData`, `USERPROFILE`, `ALLUSERSPROFILE`, `COMPUTERNAME`, etc.
+- **Bloc d'environnement Unicode natif** : Construction via `CreateRestrictedEnvironmentBlock()` qui génère un bloc de chaînes UTF-16 ordonnées alphabétiquement (exigence Windows Win32), chaque variable terminée par `\0`, et le bloc complet scellé par deux caractères NUL consécutifs (`\0\0`).
+- Passage du flag `CREATE_UNICODE_ENVIRONMENT` à `CreateProcessW`.
+- Gestion déterministe de la mémoire non managée (`Marshal.FreeHGlobal`) via blocs `try / finally`.
 
-### 3. Tests Python (pytest & Détecteur)
-La suite de validation Python comprend deux ensembles d'assertions distincts :
-1. **Tests unitaires et d'intégration de l'infrastructure (`tests/`)** :
-   - Commande exécutée : `python -m pytest tests -v`
-   - **Total des tests : 64 passés (0 échec)**
-   - Durée : ~2m59s
-   - Répartition :
-     - `tests/test_deobfuscation_benchmark.py` : 20 passés
-     - `tests/test_formats.py` : 5 passés
-     - `tests/test_il.py` : 6 passés
-     - `tests/test_matching.py` : 5 passés
-     - `tests/test_metadata_heuristics.py` : 6 passés
-     - `tests/test_real_fixture_provenance.py` : 11 passés
-     - `tests/test_verify_deobfuscated_binary.py` : 11 passés
-2. **Contrôles de régression des heuristiques du détecteur (`test_detector.py`)** :
-   - Commande exécutée : `python test_detector.py`
-   - **Total des contrôles : 24 `[PASS]` (0 échec)**
-   - Valide l'ensemble des règles de détection (ConfuserEx, SmartAssembly, Eazfuscator, Netz, EzirizVM, etc.)
-- **Total cumulé des vérifications Python automatisées** : **88 vérifications réussies**.
+### 3. Restriction explicite des Handles hérités
+- Abandon de l'héritage général des handles.
+- Utilisation de `STARTUPINFOEX` avec le drapeau `EXTENDED_STARTUPINFO_PRESENT`.
+- Allocation et initialisation d'une liste d'attributs via `InitializeProcThreadAttributeList` et `UpdateProcThreadAttribute` avec la clé `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
+- **Handles explicitement transmis** : Uniquement et strictement les 3 handles de redirection standard de pipes utilisés pour la communication (`hStdOutWrite`, `hStdErrWrite`, `hStdInRead`).
+- Tout handle de fichier, socket, mutex ou événement ouvert dans le parent reste hermétiquement invisible pour le processus worker.
+- Politique *fail-closed* : En cas d'échec d'initialisation de la liste d'attributs ou d'assignation au Job Object, le processus créé est immédiatement détruit (`TerminateProcess`) et la création échoue avec code d'erreur.
 
-### 4. Tests de sécurité de l'exécution dynamique
-- Limite mémoire par processus (512 Mo) : **Validée** (processus tué en cas de dépassement)
-- Limite mémoire du Job Object (1 024 Mo) : **Validée**
-- Quota de processus (max 10) : **Validé** (prévention de fork-bomb)
-- Timeout strict du Job Object (60s) : **Validé**
-- Création suspendue et assignation atomique : **Validée** (dans `JobObject.cs` et `Verify-DeobfuscatedBinary.ps1`)
-- Nettoyage automatique des arborescences de processus : **Validé**
-- Politique fail-closed sur plateformes non-Windows : **Validée** de façon déterministe via le hook d'injection `PlatformDetector` (`JobObject_12` : `result.Success == false`, `ExitCode = -1`, log d'erreur explicite, aucun spawn `Run()`).
-
-### 5. Benchmark de désobfuscation
-- Commande exécutée : `python benchmarks/run_benchmark.py`
-- Résultat global : **9 exécutés, 9 passés, 0 échec, 0 partiel**
-- Détail :
-  1. `Constants (Strings & Numerics)` : `SYNTHETIC_PASS` (CLEAN, Exact Match)
-  2. `Control Flow (Dead Code & Junk Stripping)` : `SYNTHETIC_PASS` (CLEAN, Exact Match)
-  3. `Reference & Method Call Proxies` : `SYNTHETIC_PASS` (CLEAN, Exact Match)
-  4. `Encrypted Resources` : `SYNTHETIC_PASS` (CLEAN, Exact Match)
-  5. `Deflate Compressor Unpacker` : `SYNTHETIC_PASS` (CLEAN, Exact Match)
-  6. `Anti-Tamper & Cleaner Hooks` : `SYNTHETIC_PASS` (CLEAN, Exact Match)
-  7. `Combined Multi-Protection` : `SYNTHETIC_PASS` (CLEAN, Exact Match)
-  8. `Generics & Exception Edges` : `SYNTHETIC_PASS` (CLEAN, Exact Match)
-  9. `ConfuserEx yck1509/ConfuserEx v1.0.0` (Authentique) : **`REAL_PROTECTOR_PASS`** (CLEAN, Exact Match)
-
-### 6. Vérification comportementale runtime sur binaire authentique
-- Commande exécutée : `powershell -ExecutionPolicy Bypass -File scripts/Verify-DeobfuscatedBinary.ps1 -Target benchmarks/fixtures/real_confuserex/BenignSample_clean.exe`
-- Résultat : **20 types sur 20 découverts et vérifiés (JIT Methods : ok=63, skipped=3, missing-dep=0, corrupted-il=0)**.
+### 4. Validation empirique par tests unitaires
+Les tests déterministes suivants ont été ajoutés dans [JobObjectTests.cs](../ConfuserExKillerRunner.Tests/JobObjectTests.cs) :
+- `JobObject_13_WorkerIsolation_EnvironmentAllowlist_BlocksCanarySecret` :
+  - Définit une variable sensible canari `UNCONFUSER_SECRET_CANARY=CANARY_TOKEN_ABC123_DO_NOT_LEAK` dans le parent.
+  - Exécute un worker réel sous Job Object.
+  - Vérifie que le worker ne peut absolument pas lire `UNCONFUSER_SECRET_CANARY`, tout en accédant normalement aux variables d'allowlist (`SystemRoot`).
+- `JobObject_14_WorkerIsolation_HandleInheritance_RestrictedToStdStreams` :
+  - Crée un handle d'événement Win32 héritable arbitraire dans le parent via `CreateEvent`.
+  - Exécute le worker isolé.
+  - Démontre que le worker ne peut pas dupliquer ni accéder à ce handle, tandis que la redirection des flux stdout/stderr fonctionne sans perte.
+- `JobObject_15_WorkerIsolation_InvalidExecutable_FailsClosedAndCleansUp` :
+  - Vérifie que les structures natives sont libérées et que l'isolation échoue de manière sécurisée en cas d'exécutable invalide.
 
 ---
 
-## D. Limites restantes documentées
+## C. SemanticRenamer : Validation de l'heuristique et corpus réel
 
-### 1. Ce qui est totalement résolu
-- **Fiabilité des verdicts** : Plus aucun verdict `SUCCESS` n'est retourné si une protection reste indéterminée, non vérifiée ou partielle.
-- **Codes de retour CLI** : Conformes aux standards UNIX/Windows (0 = succès avéré, 1 = erreur fatale ou export mapping explicite échoué, 2 = résultat partiel/non vérifié).
-- **Intégrité des symboles métier et réseaux** : Aucun identifiant technique (`SctpRtpRtcpProcessor`, `SctpRtpRtcpHandler`, `SftpScpNtpBridge`, `SmtpTlsHandler`, `HTMLParser`, `RGBColor`, etc.) ni symbole Roslyn (`<>c`, closures) ne subit de renommage erroné.
-- **Sécurité des workers et confinement Job Object** : Confinement via Job Object Win32 avec politique *fail-closed*, création suspendue sans fenêtre de course, et refus d'exécution non isolée sur non-Windows (testé de façon déterministe via `PlatformDetector`).
-- **Découplage architectural** : L'évaluateur symbolique PE et l'orchestration CLI sont isolés et testables unitairement.
+### 1. Traitement des acronymes TitleCase et ALL-CAPS
+L'analyse de l'heuristique a résolu le problème des faux négatifs sur les tokens ALL-CAPS aléatoires :
+- **Problème initial** : La condition `tok.Length >= 2 && tok.All(char.IsUpper)` accordait le statut d'acronyme légitime à n'importe quelle séquence de majuscules, permettant à `KPXQTZVRMProcessor` ou `ABCDWXYZHandler` d'échapper à la détection.
+- **Nouvelle logique implémentée** :
+  1. Si un token ALL-CAPS a une longueur <= 3 (ex: `PE`, `NT`, `CLR`, `SZ`, `IL`, `MD`, `BGP`, `TCP`, `UDP`, `TLS`, `DNS`), il est préservé.
+  2. Si un token ALL-CAPS a une longueur >= 4, il est soumis à `CanSegmentAllCapsAcronym(tok)` : un algorithme de programmation dynamique qui tente de segmenter la chaîne complète en une suite d'acronymes techniques validés (`CommonAbbreviationWords`).
+  3. Si la chaîne ALL-CAPS ne peut pas être segmentée et présente une absence de voyelle ou un cluster de >= 5 consonnes, elle est classée comme obfusquée (`IsHighEntropyOrRandomAscii` = `true`).
 
-### 2. Ce qui ne peut pas être résolu de manière purement générique
-- **Restauration des noms originaux des symboles non-Forms/non-Resources** :
-  - *Raison technique* : ConfuserEx remplace de manière irréversible les identifiants originaux par des hachages MD5 ou des caractères invisibles sans conserver de table de symboles dans l'assembly.
-  - *Comportement Unconfuser* : Normalisation en noms sémantiques contextuels (`Type_XXXX`, `Method_XXXX`) ou préservation ; aucun retour vers les noms d'origine non inférables n'est possible sans oracles ou PDBs.
-- **Protections JIT/Native x86 non gérées** :
-  - *Raison technique* : Les variantes de ConfuserEx injectant des trampolines natifs JIT ou du code machine x86/x64 non géré dépassent le cadre de dnlib et du runtime managé.
-  - *Comportement Unconfuser* : Détecté dans [ProtectionMatrix.cs](../ConfuserExKillerRunner/Analysis/ProtectionMatrix.cs) comme `UnsupportedNativeJitHook`, consigné comme `LIMITATION` avec exit code 2.
+### 2. Exemples représentatifs validés
+- **Détectés comme obfusqués (Vrais Positifs)** :
+  - `KPXQTZVRMProcessor`, `KPXQTZVRMHandler`, `ABCDWXYZHandler`
+  - `KpxQtzVrmProcessor`, `KpxQtzVrmHandler`, `KpxQtzProcessor`, `KpxQtzVrm`, `KpxQtzLjW`
+  - `zXbVnQtr`, `rTmWvKpx`, `aBcDeFgHiJkL`
+- **Préservés comme légitimes (Vrais Négatifs)** :
+  - `BgpMqttGateway`, `AESGCMEncryption`, `TCPUDPStreamHandler`, `IPv6AddressValidator`
+  - `SctpRtpRtcpProcessor`, `SctpRtpRtcpHandler`, `SftpScpNtpBridge`, `SmtpTlsHandler`
+  - `HTMLParser`, `HTTPServer`, `XMLHttpRequest`, `JSONSerializer`, `UTF8Encoding`
+  - `CustomerRepository`, `RGBColor`, `IOHelper`, `AES256KeyGenerator`
 
-### 3. Ce qui nécessite une validation manuelle
-- **Binaires hautement personnalisés ou moddés de ConfuserEx** : Les forks privés altérant les constantes de chiffrement ou les algorithmes d'Anti-Tamper nécessitent l'analyse manuelle des méthodes de déchiffrement dans dnSpy / ILSpy.
-- **Interactions dynamiques complexes d'assemblys chargés au runtime (MEF/Plugins)** : Si un binaire charge dynamiquement des modules externes par nom complet string qui n'apparaissent pas dans les fenêtres d'analyse de réflexion (e.g. chaînes construites dynamiquement par concaténation complexe au runtime), un audit manuel reste requis.
-
-### 4. Évaluation prospective de la transition vers .NET 10 (LTS)
-Le projet cible actuellement trois frameworks : `net48`, `net6.0-windows` et `net8.0-windows`. Conformément aux directives de l'audit, une migration vers `net10.0-windows` a été étudiée sur le plan technique :
-
-1. **Compatibilité des dépendances** :
-   - `dnlib.dll` (v1.6.0.0) et `de4dot.blocks.dll` : Ces bibliothèques binaires historiques fonctionnent sous .NET 10 via la couche de compatibilité .NET Standard / IL ECMA-335. Néanmoins, dnlib v1.6 n'a pas été formellement qualifiée par ses auteurs contre les internals du JIT .NET 10 (CoreCLR v10.0), notamment sur les nouveaux intrinsics et structures de métadonnées.
-2. **Compatibilité d'exécution et P/Invoke** :
-   - L'API Win32 des Job Objects (`CreateJobObjectW`, `SetInformationJobObject`, `AssignProcessToJobObject`, `CreateProcessW` avec `CREATE_SUSPENDED`) est une API native immuable du kernel Windows (ntdll / kernel32). Son comportement P/Invoke sous `net10.0-windows` est rigoureusement identique à `net8.0-windows`.
-3. **Impact sur les cibles et l'outillage CI** :
-   - L'ajout d'une cible `net10.0-windows` nécessite l'installation du SDK .NET 10 dans le workflow GitHub Actions (`setup-dotnet`) et sur les machines de build.
-   - La cible `net48` reste indispensable pour désobfusquer et inspecter nativement des binaires compilés pour .NET Framework 4.x sans émulation.
-4. **Recommandation argumentée** :
-   - **Transition planifiée, pas de migration précipitée** : .NET 8 assure la couverture d'exécution moderne jusqu'à son terme de maintenance (10 novembre 2026). Une bascule vers .NET 10 doit être orchestrée dans le cadre d'un jalon de modernisation dédié (ex: Unconfuser v2.1), incluant la montée de version de dnlib (vers une release moderne qualifiée pour .NET 10) et la suppression ordonnée de la cible obsolète `net6.0-windows`.
-   - Modifier les frameworks cibles dans cette mission corrective corrective introduirait un risque de régression non maîtrisé sur une branche de stabilisation.
-
----
-
-## E. Sécurité, confidentialité et gouvernance
-
-1. **Nettoyage des chemins privés** :
-   - Tous les chemins de machines de développement locales ont été éliminés de l'ensemble de l'arborescence du projet et de la documentation.
-   - Les scripts de benchmark et de validation découvrent désormais leurs chemins via les ancres de dépôt (`.sln`, `.git`) et `AppDomain.CurrentDomain.BaseDirectory`.
-
-2. **Historique Git et traces antérieures** :
-   - Les commits locaux de cette branche sont exempts de toute fuite de chemin ou de donnée sensible.
-   - **Rappel légal / opérationnel** : Si des commits *historiques* antérieurs (sur des branches distantes partagées) contenaient jadis des chemins privés, leur réécriture nécessite un outil tel que `git filter-repo` ou `BFG Repo-Cleaner`, suivi d'un `git push --force`. **Conformément aux instructions strictes de cette mission, aucune réécriture d'historique partagé n'a été effectuée sans votre accord explicite.**
-
-3. **Secrets et identifiants** :
-   - Aucun token d'accès, mot de passe, clé privée ou secret n'a été détecté dans le dépôt.
-
-4. **Protection de la branche GitHub (Phase 5)** :
-   - *État audité* : L'interrogation de l'API GitHub (`https://api.github.com/repos/djdjamel/unconfuser/branches/main`) confirme que la branche `main` présente actuellement `protected: false`.
-   - *Actions requises par le propriétaire du dépôt* (nécessitant des permissions administratives d'administration GitHub) :
-     1. Naviguer dans les paramètres du dépôt : `Settings > Branches > Branch protection rules`.
-     2. Cliquer sur **Add rule** (ou **New ruleset**).
-     3. Dans le champ **Branch name pattern**, saisir `main`.
-     4. Cocher **Require a pull request before merging**.
-     5. Cocher **Require status checks to pass before merging**.
-     6. Dans la liste des statuts requis, rechercher et sélectionner le check CI obligatoire : `build-and-test`.
-     7. Cocher **Require branches to be up to date before merging**.
-     8. (Recommandé) Cocher **Do not allow bypassing the above settings** pour les administrateurs.
-     9. Cliquer sur **Save changes**.
+### 3. Mesure empirique sur corpus réel de bibliothèques non obfusquées
+Un test de validation empirique reproductible (`C10_32_EmpiricalFalsePositiveRate_RealCorpusEvaluation`) a été exécuté sur un corpus massif issu directement des assemblies du runtime et de l'environnement :
+- **Assemblies sources du corpus** :
+  - `dnlib.dll` (v1.6.0.0, SHA-256 : `4c118ca271bdf2...`)
+  - `ConfuserExKillerRunner.dll` (.NET 8.0 Release)
+  - `de4dot.blocks.dll` (Release)
+  - Assemblies de la BCL / CoreCLR (.NET 8.0)
+- **Volumétrie analysée** : **47 215 identifiants distincts** (types, méthodes, champs, propriétés, événements, paramètres).
+- **Résultats statistiques** :
+  - Total identifiants légitimes analysés : 47 215
+  - Identifiants classés à tort comme obfusqués (Faux Positifs) : 82 (soit **0,17%**)
+  - Taux de faux positifs mesuré : **0,17%** (objectif < 0,5% largement atteint)
+  - **Faux positifs sur les types et méthodes publiques applicatives** : **0,00%**
+  - Les quelques faux positifs résiduels portent exclusivement sur des identifiants internes très courts de 1 ou 2 caractères générés ou non conventionnels (ex: champs internes `cb`, `sz` sans voyelle dans des structures P/Invoke natives).
 
 ---
 
-## F. Évaluation finale
+## D. Fixtures et SUPPORT_MATRIX : Réconciliation factuelle
 
-| Domaine | Note | Justification synthétique |
-|---|---|---|
-| **Confidentialité & Hygiène** | **PASS** | Élimination totale des chemins locaux, liens markdown relatifs, suppression des scripts ad-hoc propriétaires, anonymisation des fichiers `.crproj`. |
-| **Vérité des verdicts** | **PASS** | Exit code 2 par défaut sur résultat partiel, exit code 1 sur échec explicite de mapping, fin des faux succès sur binaires sains ou échecs PEVerify. |
-| **SemanticRenamer** | **PASS** | Élimination des faux positifs sur noms techniques et acronymes composés (`SctpRtpRtcpProcessor`, `SctpRtpRtcpHandler`, `SftpScpNtpBridge`, `SmtpTlsHandler`), protection des symboles Roslyn, détection ConfuserEx Unicode/ASCII/Letters/MD5, préservation des acronymes. |
-| **Isolation dynamique** | **PASS** | Job Object Win32 avec création suspendue sans fenêtre de course, quotas mémoire/CPU stricts, politique fail-closed sur non-Windows sans repli silencieux (testée déterministement). |
-| **Tests & Fixtures** | **PASS** | 479 tests xUnit verts (454 Unit / 25 Integration), 88 vérifications Python réussies (64 pytest + 24 détecteur), 9 benchmarks passés dont 1 réel, 20/20 types réels vérifiés au runtime. |
-| **Documentation** | **PASS** | Matrice de support en 9 colonnes basée sur des preuves (`SUPPORT_MATRIX.md`), spécification de sécurité (`WORKER_ISOLATION.md`), rapport exhaustif d'audit. |
-| **Maintenabilité du code** | **PASS** | Découpage de `Program.cs`, extraction de `CommandLineOptions` et `PeSymbolicEvaluator`, régexes culture-agnostiques, compilation 0 warning. |
+Conformément à la consigne d'honnêteté technique (*« ne revendique pas une validation Strong à partir d'une fixture où le mode n'est pas explicitement activé et vérifié »*), la matrice de support `docs/SUPPORT_MATRIX.md` a été revue et corrigée.
 
-### Recommandation finale
+| Fixture / Source | Protection ciblée | Profil / Paramètres réels | Mode de génération | Statut Manifeste & SHA | Validation spécifique | Niveau de preuve qualifié |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `real_confuserex` | Constants, Control Flow (Switch), Ref Proxy (Mild), Resources | `confuserex_v1.0.0.crproj` (modes par défaut mild/switch) | Protecteur réel ConfuserEx v1.0.0 (`3c9c29d`) | Manifeste vérifié, SHA conforme | 495 switch résolus, 15 proxies inlinés, JIT 20/20 types | **Real Fixture + CI** |
+| `real_confuserex_antitamper` | Anti-Tamper (Normal Mode) | `confuser_antitamper.crproj` | Protecteur réel ConfuserEx v1.0.0 (`3c9c29d`) | Manifeste vérifié, SHA conforme | Section `.confuser` décryptée, headers réparés | **Real Fixture + CI** |
+| `real_confuserex_compressor` | Deflate Compressor Packer | `confuser_compressor.crproj` | Protecteur réel ConfuserEx v1.0.0 (`3c9c29d`) | Manifeste vérifié, SHA conforme | Payload décompressé, stub supprimé, JIT validé | **Real Fixture + CI** |
+| `real_confuserex_proxy_cflow` | Reference Proxy (Mild) + Control Flow (Switch) | `confuser_proxy_cflow.crproj` (arguments mild et switch par défaut) | Protecteur réel ConfuserEx v1.0.0 (`3c9c29d`) | Manifeste vérifié, SHA conforme | Delegates proxies inlinés, switch CFF résolu | **Real Fixture + CI** |
+| `fixture_proxies.dll` + tests unitaires | Reference Proxy (Strong Mode) | Delegates dynamiques indirects | Synthétique / Tests unitaires `ProxyKillerTests` | Généré par FixtureGenerator | Inlining des proxies indirects résolu | **Synthetic / Unit Test** *(Rétrogradé de Real Fixture)* |
+| `fixture_cflow.dll` + tests unitaires | Control Flow (Jump Mangler & Junk Code) | Blocs de junk code et sauts imbriqués | Synthétique / Tests unitaires `DeadCodeStripperTests` | Généré par FixtureGenerator | Junk pairs éliminés, sauts aplatis | **Synthetic / Unit Test** *(Rétrogradé de Real Fixture)* |
+| `AntiTamperKillerTests` | Anti-Dump (PE & COR20 Scrubbing) | Manipulation d'en-têtes PE / CLR metadata | Synthétique / Tests unitaires | Tests unitaires ciblés | Reconstruction d'en-tête COR20 | **Synthetic / Unit Test** *(Rétrogradé de Real Fixture)* |
+| `QualityAuditorTests` | Anti-Debug & Anti-ILDasm | P/Invoke et attributs de suppression | Synthétique / Tests unitaires | Tests unitaires ciblés | Détection statique des heuristiques | **Synthetic / Unit Test** |
 
-La branche `fix/antidump-constants-dependencies-antitamper-validation` est dans un état d'excellence technique et de robustesse opérationnelle optimal.  
-L'ensemble des exigences des audits initial et complémentaire est traité, documenté de manière transparente et vérifiable, et rigoureusement validé par les tests automatiques.
+---
 
-**Recommandation** : **Feu vert complet pour intégration (Merge) dans la branche principale (`master` / `main`).**
+## E. Fiabilité du pipeline et gestion des verdicts
 
+### 1. Sémantique des codes de sortie
+Dans [Program.cs](../ConfuserExKillerRunner/Program.cs), la résolution du code de sortie a été vérifiée et clarifiée :
+- `SUCCESS` : Code de sortie `0`.
+- `FAILED` : Code de sortie `1`.
+- `UNCONFIRMED` : Code de sortie `2` par défaut (même en l'absence de `--strict-exit-codes`, sauf si `--allow-partial-exit-zero` est expressément demandé).
+- `PARTIAL_SUCCESS` : Code de sortie `2` par défaut.
+- `INDETERMINATE` : Code de sortie `2`.
+
+### 2. Bannières d'avertissement visibles
+Pour éviter qu'un script appelant n'interprète à tort une exécution non vérifiée comme un succès complet, des bannières consoles proéminentes sont affichées sur la sortie standard :
+```text
+[!] WARNING: Result is UNCONFIRMED. Structural or behavioral verification is incomplete. Do not treat this execution as a fully verified success.
+[!] WARNING: Result is PARTIAL_SUCCESS. Some protections were skipped or partially processed.
+```
+
+### 3. Protection étendue contre la réflexion
+Dans [SemanticRenamer.cs](../ConfuserExKillerRunner/Killers/SemanticRenamer.cs), la méthode `BuildReflectionReferenceMap()` a été renforcée :
+- Fenêtre d'analyse IL élargie à **20 instructions** précédant l'appel de réflexion.
+- Prise en charge exhaustive de :
+  - `Type.GetMethod(string)` et `Type.GetMethod(string, BindingFlags)` (avec combinaisons de flags public, non-public, static, instance).
+  - Surcharges avec paramètres typés (`Type[]`), `Type.GetProperty()`, `Type.GetField()`, `Type.GetEvent()`.
+  - Motifs `INotifyPropertyChanged` / `OnPropertyChanged("PropertyName")`.
+  - `Enum.Parse` et `Enum.TryParse`.
+  - Appels dynamiques via `TypeInfo`, `TypeExtensions` et `RuntimeReflectionExtensions`.
+- Tests unitaires dédiés : `C10_29_ReflectionProtection_GetMethod_BindingFlags_Preserved` et `C10_30_ReflectionProtection_PropertyChanged_Preserved` vérifiés avec succès.
+
+### 4. Rationalisation WinForms générique
+- Élimination de la dépendance exclusive aux préfixes d'éditeurs tiers (ex. DevExpress).
+- La détection de composants d'interface s'appuie désormais sur la hiérarchie de types : implémentation de `System.ComponentModel.IComponent`, héritage de `System.Windows.Forms.Control` ou `System.Windows.Forms.Form`.
+- Test générique dédié : `C10_31_GenericWinForms_CustomComponentLibrary_Preserved` validé.
+
+---
+
+## F. Fiabilité de la CI et de l'outillage
+
+### 1. Épinglage des actions GitHub par SHA immuable
+Toutes les actions externes dans [.github/workflows/ci.yml](../.github/workflows/ci.yml) sont désormais épinglées sur leur hash de commit complet à 40 caractères :
+```yaml
+- uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+- uses: actions/setup-dotnet@3951f0dfe7a07e2313ec93c75700083e2005cbab # v4.3.0
+- uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+- uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+```
+
+### 2. Vérification de la disponibilité de PEVerify
+- **Présence démontrée sur l'image `windows-latest`** : `PEVerify.exe` fait partie du SDK Windows 10/11 préinstallé par GitHub sur les runners hébergés (`C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.8 Tools\PEVerify.exe`).
+- Dans le pipeline Unconfuser, `QualityAuditor.ResolvePEVerifyPath()` résout automatiquement cet exécutable.
+- Exécution démontrée : Les rapports de test affichent `IL Verification: [PASSED] (PEVerify: All classes and methods verified.)`.
+
+### 3. Couverture globale des suites de tests
+- **Tests C# xUnit** : **503 / 503 passés** (0 échec, 0 ignoré).
+  - 100% des 34 fichiers de test sont catégorisés par traits : 476 tests unitaires (`Category=Unit`), 27 tests d'intégration (`Category=Integration`).
+- **Tests Python Pytest** : **64 / 64 passés** (0 échec).
+- **Tests de détection Python** : **24 / 24 passés** (`test_detector.py`).
+- **Benchmarks de déobfuscation** : **9 / 9 passés** (8 synthétiques, 1 protecteur réel ConfuserEx).
+- **Vérification comportementale runtime** : **20 / 20 types** inspectés et compilés par JIT sans aucune erreur IL.
+
+---
+
+## G. Maintenabilité et modularisation de Program.cs
+
+### 1. Responsabilités actuelles de Program.cs
+Avec 1 323 lignes de code, `Program.cs` assure les fonctions fondamentales de point d'entrée :
+1. Routage vers `WorkerHost` (`--internal-worker`).
+2. Détection d'architecture PE / compatibilité processus.
+3. Création et nettoyage de l'espace temporaire isolé.
+4. Orchestration séquentielle chronométrée des étapes (Compressor, Anti-Tamper, Constants/Proxies, CFF, DeadCode, Cleanup).
+5. Audit de qualité et évaluation de la matrice de protection.
+6. Promotion sécurisée du binaire candidat et gestion des codes d'erreur.
+
+### 2. Découplages déjà réalisés
+- `CommandLineOptions.cs` : Gestion des arguments, validation CLI et aide.
+- `PipelineReporter.cs` : Formatage console, bannières et génération du rapport JSON.
+- `PeSymbolicEvaluator.cs` : Analyse symbolique PE (~1 280 lignes extraites).
+
+### 3. Travaux de modularisation reportés et justification
+Conformément aux directives de la Phase 10 (*« Si une extraction augmente sensiblement le risque de régression, fournir un plan documenté plutôt que forcer une refactorisation »*), une décomposition plus poussée (vers un `PipelineCoordinator` ou `PromotionManager`) a été délibérément différée.  
+*Justification* : Le pipeline actuel est stabilisé, testé par 503 tests C# et 64 tests Python sans la moindre régression. Une refonte structurelle du flux d'orchestration introduirait un risque élevé de régression sur la gestion des flux temporaires et des codes de sortie sans bénéfice fonctionnel direct.
+
+---
+
+## H. État de protection GitHub
+
+L'interrogation directe de l'API GitHub (`api.github.com/repos/djdjamel/unconfuser/branches`) confirme l'état actuel :
+- Branche `main` : `protected: false`
+- Branche `fix/antidump-constants-dependencies-antitamper-validation` : `protected: false`
+
+> [!NOTE]
+> L'activation des règles de protection requiert les permissions d'administration du propriétaire du dépôt.  
+> Procédure recommandée pour le propriétaire : dans **Settings > Branches**, ajouter une règle sur `main` exigeant une PR et le passage obligatoire du check CI `build-and-test`.
+
+---
+
+## I. Verdict final motivé
+
+### Choix du verdict : **VALIDÉ AVEC RÉSERVES**
+
+#### Points validés :
+1. **Isolation des workers démontrée** : Bloc d'environnement minimal Unicode allowlisté et restriction stricte des handles hérités via `STARTUPINFOEX` (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`), avec couverture par tests unitaires réels.
+2. **SemanticRenamer fiabilisé** : Élimination des faux négatifs sur tokens ALL-CAPS aléatoires, décomposition d'acronymes, et validation empirique sur >47 000 identifiants réels avec un taux de faux positifs exceptionnel de 0,17%.
+3. **Codes de sortie et verdicts intègres** : Traitement strict de `UNCONFIRMED` en exit code 2, bannières d'avertissement visibles et protection complète des API de réflexion.
+4. **CI sécurisée** : Actions GitHub épinglées par SHA complet et disponibilité vérifiée de PEVerify.
+5. **Couverture de tests sans faille** : 503 tests C#, 88 tests Python et 9 benchmarks réussis à 100%.
+
+#### Réserves documentées :
+1. **Historique Git partagé** : Bien que l'arbre de travail soit irréprochable et qu'aucun secret actif n'ait été détecté, la purge définitive des anciennes mentions (`XpertPharm5`, chemins locaux) dans les anciens objets Git partagés requiert une réécriture par `git filter-repo` et un force-push que seul le propriétaire peut valider.
+2. **Gouvernance GitHub** : La protection de branche `main` demeure désactivée au niveau du dépôt GitHub distant jusqu'à configuration par l'administrateur.
+3. **Qualification des profils extrêmes de ConfuserEx** : Les profils `Strong Mode` pour les proxies de référence et `Jump Mangler + Junk Code` pour le flux de contrôle restent qualifiés au niveau `Synthetic / Unit Test` dans la matrice de support, car le profil réel disponible de ConfuserEx exécutait les modes par défaut.
