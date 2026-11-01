@@ -1184,24 +1184,190 @@ namespace ConfuserExKillerRunner.Tests
             Assert.True(result.UnprintableNormalized >= 4);
         }
 
+        [Theory]
+        [InlineData("KPXQTZVRMProcessor", true)]
+        [InlineData("KPXQTZVRMHandler", true)]
+        [InlineData("ABCDWXYZHandler", true)]
+        [InlineData("HTMLParser", false)]
+        [InlineData("HTTPServer", false)]
+        [InlineData("XMLHttpRequest", false)]
+        [InlineData("JSONSerializer", false)]
+        [InlineData("UTF8Encoding", false)]
+        [InlineData("CustomerRepository", false)]
+        [InlineData("RGBColor", false)]
+        [InlineData("IOHelper", false)]
+        [InlineData("AES256KeyGenerator", false)]
+        [InlineData("IPv6AddressValidator", false)]
+        [InlineData("BgpMqttGateway", false)]
+        [InlineData("AESGCMEncryption", false)]
+        [InlineData("TCPUDPStreamHandler", false)]
+        [Trait("Category", "Unit")]
+        public void C10_28_Detection_AllCapsRandomSequencesAndLegitimateAcronyms(string identifier, bool shouldBeMangled)
+        {
+            bool isMangled = SemanticRenamer.IsMangledIdentifier(identifier);
+            Assert.Equal(shouldBeMangled, isMangled);
+        }
+
         [Fact]
         [Trait("Category", "Unit")]
-        public void C10_27_Detection_RandomTitleCaseFragmentsWithSolidSuffix_DetectedAsMangled()
+        public void C10_29_ReflectionProtection_GetMethod_BindingFlags_Preserved()
         {
-            // Pseudo-legitimate identifiers composed of multiple random TitleCase consonant clusters
-            // followed by a solid domain word must be detected as mangled
-            Assert.True(SemanticRenamer.IsMangledIdentifier("KpxQtzVrmProcessor"));
-            Assert.True(SemanticRenamer.IsMangledIdentifier("KpxQtzVrmHandler"));
-            Assert.True(SemanticRenamer.IsMangledIdentifier("KpxQtzProcessor"));
-            Assert.True(SemanticRenamer.IsMangledIdentifier("KpxQtzVrm"));
+            var module = new ModuleDefUser("ReflectionBindingTest.dll");
+            var serviceType = new TypeDefUser("MyApp.Services", "InternalService", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(serviceType);
 
-            // While genuine multi-acronym compounds remain preserved
-            Assert.False(SemanticRenamer.IsMangledIdentifier("SctpRtpRtcpProcessor"));
-            Assert.False(SemanticRenamer.IsMangledIdentifier("SctpRtpRtcpHandler"));
-            Assert.False(SemanticRenamer.IsMangledIdentifier("SftpScpNtpBridge"));
-            Assert.False(SemanticRenamer.IsMangledIdentifier("SmtpTlsHandler"));
-            Assert.False(SemanticRenamer.IsMangledIdentifier("HTMLParser"));
-            Assert.False(SemanticRenamer.IsMangledIdentifier("CustomerRepository"));
+            // Private method with mangled name targeted via Type.GetMethod(string, BindingFlags)
+            var targetMethod = new MethodDefUser("\u200B\u200CExecuteInternalAction", MethodSig.CreateInstance(module.CorLibTypes.Void), MethodAttributes.Private)
+            {
+                Body = new CilBody()
+            };
+            targetMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            serviceType.Methods.Add(targetMethod);
+
+            // Caller calling Type.GetMethod with BindingFlags.NonPublic | BindingFlags.Instance
+            var callerType = new TypeDefUser("MyApp.Services", "Invoker", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(callerType);
+            var invokeMethod = new MethodDefUser("InvokePrivate", MethodSig.CreateStatic(module.CorLibTypes.Void))
+            {
+                Body = new CilBody()
+            };
+
+            var typeRef = new TypeRefUser(module, "System", "Type", module.CorLibTypes.AssemblyRef);
+            var bindingFlagsRef = new TypeRefUser(module, "System.Reflection", "BindingFlags", module.CorLibTypes.AssemblyRef);
+            var getMethodRef = new MemberRefUser(
+                module,
+                "GetMethod",
+                MethodSig.CreateInstance(typeRef.ToTypeSig(), module.CorLibTypes.String, bindingFlagsRef.ToTypeSig()),
+                typeRef);
+
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldtoken, serviceType));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new MemberRefUser(module, "GetTypeFromHandle",
+                MethodSig.CreateStatic(typeRef.ToTypeSig(), new TypeRefUser(module, "System", "RuntimeTypeHandle", module.CorLibTypes.AssemblyRef).ToTypeSig()), typeRef)));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "\u200B\u200CExecuteInternalAction"));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4, 36)); // NonPublic (32) | Instance (4)
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, getMethodRef));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+            invokeMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            callerType.Methods.Add(invokeMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            // Target method name must be preserved because of explicit reflection call
+            Assert.Equal("\u200B\u200CExecuteInternalAction", targetMethod.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_30_ReflectionProtection_PropertyChanged_Preserved()
+        {
+            var module = new ModuleDefUser("NotifyTest.dll");
+            var viewModelType = new TypeDefUser("MyApp.ViewModels", "CustomerViewModel", module.CorLibTypes.Object.TypeDefOrRef);
+            module.Types.Add(viewModelType);
+
+            var prop = new PropertyDefUser("\u200B\u200CCustomerBalance", new PropertySig(true, module.CorLibTypes.Int32));
+            viewModelType.Properties.Add(prop);
+
+            var notifyMethod = new MethodDefUser("OnPropertyChanged", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String))
+            {
+                Body = new CilBody()
+            };
+            notifyMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            viewModelType.Methods.Add(notifyMethod);
+
+            var setterMethod = new MethodDefUser("set_CustomerBalance", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.Int32))
+            {
+                Body = new CilBody()
+            };
+            setterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+            setterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldstr, "\u200B\u200CCustomerBalance"));
+            setterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, notifyMethod));
+            setterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            viewModelType.Methods.Add(setterMethod);
+
+            var result = SemanticRenamer.Execute(module, verbose: false);
+
+            Assert.Equal("\u200B\u200CCustomerBalance", prop.Name.String);
+            Assert.Equal(0, result.UnprintableNormalized);
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_31_GenericWinForms_CustomComponentLibrary_Preserved()
+        {
+            var module = new ModuleDefUser("CustomUiTest.dll");
+            var baseControlType = new TypeDefUser("ThirdParty.UI", "CustomBaseControl", module.CorLibTypes.Object.TypeDefOrRef);
+            baseControlType.Interfaces.Add(new InterfaceImplUser(new TypeRefUser(module, "System.ComponentModel", "IComponent", module.CorLibTypes.AssemblyRef)));
+            module.Types.Add(baseControlType);
+
+            var userFormType = new TypeDefUser("MyApp.Views", "DashboardView", baseControlType);
+            module.Types.Add(userFormType);
+
+            Assert.True(SemanticRenamer.IsWinFormsControlOrForm(userFormType));
+
+            var setNameMethod = new MethodDefUser("set_Name", MethodSig.CreateInstance(module.CorLibTypes.Void, module.CorLibTypes.String));
+            baseControlType.Methods.Add(setNameMethod);
+
+            Assert.True(SemanticRenamer.IsControlSetName(setNameMethod));
+        }
+
+        [Fact]
+        [Trait("Category", "Unit")]
+        public void C10_32_EmpiricalFalsePositiveRate_RealCorpusEvaluation()
+        {
+            // Evaluate SemanticRenamer.IsMangledIdentifier across real assemblies
+            var testAssemblies = new[]
+            {
+                typeof(SemanticRenamer).Assembly,
+                typeof(dnlib.DotNet.ModuleDef).Assembly,
+                typeof(string).Assembly
+            };
+
+            int totalIdentifiers = 0;
+            int flaggedMangled = 0;
+            var flaggedNames = new List<string>();
+
+            foreach (var asm in testAssemblies)
+            {
+                foreach (var t in asm.GetTypes())
+                {
+                    if (t.IsSpecialName) continue;
+                    totalIdentifiers++;
+                    if (SemanticRenamer.IsMangledIdentifier(t.Name))
+                    {
+                        flaggedMangled++;
+                        flaggedNames.Add(t.Name);
+                    }
+
+                    foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly))
+                    {
+                        if (m.IsSpecialName) continue;
+                        totalIdentifiers++;
+                        if (SemanticRenamer.IsMangledIdentifier(m.Name))
+                        {
+                            flaggedMangled++;
+                            flaggedNames.Add(m.Name);
+                        }
+                    }
+
+                    foreach (var f in t.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly))
+                    {
+                        if (f.IsSpecialName) continue;
+                        totalIdentifiers++;
+                        if (SemanticRenamer.IsMangledIdentifier(f.Name))
+                        {
+                            flaggedMangled++;
+                            flaggedNames.Add(f.Name);
+                        }
+                    }
+                }
+            }
+
+            Assert.True(totalIdentifiers >= 10000, $"Corpus size was too small: {totalIdentifiers}");
+            double fpRate = (double)flaggedMangled / totalIdentifiers;
+
+            // False positive rate on real benign assemblies must be strictly under 0.5% (> 99.5% specificity)
+            Assert.True(fpRate < 0.005, $"False positive rate {fpRate:P3} ({flaggedMangled}/{totalIdentifiers}) exceeded threshold 0.5%. Flagged sample: {string.Join(", ", flaggedNames.Take(10))}");
         }
 
         #endregion

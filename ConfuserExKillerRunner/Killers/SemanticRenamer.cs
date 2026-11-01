@@ -109,8 +109,34 @@ namespace ConfuserExKillerRunner.Killers
             "xpath", "attr", "prop", "elem", "param", "args", "temp", "tmp", "cfg", "config",
             "ctx", "env", "app", "svc", "mgr", "init", "impl", "repo", "prev", "next", "curr",
             "min", "max", "avg", "sum", "cnt", "num", "pos", "idx", "len", "buf", "str", "char",
-            "int", "bool", "byte", "enum", "dict", "spec", "info", "desc", "err", "warn"
+            "int", "bool", "byte", "enum", "dict", "spec", "info", "desc", "err", "warn",
+            "bgp", "mqtt", "grpc", "pe", "nt", "clr", "sz", "il", "md", "ldstr"
         };
+
+        private static bool CanSegmentAllCapsAcronym(string tok)
+        {
+            if (string.IsNullOrEmpty(tok) || tok.Length <= 1) return false;
+            string tokLower = tok.ToLowerInvariant();
+            if (CommonAbbreviationWords.Contains(tokLower))
+                return true;
+
+            int n = tok.Length;
+            bool[] dp = new bool[n + 1];
+            dp[0] = true;
+            for (int i = 0; i < n; i++)
+            {
+                if (!dp[i]) continue;
+                for (int len = 2; len <= n - i; len++)
+                {
+                    string sub = tokLower.Substring(i, len);
+                    if (CommonAbbreviationWords.Contains(sub))
+                    {
+                        dp[i + len] = true;
+                    }
+                }
+            }
+            return dp[n];
+        }
 
         private static readonly HashSet<string> GenericResourceWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -152,12 +178,16 @@ namespace ConfuserExKillerRunner.Killers
                             {
                                 string mName = called.Name;
                                 string declType = called.DeclaringType?.FullName;
+                                bool isTypeReflection = declType == "System.Type" ||
+                                                        declType == "System.Reflection.TypeInfo" ||
+                                                        declType == "System.Reflection.TypeExtensions" ||
+                                                        declType == "System.Reflection.RuntimeReflectionExtensions";
 
-                                if (declType == "System.Type")
+                                if (isTypeReflection)
                                 {
                                     if (mName == "GetType")
                                     {
-                                        for (int j = i - 1; j >= Math.Max(0, i - 6); j--)
+                                        for (int j = i - 1; j >= Math.Max(0, i - 16); j--)
                                         {
                                             if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
                                             {
@@ -168,9 +198,11 @@ namespace ConfuserExKillerRunner.Killers
                                         }
                                     }
                                     else if (mName == "GetMethod" || mName == "GetProperty" || mName == "GetField" ||
-                                             mName == "GetEvent" || mName == "GetMember")
+                                             mName == "GetEvent" || mName == "GetMember" ||
+                                             mName == "GetRuntimeMethod" || mName == "GetRuntimeProperty" ||
+                                             mName == "GetRuntimeField" || mName == "GetRuntimeEvent")
                                     {
-                                        for (int j = i - 1; j >= Math.Max(0, i - 8); j--)
+                                        for (int j = i - 1; j >= Math.Max(0, i - 20); j--)
                                         {
                                             if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
                                             {
@@ -180,7 +212,7 @@ namespace ConfuserExKillerRunner.Killers
                                     }
                                     else if (mName == "GetNestedType")
                                     {
-                                        for (int j = i - 1; j >= Math.Max(0, i - 8); j--)
+                                        for (int j = i - 1; j >= Math.Max(0, i - 16); j--)
                                         {
                                             if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
                                             {
@@ -191,7 +223,7 @@ namespace ConfuserExKillerRunner.Killers
                                 }
                                 else if ((declType == "System.Reflection.Assembly" || declType == "System.Reflection.Module") && mName == "GetType")
                                 {
-                                    for (int j = i - 1; j >= Math.Max(0, i - 6); j--)
+                                    for (int j = i - 1; j >= Math.Max(0, i - 16); j--)
                                     {
                                         if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
                                         {
@@ -203,7 +235,7 @@ namespace ConfuserExKillerRunner.Killers
                                 }
                                 else if (declType == "System.Activator" && mName == "CreateInstance")
                                 {
-                                    for (int j = i - 1; j >= Math.Max(0, i - 8); j--)
+                                    for (int j = i - 1; j >= Math.Max(0, i - 16); j--)
                                     {
                                         if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
                                         {
@@ -213,7 +245,7 @@ namespace ConfuserExKillerRunner.Killers
                                 }
                                 else if (declType == "System.Enum" && (mName == "Parse" || mName == "TryParse"))
                                 {
-                                    for (int j = i - 1; j >= Math.Max(0, i - 8); j--)
+                                    for (int j = i - 1; j >= Math.Max(0, i - 16); j--)
                                     {
                                         if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
                                         {
@@ -224,7 +256,18 @@ namespace ConfuserExKillerRunner.Killers
                                 else if ((declType == "System.Windows.Forms.ControlBindingsCollection" ||
                                           declType == "System.Windows.Forms.BindingsCollection") && mName == "Add")
                                 {
-                                    for (int j = i - 1; j >= Math.Max(0, i - 8); j--)
+                                    for (int j = i - 1; j >= Math.Max(0, i - 16); j--)
+                                    {
+                                        if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
+                                        {
+                                            map.ExplicitMemberNames.Add(strVal);
+                                        }
+                                    }
+                                }
+                                else if (mName.IndexOf("PropertyChanged", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                         mName == "RaisePropertyChanged" || mName == "NotifyPropertyChanged" || mName == "OnPropertyChanged")
+                                {
+                                    for (int j = i - 1; j >= Math.Max(0, i - 16); j--)
                                     {
                                         if (instrs[j].OpCode == OpCodes.Ldstr && instrs[j].Operand is string strVal)
                                         {
@@ -1660,6 +1703,9 @@ namespace ConfuserExKillerRunner.Killers
                     fn == "System.Windows.Forms.Form" ||
                     fn == "System.Windows.Forms.UserControl" ||
                     fn == "System.Windows.Forms.ContainerControl" ||
+                    fn == "System.ComponentModel.Component" ||
+                    fn.EndsWith("Form") ||
+                    fn.EndsWith("UserControl") ||
                     fn.StartsWith("DevExpress.XtraEditors.XtraForm") ||
                     fn.StartsWith("DevExpress.XtraEditors.XtraUserControl") ||
                     fn.StartsWith("DevExpress.XtraBars.Ribbon.RibbonForm"))
@@ -1670,6 +1716,8 @@ namespace ConfuserExKillerRunner.Killers
 
                 var td = curr.ResolveTypeDef();
                 if (td == null) break;
+                if (td.Interfaces != null && td.Interfaces.Any(i => i.Interface?.FullName == "System.ComponentModel.IComponent"))
+                    return true;
                 curr = td.BaseType;
             }
             return false;
@@ -1684,6 +1732,12 @@ namespace ConfuserExKillerRunner.Killers
             if (fn == "System.Windows.Forms.Control" ||
                 fn == "System.Windows.Forms.Form" ||
                 fn == "System.Windows.Forms.UserControl" ||
+                fn == "System.ComponentModel.IComponent" ||
+                fn == "System.ComponentModel.Component" ||
+                fn.EndsWith("Form") ||
+                fn.EndsWith("Control") ||
+                fn.EndsWith("Item") ||
+                fn.EndsWith("Bar") ||
                 fn.StartsWith("DevExpress.XtraEditors.") ||
                 fn.StartsWith("DevExpress.XtraBars."))
             {
@@ -1806,6 +1860,7 @@ namespace ConfuserExKillerRunner.Killers
                 int singleLetterTokens = 0;
                 int solidWords = 0;
 
+                bool hasUnverifiedAllCapsCluster = false;
                 foreach (Match m in matches)
                 {
                     string tok = m.Value;
@@ -1815,9 +1870,44 @@ namespace ConfuserExKillerRunner.Killers
                         if (IsVowel(tok[k])) { hasVowel = true; break; }
                     }
 
-                    bool isAllUpperAcronym = tok.Length >= 2 && tok.All(char.IsUpper);
+                    bool isAllUpper = tok.Length >= 2 && tok.All(char.IsUpper);
                     bool isAbbrev = CommonAbbreviationWords.Contains(tok);
                     bool isDigit = char.IsDigit(tok[0]);
+
+                    bool isAllUpperAcronym = false;
+                    if (isAllUpper)
+                    {
+                        if (tok.Length <= 3 || CanSegmentAllCapsAcronym(tok))
+                        {
+                            isAllUpperAcronym = true;
+                        }
+                        else
+                        {
+                            // Unsegmented all-caps token of length >= 4 (e.g. KPXQTZVRM, ABCDWXYZ)
+                            int consRun = 0;
+                            int maxCons = 0;
+                            for (int ci = 0; ci < tok.Length; ci++)
+                            {
+                                if (!IsVowel(tok[ci]))
+                                {
+                                    consRun++;
+                                    if (consRun > maxCons) maxCons = consRun;
+                                }
+                                else
+                                {
+                                    consRun = 0;
+                                }
+                            }
+                            if (maxCons >= 5 || !hasVowel)
+                            {
+                                hasUnverifiedAllCapsCluster = true;
+                            }
+                            else if (hasVowel && maxCons < 4)
+                            {
+                                isAllUpperAcronym = true;
+                            }
+                        }
+                    }
 
                     if (tok.Length == 1 && char.IsLetter(tok[0]))
                     {
@@ -1837,6 +1927,9 @@ namespace ConfuserExKillerRunner.Killers
                         junkTokens++;
                     }
                 }
+
+                if (hasUnverifiedAllCapsCluster)
+                    return true;
 
                 // If EVERY token is meaningful/valid, the identifier is strictly legitimate
                 if (junkTokens == 0)
