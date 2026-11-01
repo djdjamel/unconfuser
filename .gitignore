@@ -35,6 +35,8 @@ benchmarks/fixtures/*
 !benchmarks/fixtures/real_confuserex/**
 benchmarks/fixtures/real_confuserex/*_clean.exe
 benchmarks/verify_*.json
+benchmarks/peverify_runner_verification.log
+**/TestResults/
 !benchmarks/fixtures/real_confuserex_antitamper/
 !benchmarks/fixtures/real_confuserex_antitamper/**
 !benchmarks/fixtures/real_confuserex_antitamper_constants/

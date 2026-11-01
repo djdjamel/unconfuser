@@ -1,5 +1,5 @@
 {
-  "EvaluationDate": "2026-11-01T13:38:10.6263878Z",
+  "EvaluationDate": "2026-11-01T13:43:09.8159755Z",
   "ManifestVerification": {
     "PinnedAssembliesVerified": true,
     "PinnedAssembliesCount": 2
@@ -30,7 +30,7 @@
       "Version": "1.0.0.0",
       "LogicalPath": "ConfuserExKillerRunner/bin/Release/net8.0-windows/ConfuserExKillerRunner.dll",
       "Category": "DynamicCompilation",
-      "Sha256": "27dbe6e686e59eed62ab4991d6d706951185db95c1ac669374ecf41494848d9b",
+      "Sha256": "f9d73b52f941a6657536d7d204a77a31f8bf17f0bb3712ab93db60cfb02aa991",
       "Sha256Verified": null,
       "Provenance": "Unconfuser deobfuscation engine runner",
       "SizeBytes": 418816

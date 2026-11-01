@@ -55,7 +55,7 @@ jobs:
       run: python benchmarks/prepare_real_fixture.py
 
     - name: Run C# Unit & Integration Tests
-      run: dotnet test unconfuser.sln -c Release --no-build --verbosity normal
+      run: dotnet test unconfuser.sln -c Release --no-build --verbosity normal --logger "trx;LogFileName=test_results.trx"
 
     - name: Run Deobfuscation Benchmark Suite
       run: python benchmarks/run_benchmark.py
@@ -77,12 +77,13 @@ jobs:
       if: success() || failure()
       run: python test_detector.py
 
-    - name: Upload Benchmark Reports
+    - name: Upload Test Results and Benchmark Reports
       if: always()
       uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
       with:
-        name: benchmark-reports
+        name: test-and-benchmark-reports
         path: |
+          **/TestResults/*.trx
           benchmarks/benchmark_report.md
           benchmarks/benchmark_report.json
           benchmarks/verify_benign_report.json

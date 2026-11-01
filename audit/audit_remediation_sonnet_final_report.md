@@ -183,20 +183,24 @@ Dans [Program.cs](../ConfuserExKillerRunner/Program.cs), la résolution du code 
 - `INDETERMINATE` : Code de sortie `2`.
 
 ### 2. Bannières d'avertissement visibles
-Pour éviter qu'un script appelant n'interprète à tort une exéc### 3. Protection étendue contre la réflexion (Noms statiques et dynamiques)
-Dans [SemanticRenamer.cs](../ConfuserExKillerRunner/Killers/SemanticRenamer.cs), la méthode `BuildReflectionReferenceMap()` a été refondue pour traiter systématiquement les références statiques et dynamiques :
-- Fenêtre d'analyse IL élargie à **20 instructions** précédant l'appel de réflexion.
-- Prise en charge exhaustive des API de réflexion :
-  - `Type.GetMethod(string, BindingFlags)` (avec combinaisons de flags `NonPublic`, `Public | Instance`, static).
-  - Surcharges avec paramètres typés (`Type[]`), `Type.GetProperty()`, `Type.GetField()`, `Type.GetEvent()`.
-- Prise en charge des noms dynamiques résolubles statiquement :
-  - Concaténation de constantes littérales (`ldstr "Get"` + `ldstr "Data"` + `call string.Concat`).
-  - Affectation et chargement via variables locales (`ldstr` + `stloc` -> `ldloc`).
-  - Constantes issues de champs statiques (`ldsfld`).
-- Prise en charge des cas dynamiques non résolubles :
-  - En présence d'un appel de réflexion sur un membre dont le nom est calculé dynamiquement de manière opaque, le type cible est marqué `UnresolvableDynamicReflectionTypes`.
-  - Les membres du type sont protégés de manière conservatrice avec une décision `Ambiguous`, évitant tout renommage accidentel qui briserait l'exécution runtime.
-- Tests unitaires dédiés : `C10_29A` à `C10_29G` et `C10_30` vérifiés avec succès (8 tests couvrant tous les cas).
+### 3. Protection étendue contre la réflexion (Noms statiques et dynamiques par analyse de pile)
+Dans [SemanticRenamer.cs](../ConfuserExKillerRunner/Killers/SemanticRenamer.cs), l'analyse de réflexion a été fiabilisée au niveau de la pile IL :
+- Modélisation de la pile d'évaluation (`FindStackProducer`) pour identifier précisément l'instruction produisant l'argument du nom de membre et celle produisant l'objet `Type` cible.
+- Résolution exacte du type cible :
+  - `typeof(Target)` via `ldtoken Target` + `call Type.GetTypeFromHandle`.
+  - `target.GetType()` via `callvirt Object.GetType()` sur argument, variable locale ou champ typé `TargetType`.
+  - `Type.GetType("Namespace.Target")` via nom de type littéral.
+  - Distinction nette entre le type appelant (`CallerType`) et le véritable type cible (`TargetType`).
+- Résolution stricte du nom de membre :
+  - Rejet absolu des chaînes littérales sans rapport (ex. messages de diagnostic ou logs antérieurs) qui ne se trouvent pas sur la pile à la profondeur requise.
+  - Détection rigoureuse des variables locales : seules les variables affectées une seule et unique fois dans la méthode par une constante (`unambiguousLocals`) sont résolues ; les affectations multiples ou conditionnelles sont formellement classées comme dynamiques.
+  - Concaténation de constantes littérales (`String.Concat(s1, s2)`).
+  - Constantes de champs statiques (`ldsfld`).
+  - Prise en charge explicite de `GetEvent()` et `GetRuntimeEvent()`.
+- Stratégie conservatrice :
+  - Si le nom de membre est dynamique mais le type cible connu (`TargetType`), seul `TargetType` est protégé avec la décision `Ambiguous`. `CallerType` n'est jamais faussement marqué.
+  - Si le type cible ne peut pas être résolu statiquement, la protection conservatrice s'applique à la portée du module (`HasUnresolvableModuleScopeReflection`).
+- Tests unitaires dédiés : `C10_29A` à `C10_29K` et `C10_30` vérifiés avec succès (12 tests unitaires couvrant l'ensemble des scénarios).
 
 ### 4. Rationalisation WinForms : Séparation stricte des composants visuels
 - **Principe directeur** : Seuls les véritables composants visuels d'interface utilisateur participent à la restauration des noms de contrôles et d'événements.
@@ -219,27 +223,33 @@ Toutes les actions externes dans [.github/workflows/ci.yml](../.github/workflows
 - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
 ```
 
-### 2. Vérification PEVerify spécifique au runner GitHub
-- **Étape CI explicite** : Ajout de l'étape `Verify PEVerify Availability and Execute Official Runner Verification` exécutant `scripts/Verify-PEVerifyOnRunner.ps1`.
-- **Méthodologie démontrée sur `windows-latest`** :
-  1. Recherche `PEVerify.exe` dans les chemins officiels du SDK Windows (`C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.8 Tools\x64\PEVerify.exe`).
-  2. Affiche le chemin complet et la version (`4.8.3928.0`).
-  3. Vérifie l'existence de l'exécutable (`Test-Path`).
-  4. Exécute `/IL` et `/MD` sur la fixture .NET Framework 4.8 saine (`benchmarks/BenignSample/bin/Release/net48/BenignSample.exe`).
-  5. Vérifie le code de sortie (0) et consigne le journal complet dans `benchmarks/peverify_runner_verification.log`.
-  6. Si l'outil est introuvable, l'étape consigne `STATUS: VERIFICATION_NOT_EXECUTED` et échoue (exit 1).
-- **Archivage en artefact CI** : `peverify_runner_verification.log` et `corpus_evaluation_report.json` sont automatiquement téléversés dans l'artefact `benchmark-reports`.
+### 2. Preuve PEVerify officielle sur runner GitHub et journalisation
+- **Résultat officiel validé en CI #46** :
+  - **Commit exact** : `73e626a9b67828d4c5b58a0090f8a91174136d9e`
+  - **Run ID GitHub** : `41290029774` (Workflow `CI`, job `build-and-test`, SUCCESS)
+  - **Environnement officiel** : Windows Server 2025 Standard (version OS `10.0.26100`)
+  - **Exécutable officiel** : `C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.8 Tools\x64\PEVerify.exe`
+  - **Version PEVerify officielle** : `4.8.9037.0`
+  - **Code retour** : `0` (Zero MD / IL errors)
+- **Distinction claire preuve locale vs preuve CI** :
+  - Les journaux d'exécution locaux ne sont plus commis dans le dépôt Git (`benchmarks/peverify_runner_verification.log` est ignoré par `.gitignore`).
+  - La preuve officielle est générée dynamiquement par l'étape `Verify PEVerify Availability and Execute Official Runner Verification` sur le runner GitHub et archivée dans l'artefact `test-and-benchmark-reports`.
 
-### 3. Réconciliation et couverture globale des suites de tests
-- **Résolution de la contradiction de comptage (503 vs 524)** :
-  - Sur le HEAD de référence `cbf3bea`, la suite xUnit exécutait exactement **503 cas de test** (477 `Category=Unit` et 26 `Category=Integration`, correspondant à 478 méthodes de test). La mention 524 dans un journal local intermédiaire était un erratum textuel.
-  - Après l'ajout des 14 tests de renforcement des phases 1, 2, 3, 5 et 6, le total vérifié s'élève désormais à **517 cas de test xUnit** (491 unitaires + 26 intégration, 487 méthodes de test distinctes, 30 expansions `InlineData`), 100% passés.
-- **Synthèse d'exécution complète (100% verte)** :
-  - **Tests C# xUnit** : **517 / 517 passés** (0 échec, 0 ignoré).
+### 3. Compilation et avertissements SDK
+- **Avertissement attendu sur `net6.0-windows`** :
+  La compilation produit 1 avertissement SDK :  
+  `NETSDK1138: You are using a targeted version of .NET (net6.0-windows) that has reached end of life and is no longer supported.`
+- **Justification technique documentée** :  
+  Conformément au plan d'obsolescence consigné dans [docs/DEPRECATION_NET6.md](../docs/DEPRECATION_NET6.md), le multi-ciblage conserve temporairement `net6.0-windows` pour garantir la continuité opérationnelle des environnements existants jusqu'à la v2.0. Le rapport ne prétend donc pas à "zéro avertissement sur toutes les cibles", cet avertissement d'obsolescence étant l'expression normale du SDK moderne face à un TFM de transition.
+
+### 4. Réconciliation et couverture globale des suites de tests
+- **Comptage démontré et vérifié** :
+  - Total : **521 cas de test xUnit** (495 `Category=Unit` + 26 `Category=Integration`, 491 méthodes de test distinctes, 30 expansions `InlineData`), 100% passés.
   - **Tests Python Pytest** : **64 / 64 passés** (0 échec).
   - **Tests de détection Python** : **24 / 24 passés** (`test_detector.py`).
   - **Benchmarks de déobfuscation** : **9 / 9 passés** (8 synthétiques, 1 protecteur réel ConfuserEx).
   - **Vérification comportementale runtime** : **20 / 20 types** inspectés et compilés par JIT sans aucune erreur IL.
+  - **Génération de rapport TRX** : L'étape de test génère un fichier structuré `test_results.trx` archivé dans les artefacts CI.
 
 ---
 
@@ -261,7 +271,7 @@ Avec 1 323 lignes de code, `Program.cs` assure les fonctions fondamentales de po
 
 ### 3. Travaux de modularisation reportés et justification
 Conformément aux directives (*« Si une extraction augmente sensiblement le risque de régression, fournir un plan documenté plutôt que forcer une refactorisation »*), une décomposition plus poussée (vers un `PipelineCoordinator` ou `PromotionManager`) a été délibérément différée.  
-*Justification* : Le pipeline actuel est stabilisé, testé par 517 tests C# et 88 tests Python sans la moindre régression. Une refonte structurelle du flux d'orchestration introduirait un risque élevé de régression sur la gestion des flux temporaires et des codes de sortie sans bénéfice fonctionnel direct.
+*Justification* : Le pipeline actuel est stabilisé, testé par 521 tests C# et 88 tests Python sans la moindre régression. Une refonte structurelle du flux d'orchestration introduirait un risque élevé de régression sur la gestion des flux temporaires et des codes de sortie sans bénéfice fonctionnel direct.
 
 ---
 
@@ -282,14 +292,21 @@ L'interrogation directe de l'API GitHub (`api.github.com/repos/djdjamel/unconfus
 ### Choix du verdict : **VALIDÉ AVEC RÉSERVES**
 
 #### Points validés :
-1. **Isolation des workers et preuve d'héritage** : L'absence totale d'héritage d'un handle arbitraire est prouvée par inspection native du processus enfant sous `ProcessRunner.RunIsolated` (`JobObject_14`). L'allowlist d'environnement est rendue immuable (`IReadOnlyCollection<string>`) et réduite à 23 variables système indispensables sans profil utilisateur sensible ni contournement externe.
-2. **SemanticRenamer fiabilisé et corpus empirique reproductible** : Élimination du contournement ALL-CAPS <= 3, fermeture des fuites de motifs mangled (`KPXProcessor`, etc.), et validation empirique complète sur 27 521 identifiants distincts issus de 4 assemblies épinglées avec SHA-256 documentés, démontrant 0,000 % de faux positifs sur les types et méthodes publics (artefact `corpus_evaluation_report.json`).
-3. **Protection réflexion et WinForms renforcées** : Analyse de réflexion dynamique (concaténation, variables locales, constantes, marquage `Ambiguous`), et séparation stricte des composants visuels WinForms (`Control`, `UserControl`, `Form`) excluant les composants non visuels (`Component`, `IComponent`).
-4. **CI sécurisée avec preuve PEVerify** : Étape CI explicite avec `scripts/Verify-PEVerifyOnRunner.ps1` vérifiant et exécutant `PEVerify.exe` sur le runner GitHub `windows-latest` avec archivage des journaux en artefacts.
-5. **Couverture de tests réconciliée et sans faille** : 517 tests C# (491 Unit + 26 Integration, 487 méthodes de test distinctes), 88 tests Python (64 pytest + 24 detector) et 9 benchmarks réussis à 100%.
+1. **Isolation des workers et immutabilité réelle de l'allowlist** :
+   - `JobObject.AllowedEnvironmentVariables` expose désormais une véritable collection en lecture seule (`ReadOnlyCollection<string>`) issue d'une copie isolée des 23 variables système autorisées. Tout cast vers `HashSet<string>` échoue (`InvalidCastException`) et toute tentative de modification via `ICollection<string>` est rejetée (`NotSupportedException`).
+   - L'absence d'héritage d'un handle arbitraire est démontrée par une preuve d'identité d'objet noyau (`CompareObjectHandles` et `NtQueryObject`) dans le processus enfant isolé (`JobObject_14`), distinguant sans ambiguïté un handle invalide, un handle valide d'un autre type, et le véritable objet Event parent (qui déclencherait une sortie en erreur 42 s'il était accessible).
+2. **SemanticRenamer fiabilisé et corpus empirique clarifié** :
+   - Analyse de pile IL pour la réflexion : traçage exact de l'argument du nom de membre et du type cible (`TargetType` vs `CallerType`), rejet des chaînes de log sans rapport, traçage des variables locales à assignation unique, et classification dynamique conservatrice (`Ambiguous`).
+   - Évaluation empirique formalisée : distinction rigoureuse entre 27 547 noms textuels uniques et 86 592 symboles metadata distincts (`Assembly!DeclaringType::Kind:Name(Signature)`). Manifeste d'assemblies épinglées avec hachage SHA-256 cryptographique vérifié. Zéro faux positif sur les types et méthodes publics (`Assert.Empty`), zéro faux positif sur les bibliothèques tierces épinglées, et chemins logiques neutres dans l'artefact `corpus_evaluation_report.json`.
+3. **CI sécurisée avec preuve PEVerify et TRX** :
+   - Preuve officielle issue du runner Windows Server 2025 (PEVerify 4.8.9037.0, exit 0). Suppression des journaux locaux du suivi Git.
+   - Génération et archivage des résultats de test au format TRX standard (`test_results.trx`).
+4. **Couverture de tests sans faille** :
+   - 521 tests C# (495 Unit + 26 Integration, 491 méthodes de test distinctes), 88 tests Python (64 pytest + 24 detector) et 9 benchmarks réussis à 100%.
 
 #### Réserves documentées :
 1. **Historique Git partagé** : Bien que l'arbre de travail soit irréprochable et qu'aucun secret actif n'ait été détecté, la purge définitive des anciennes mentions (`XpertPharm5`, chemins locaux) dans les anciens objets Git partagés requiert une réécriture par `git filter-repo` et un force-push que seul le propriétaire peut valider.
 2. **Gouvernance GitHub** : La protection de branche `main` demeure désactivée au niveau du dépôt GitHub distant jusqu'à configuration par l'administrateur.
-3. **Qualification des profils extrêmes de ConfuserEx** : Les profils `Strong Mode` pour les proxies de référence et `Jump Mangler + Junk Code` pour le flux de contrôle restent qualifiés au niveau `Synthetic / Unit Test` dans la matrice de support, car le profil réel disponible de ConfuserEx exécutait les modes par défaut.
+3. **Avertissement SDK `net6.0-windows`** : Le maintien du multi-ciblage `net6.0-windows` pour la compatibilité transitoire génère 1 avertissement `NETSDK1138` (documenté dans `docs/DEPRECATION_NET6.md`).
+4. **Qualification des profils extrêmes de ConfuserEx** : Les profils `Strong Mode` pour les proxies de référence et `Jump Mangler + Junk Code` pour le flux de contrôle restent qualifiés au niveau `Synthetic / Unit Test` dans la matrice de support, car le profil réel disponible de ConfuserEx exécutait les modes par défaut.
 
