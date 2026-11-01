@@ -498,8 +498,32 @@ namespace ConfuserExKillerRunner.Core
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern IntPtr OpenEvent(uint dwDesiredAccess, bool bInheritHandle, string lpName);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool CompareObjectHandles(IntPtr hFirstObjectHandle, IntPtr hSecondObjectHandle);
+        [DllImport("kernelbase.dll", SetLastError = true, EntryPoint = "CompareObjectHandles")]
+        private static extern bool CompareObjectHandlesKernelBase(IntPtr hFirstObjectHandle, IntPtr hSecondObjectHandle);
+
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "CompareObjectHandles")]
+        private static extern bool CompareObjectHandlesKernel32(IntPtr hFirstObjectHandle, IntPtr hSecondObjectHandle);
+
+        private static bool SafeCompareObjectHandles(IntPtr hFirst, IntPtr hSecond, out bool supported)
+        {
+            supported = true;
+            try
+            {
+                return CompareObjectHandlesKernelBase(hFirst, hSecond);
+            }
+            catch (EntryPointNotFoundException)
+            {
+                try
+                {
+                    return CompareObjectHandlesKernel32(hFirst, hSecond);
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    supported = false;
+                    return false;
+                }
+            }
+        }
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool CloseHandle(IntPtr hObject);
@@ -562,35 +586,32 @@ namespace ConfuserExKillerRunner.Core
             IntPtr hNamedEvent = IntPtr.Zero;
             if (!string.IsNullOrEmpty(eventName) && eventName != "unknown")
             {
-                // SYNCHRONIZE (0x00100000) | EVENT_MODIFY_STATE (0x0002)
-                hNamedEvent = OpenEvent(0x00100000 | 0x0002, false, eventName);
+                // SYNCHRONIZE (0x00100000) - read-only query access
+                hNamedEvent = OpenEvent(0x00100000, false, eventName);
             }
 
             bool namedEventOpened = hNamedEvent != IntPtr.Zero;
             bool isSameKernelObject = false;
+            bool comparisonSupported = true;
             if (namedEventOpened && getInfoOk)
             {
-                try
-                {
-                    isSameKernelObject = CompareObjectHandles(handlePtr, hNamedEvent);
-                }
-                catch (EntryPointNotFoundException)
-                {
-                    // Fallback on legacy Windows (pre-Win10) where CompareObjectHandles is unavailable
-                    isSameKernelObject = string.Equals(objectType, "Event", StringComparison.OrdinalIgnoreCase);
-                }
+                isSameKernelObject = SafeCompareObjectHandles(handlePtr, hNamedEvent, out comparisonSupported);
             }
 
-            bool setOk = SetEvent(handlePtr);
-            int setErr = Marshal.GetLastWin32Error();
-
-            uint waitRes = WaitForSingleObject(handlePtr, 0);
-            int waitErr = Marshal.GetLastWin32Error();
+            // CRITICAL: Strictly non-destructive check. We do NOT call SetEvent(handlePtr)
+            // or modify the candidate object's state in any way.
+            uint waitRes = 0xFFFFFFFF;
+            int waitErr = 0;
+            if (getInfoOk)
+            {
+                waitRes = WaitForSingleObject(handlePtr, 0);
+                waitErr = Marshal.GetLastWin32Error();
+            }
 
             Console.WriteLine($"[HANDLE_TEST_CHILD] TargetHandle=0x{rawHandle:X} EventName={eventName} NamedEventOpened={namedEventOpened}");
             Console.WriteLine($"[HANDLE_TEST_CHILD] GetHandleInfo={getInfoOk} (Err={getInfoErr}) Flags=0x{handleFlags:X} ObjectType={objectType}");
-            Console.WriteLine($"[HANDLE_TEST_CHILD] SameAsParentEvent={isSameKernelObject}");
-            Console.WriteLine($"[HANDLE_TEST_CHILD] SetEventAttempt={setOk} (Err={setErr}) WaitResult={waitRes} (Err={waitErr})");
+            Console.WriteLine($"[HANDLE_TEST_CHILD] SameAsParentEvent={isSameKernelObject} ComparisonSupported={comparisonSupported}");
+            Console.WriteLine($"[HANDLE_TEST_CHILD] WaitResult={waitRes} (Err={waitErr})");
             Console.Error.WriteLine("[HANDLE_TEST_CHILD] Stderr pipe communication verified.");
 
             if (hNamedEvent != IntPtr.Zero)
@@ -600,12 +621,17 @@ namespace ConfuserExKillerRunner.Core
 
             // Object identity and inheritance verification:
             // 1. If CompareObjectHandles confirmed handlePtr is the exact parent event object,
-            //    or if SetEvent succeeded on an object confirmed to be an Event,
-            //    the parent event handle leaked into the child process.
-            if (isSameKernelObject || (setOk && string.Equals(objectType, "Event", StringComparison.OrdinalIgnoreCase)))
+            //    the parent event handle was inherited by the child process.
+            if (isSameKernelObject)
             {
                 Console.WriteLine("[HANDLE_TEST_CHILD] FAILURE: Parent event handle was inherited and verified as identical kernel object!");
                 return 42;
+            }
+
+            if (!comparisonSupported)
+            {
+                Console.WriteLine("[HANDLE_TEST_CHILD] INCONCLUSIVE: CompareObjectHandles is unavailable on this OS version.");
+                return 3;
             }
 
             if (!getInfoOk && getInfoErr == 6)
@@ -614,9 +640,15 @@ namespace ConfuserExKillerRunner.Core
                 return 0;
             }
 
-            // Handle exists in child but is NOT the parent event (e.g. std stream or runtime handle)
-            Console.WriteLine($"[HANDLE_TEST_CHILD] SUCCESS: Numeric handle 0x{rawHandle:X} is not the parent event (Type={objectType}, SameAsParentEvent={isSameKernelObject}).");
-            return 0;
+            if (getInfoOk)
+            {
+                // Handle exists in child but is NOT the parent event (e.g. std stream or runtime handle)
+                Console.WriteLine($"[HANDLE_TEST_CHILD] SUCCESS: Numeric handle 0x{rawHandle:X} is not the parent event (Type={objectType}, SameAsParentEvent=False).");
+                return 0;
+            }
+
+            Console.WriteLine($"[HANDLE_TEST_CHILD] INCONCLUSIVE: Handle info query failed with unexpected Win32 error {getInfoErr}.");
+            return 2;
         }
 
         private static string EscapeJson(string s)

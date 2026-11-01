@@ -444,6 +444,85 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
+        public void JobObject_14_Control_InheritedHandle_DetectedAndFailsExpectedly()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            string uniqueEventName = "Local\\Unconfuser_ControlTestEvent_" + Guid.NewGuid().ToString("N");
+
+            // Create an inheritable event handle in the parent process
+            var sa = new TEST_SECURITY_ATTRIBUTES
+            {
+                nLength = Marshal.SizeOf(typeof(TEST_SECURITY_ATTRIBUTES)),
+                bInheritHandle = true,
+                lpSecurityDescriptor = IntPtr.Zero
+            };
+            IntPtr pSa = Marshal.AllocHGlobal(sa.nLength);
+            Marshal.StructureToPtr(sa, pSa, false);
+
+            IntPtr inheritableEvent = IntPtr.Zero;
+            try
+            {
+                inheritableEvent = CreateEvent(pSa, true, false, uniqueEventName);
+                Assert.NotEqual(IntPtr.Zero, inheritableEvent);
+
+                uint initialWait = WaitForSingleObject(inheritableEvent, 0);
+                Assert.Equal(JobObject.WAIT_TIMEOUT, initialWait);
+
+                string workerExe = WorkerClient.ResolveWorkerExecutable();
+                Assert.True(File.Exists(workerExe), $"Worker executable not found: {workerExe}");
+
+                string appName;
+                string args;
+                if (workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                {
+                    appName = "dotnet";
+                    args = $"\"{workerExe}\" --internal-worker test-handle-inheritance --handle {(long)inheritableEvent} --event-name {uniqueEventName}";
+                }
+                else
+                {
+                    appName = workerExe;
+                    args = $"--internal-worker test-handle-inheritance --handle {(long)inheritableEvent} --event-name {uniqueEventName}";
+                }
+
+                // Control scenario: Start process using standard Process.Start (bInheritHandles = TRUE) WITHOUT JobObject isolation handle list.
+                // The inheritable handle is deliberately inherited by the child.
+                var psi = new ProcessStartInfo(appName, args)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using (var proc = Process.Start(psi))
+                {
+                    Assert.NotNull(proc);
+                    string stdout = proc.StandardOutput.ReadToEnd();
+                    string stderr = proc.StandardError.ReadToEnd();
+                    bool exited = proc.WaitForExit(15000);
+                    Assert.True(exited, "Control process timed out.");
+
+                    // Expected Failure: Child detected kernel object identity via CompareObjectHandles and exited with code 42
+                    Assert.Equal(42, proc.ExitCode);
+                    Assert.Contains("SameAsParentEvent=True", stdout);
+                    Assert.Contains("[HANDLE_TEST_CHILD] FAILURE: Parent event handle was inherited and verified as identical kernel object!", stdout);
+
+                    // Non-destructive verification: Event state in parent must still remain non-signaled
+                    uint postWait = WaitForSingleObject(inheritableEvent, 0);
+                    Assert.Equal(JobObject.WAIT_TIMEOUT, postWait);
+                }
+            }
+            finally
+            {
+                if (inheritableEvent != IntPtr.Zero)
+                    CloseHandle(inheritableEvent);
+                Marshal.FreeHGlobal(pSa);
+            }
+        }
+
+        [Fact]
         public void JobObject_15_WorkerIsolation_InvalidExecutable_FailsClosedAndCleansUp()
         {
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
