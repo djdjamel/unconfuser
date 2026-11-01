@@ -1,0 +1,69 @@
+{
+  "EvaluationDate": "2026-11-01T08:38:21.1337369Z",
+  "TotalUniqueIdentifiers": 27518,
+  "TotalPublicTypesAndMethods": 5234,
+  "TotalNonPublicMembers": 16131,
+  "AllIdentifiersFalsePositiveCount": 47,
+  "AllIdentifiersFalsePositiveRate": 0.0017079729631513919,
+  "PublicFalsePositiveCount": 0,
+  "PublicFalsePositiveRate": 0,
+  "NonPublicFalsePositiveCount": 35,
+  "NonPublicFalsePositiveRate": 0.00216973529229434,
+  "SourceAssemblies": [
+    {
+      "Name": "dnlib.dll",
+      "Version": "1.6.0.0",
+      "LogicalPath": "C:\\Users\\acer\\claude\\xp_src\\ConfuserExKillerRunner\\dnlib.dll",
+      "Sha256": "1b9e108e458c30655f98bb681bc6162b39c08e781264f2181e18be297d7b22d2",
+      "Provenance": "Pinned third-party library",
+      "SizeBytes": 970752
+    },
+    {
+      "Name": "de4dot.blocks.dll",
+      "Version": "3.1.41592.3405",
+      "LogicalPath": "C:\\Users\\acer\\claude\\xp_src\\ConfuserExKillerRunner\\de4dot.blocks.dll",
+      "Sha256": "ba197b4b6a19ce6242256639a3f641575c77108a07d5fcd3ac13f1d38bfcf98f",
+      "Provenance": "Pinned third-party deobfuscation library",
+      "SizeBytes": 146432
+    },
+    {
+      "Name": "ConfuserExKillerRunner.dll",
+      "Version": "1.0.0.0",
+      "LogicalPath": "C:\\Users\\acer\\claude\\xp_src\\ConfuserExKillerRunner.Tests\\bin\\Release\\net8.0-windows\\ConfuserExKillerRunner.dll",
+      "Sha256": "510414fd91943c080070196e026edecadf04faa29974f9aed98013eff811bd99",
+      "Provenance": "Unconfuser deobfuscation engine runner",
+      "SizeBytes": 412672
+    },
+    {
+      "Name": "System.Private.CoreLib.dll",
+      "Version": "8.0.0.0",
+      "LogicalPath": "C:\\Program Files (x86)\\dotnet\\shared\\Microsoft.NETCore.App\\8.0.25\\System.Private.CoreLib.dll",
+      "Sha256": "3173a4728866149e6573094c0a532d6dd3a011eb6e616131ca1912da4fb60ec8",
+      "Provenance": "Microsoft .NET 8.0 CoreCLR Reference BCL",
+      "SizeBytes": 12536080
+    }
+  ],
+  "FlaggedSample": [
+    "pmrImportDLL",
+    "mrImportDLL",
+    "hStdInput",
+    "dwCmpFlags",
+    "nStdHandle",
+    "szCSDVersion",
+    "m_pMethod",
+    "GetDayOfNNN",
+    "GetDayOfMNN",
+    "GetTimeOfNNN",
+    "GetDateOfDSN",
+    "GetDateOfNDS",
+    "GetDateOfNNDS",
+    "RFLCT_InvalidFieldFail",
+    "RFLCT_InvalidPropFail",
+    "RFLCT_Targ_ITargMismatch",
+    "RFLCT_Targ_StatFldReqTarg",
+    "RFLCT_Targ_StatMethReqTarg",
+    "s_crcTable",
+    "_sPM2359"
+  ],
+  "PublicFlagged": []
+}

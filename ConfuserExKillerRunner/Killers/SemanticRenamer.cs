@@ -110,7 +110,7 @@ namespace ConfuserExKillerRunner.Killers
             "ctx", "env", "app", "svc", "mgr", "init", "impl", "repo", "prev", "next", "curr",
             "min", "max", "avg", "sum", "cnt", "num", "pos", "idx", "len", "buf", "str", "char",
             "int", "bool", "byte", "enum", "dict", "spec", "info", "desc", "err", "warn",
-            "bgp", "mqtt", "grpc", "pe", "nt", "clr", "sz", "il", "md", "ldstr"
+            "bgp", "mqtt", "grpc", "pe", "nt", "clr", "sz", "il", "md", "ldstr", "ldfld", "ldsfld", "stfld", "stsfld", "rt", "sb", "cf", "gc", "vm", "cls", "nls", "bsd", "bstr"
         };
 
         private static bool CanSegmentAllCapsAcronym(string tok)
@@ -1662,6 +1662,7 @@ namespace ConfuserExKillerRunner.Killers
         {
             if (string.IsNullOrEmpty(name)) return false;
             if (name.StartsWith("<PrivateImplementationDetails>", StringComparison.Ordinal)) return true;
+            if (name.StartsWith("__StaticArrayInitTypeSize", StringComparison.Ordinal)) return true;
             if (name.StartsWith("<>c", StringComparison.Ordinal)) return true;
             if (name.StartsWith("<>z__", StringComparison.Ordinal)) return true;
             if (name.StartsWith("CS$<>", StringComparison.Ordinal)) return true;
@@ -1877,13 +1878,13 @@ namespace ConfuserExKillerRunner.Killers
                     bool isAllUpperAcronym = false;
                     if (isAllUpper)
                     {
-                        if (tok.Length <= 3 || CanSegmentAllCapsAcronym(tok))
+                        if (CanSegmentAllCapsAcronym(tok))
                         {
                             isAllUpperAcronym = true;
                         }
                         else
                         {
-                            // Unsegmented all-caps token of length >= 4 (e.g. KPXQTZVRM, ABCDWXYZ)
+                            // Unsegmented all-caps token (e.g. KPX, QXZ, ZQX, KPXQTZVRM, ABCDWXYZ)
                             int consRun = 0;
                             int maxCons = 0;
                             for (int ci = 0; ci < tok.Length; ci++)
@@ -1898,7 +1899,7 @@ namespace ConfuserExKillerRunner.Killers
                                     consRun = 0;
                                 }
                             }
-                            if (maxCons >= 5 || !hasVowel)
+                            if (maxCons >= 5 || (!hasVowel && tok.Length >= 3))
                             {
                                 hasUnverifiedAllCapsCluster = true;
                             }
