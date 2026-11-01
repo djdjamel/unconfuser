@@ -523,6 +523,236 @@ namespace ConfuserExKillerRunner.Tests
         }
 
         [Fact]
+        public void JobObject_14_NonDestructive_AutoResetEventSignalPreserved()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            string uniqueEventName = "Local\\Unconfuser_AutoResetSignalTestEvent_" + Guid.NewGuid().ToString("N");
+
+            // Create an inheritable auto-reset event (bManualReset = false) initially signaled (bInitialState = true)
+            var sa = new TEST_SECURITY_ATTRIBUTES
+            {
+                nLength = Marshal.SizeOf(typeof(TEST_SECURITY_ATTRIBUTES)),
+                bInheritHandle = true,
+                lpSecurityDescriptor = IntPtr.Zero
+            };
+            IntPtr pSa = Marshal.AllocHGlobal(sa.nLength);
+            Marshal.StructureToPtr(sa, pSa, false);
+
+            IntPtr inheritableEvent = IntPtr.Zero;
+            try
+            {
+                // bManualReset = false (auto-reset), bInitialState = true (signaled)
+                inheritableEvent = CreateEvent(pSa, false, true, uniqueEventName);
+                Assert.NotEqual(IntPtr.Zero, inheritableEvent);
+
+                string workerExe = WorkerClient.ResolveWorkerExecutable();
+                Assert.True(File.Exists(workerExe), $"Worker executable not found: {workerExe}");
+
+                string appName;
+                string args;
+                if (workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                {
+                    appName = "dotnet";
+                    args = $"\"{workerExe}\" --internal-worker test-handle-inheritance --handle {(long)inheritableEvent} --event-name {uniqueEventName}";
+                }
+                else
+                {
+                    appName = workerExe;
+                    args = $"--internal-worker test-handle-inheritance --handle {(long)inheritableEvent} --event-name {uniqueEventName}";
+                }
+
+                // Start process with standard Process.Start (bInheritHandles = TRUE)
+                // The inheritable handle is deliberately inherited by the child.
+                var psi = new ProcessStartInfo(appName, args)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using (var proc = Process.Start(psi))
+                {
+                    Assert.NotNull(proc);
+                    string stdout = proc.StandardOutput.ReadToEnd();
+                    string stderr = proc.StandardError.ReadToEnd();
+                    bool exited = proc.WaitForExit(15000);
+                    Assert.True(exited, "Process timed out.");
+
+                    // Expected: Child detected kernel object identity (exit code 42)
+                    Assert.Equal(42, proc.ExitCode);
+                    Assert.Contains("SameAsParentEvent=True", stdout);
+
+                    // CRITICAL NON-DESTRUCTIVE REGRESSION CHECK:
+                    // Because the child did NOT call WaitForSingleObject(handlePtr, 0),
+                    // the auto-reset event signal was NOT consumed and remains signaled in the parent.
+                    uint postWait = WaitForSingleObject(inheritableEvent, 0);
+                    Assert.Equal(JobObject.WAIT_OBJECT_0, postWait);
+                }
+            }
+            finally
+            {
+                if (inheritableEvent != IntPtr.Zero)
+                    CloseHandle(inheritableEvent);
+                Marshal.FreeHGlobal(pSa);
+            }
+        }
+
+        [Fact]
+        public void JobObject_14_Inconclusive_ParentEventOpenFails()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            string realEventName = "Local\\Unconfuser_RealTestEvent_" + Guid.NewGuid().ToString("N");
+            string invalidEventName = "Local\\Unconfuser_NonExistentEvent_" + Guid.NewGuid().ToString("N");
+
+            var sa = new TEST_SECURITY_ATTRIBUTES
+            {
+                nLength = Marshal.SizeOf(typeof(TEST_SECURITY_ATTRIBUTES)),
+                bInheritHandle = true,
+                lpSecurityDescriptor = IntPtr.Zero
+            };
+            IntPtr pSa = Marshal.AllocHGlobal(sa.nLength);
+            Marshal.StructureToPtr(sa, pSa, false);
+
+            IntPtr inheritableEvent = IntPtr.Zero;
+            try
+            {
+                inheritableEvent = CreateEvent(pSa, true, false, realEventName);
+                Assert.NotEqual(IntPtr.Zero, inheritableEvent);
+
+                string workerExe = WorkerClient.ResolveWorkerExecutable();
+                Assert.True(File.Exists(workerExe), $"Worker executable not found: {workerExe}");
+
+                string appName;
+                string args;
+                if (workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                {
+                    appName = "dotnet";
+                    // Pass valid candidate handle, but an invalid/non-existent parent event name
+                    args = $"\"{workerExe}\" --internal-worker test-handle-inheritance --handle {(long)inheritableEvent} --event-name {invalidEventName}";
+                }
+                else
+                {
+                    appName = workerExe;
+                    args = $"--internal-worker test-handle-inheritance --handle {(long)inheritableEvent} --event-name {invalidEventName}";
+                }
+
+                var psi = new ProcessStartInfo(appName, args)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using (var proc = Process.Start(psi))
+                {
+                    Assert.NotNull(proc);
+                    string stdout = proc.StandardOutput.ReadToEnd();
+                    string stderr = proc.StandardError.ReadToEnd();
+                    bool exited = proc.WaitForExit(15000);
+                    Assert.True(exited, "Process timed out.");
+
+                    // Mandatory Requirement: When parent event cannot be opened, comparison cannot be made.
+                    // Must NEVER return code 0 (success). Must return INCONCLUSIVE (code 3).
+                    Assert.Equal(3, proc.ExitCode);
+                    Assert.Contains("NamedEventOpened=False", stdout);
+                    Assert.Contains("[HANDLE_TEST_CHILD] INCONCLUSIVE: Parent event could not be opened", stdout);
+                }
+            }
+            finally
+            {
+                if (inheritableEvent != IntPtr.Zero)
+                    CloseHandle(inheritableEvent);
+                Marshal.FreeHGlobal(pSa);
+            }
+        }
+
+        [Fact]
+        public void JobObject_14_NegativeControl_DistinctValidHandles_ConfirmedDifferent()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            string eventNameA = "Local\\Unconfuser_DistinctEventA_" + Guid.NewGuid().ToString("N");
+            string eventNameB = "Local\\Unconfuser_DistinctEventB_" + Guid.NewGuid().ToString("N");
+
+            var sa = new TEST_SECURITY_ATTRIBUTES
+            {
+                nLength = Marshal.SizeOf(typeof(TEST_SECURITY_ATTRIBUTES)),
+                bInheritHandle = true,
+                lpSecurityDescriptor = IntPtr.Zero
+            };
+            IntPtr pSa = Marshal.AllocHGlobal(sa.nLength);
+            Marshal.StructureToPtr(sa, pSa, false);
+
+            IntPtr eventA = IntPtr.Zero;
+            IntPtr eventB = IntPtr.Zero;
+            try
+            {
+                // Create two distinct inheritable kernel events
+                eventA = CreateEvent(pSa, true, false, eventNameA);
+                Assert.NotEqual(IntPtr.Zero, eventA);
+
+                eventB = CreateEvent(pSa, true, false, eventNameB);
+                Assert.NotEqual(IntPtr.Zero, eventB);
+
+                string workerExe = WorkerClient.ResolveWorkerExecutable();
+                Assert.True(File.Exists(workerExe), $"Worker executable not found: {workerExe}");
+
+                string appName;
+                string args;
+                if (workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                {
+                    appName = "dotnet";
+                    // Pass handle of Event A, but tell child the parent event is Event B
+                    args = $"\"{workerExe}\" --internal-worker test-handle-inheritance --handle {(long)eventA} --event-name {eventNameB}";
+                }
+                else
+                {
+                    appName = workerExe;
+                    args = $"--internal-worker test-handle-inheritance --handle {(long)eventA} --event-name {eventNameB}";
+                }
+
+                var psi = new ProcessStartInfo(appName, args)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using (var proc = Process.Start(psi))
+                {
+                    Assert.NotNull(proc);
+                    string stdout = proc.StandardOutput.ReadToEnd();
+                    string stderr = proc.StandardError.ReadToEnd();
+                    bool exited = proc.WaitForExit(15000);
+                    Assert.True(exited, "Process timed out.");
+
+                    // Distinct objects confirmed via CompareObjectHandles (ERROR_NOT_SAME_OBJECT):
+                    // Result: NON INHERITED, code 0
+                    Assert.Equal(0, proc.ExitCode);
+                    Assert.Contains("NamedEventOpened=True", stdout);
+                    Assert.Contains("SameAsParentEvent=False", stdout);
+                    Assert.Contains("confirmed NOT the parent event", stdout);
+                }
+            }
+            finally
+            {
+                if (eventA != IntPtr.Zero)
+                    CloseHandle(eventA);
+                if (eventB != IntPtr.Zero)
+                    CloseHandle(eventB);
+                Marshal.FreeHGlobal(pSa);
+            }
+        }
+
+        [Fact]
         public void JobObject_15_WorkerIsolation_InvalidExecutable_FailsClosedAndCleansUp()
         {
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
