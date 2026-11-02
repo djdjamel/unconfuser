@@ -495,8 +495,8 @@ namespace ConfuserExKillerRunner.Core
         }
 
         private const int ERROR_INVALID_HANDLE = 6;
+        // Defined in WinError.h as ERROR_NOT_SAME_OBJECT (1656L / 0x678): "The objects are not identical."
         private const int ERROR_NOT_SAME_OBJECT = 1656;
-        private const int ERROR_NOT_SAME_OBJECT_ALT = 4016;
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool GetHandleInformation(IntPtr hObject, out uint lpdwFlags);
@@ -520,7 +520,9 @@ namespace ConfuserExKillerRunner.Core
                     return HandleComparisonResult.SameObject;
                 }
                 win32Error = Marshal.GetLastWin32Error();
-                if (win32Error == ERROR_NOT_SAME_OBJECT || win32Error == ERROR_NOT_SAME_OBJECT_ALT)
+                // Microsoft Learn & WinError.h: If handles refer to different kernel objects,
+                // CompareObjectHandles returns FALSE and GetLastError() returns ERROR_NOT_SAME_OBJECT (1656).
+                if (win32Error == ERROR_NOT_SAME_OBJECT)
                 {
                     return HandleComparisonResult.DifferentObject;
                 }
@@ -535,7 +537,7 @@ namespace ConfuserExKillerRunner.Core
                         return HandleComparisonResult.SameObject;
                     }
                     win32Error = Marshal.GetLastWin32Error();
-                    if (win32Error == ERROR_NOT_SAME_OBJECT || win32Error == ERROR_NOT_SAME_OBJECT_ALT)
+                    if (win32Error == ERROR_NOT_SAME_OBJECT)
                     {
                         return HandleComparisonResult.DifferentObject;
                     }

@@ -4,12 +4,19 @@ using System.IO;
 using System.Runtime.InteropServices;
 using ConfuserExKillerRunner.Core;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace ConfuserExKillerRunner.Tests
 {
     [Trait("Category", "Unit")]
     public class JobObjectTests
     {
+        private readonly ITestOutputHelper _output;
+
+        public JobObjectTests(ITestOutputHelper output = null)
+        {
+            _output = output;
+        }
         [Fact]
         public void JobObject_01_Creation_ValidHandleAndDefaultLimitsApplied()
         {
@@ -734,11 +741,19 @@ namespace ConfuserExKillerRunner.Tests
                     bool exited = proc.WaitForExit(15000);
                     Assert.True(exited, "Process timed out.");
 
-                    // Distinct objects confirmed via CompareObjectHandles (ERROR_NOT_SAME_OBJECT):
+                    _output?.WriteLine($"[JobObject_14_NegativeControl] Child stdout:\n{stdout}");
+                    if (!string.IsNullOrEmpty(stderr))
+                    {
+                        _output?.WriteLine($"[JobObject_14_NegativeControl] Child stderr:\n{stderr}");
+                    }
+
+                    // Distinct objects confirmed via CompareObjectHandles (ERROR_NOT_SAME_OBJECT = 1656 / 0x678):
                     // Result: NON INHERITED, code 0
                     Assert.Equal(0, proc.ExitCode);
                     Assert.Contains("NamedEventOpened=True", stdout);
                     Assert.Contains("SameAsParentEvent=False", stdout);
+                    // Explicit verification: DiffErr MUST be documented standard ERROR_NOT_SAME_OBJECT (1656)
+                    Assert.Contains("DiffErr=1656", stdout);
                     Assert.Contains("confirmed NOT the parent event", stdout);
                 }
             }
