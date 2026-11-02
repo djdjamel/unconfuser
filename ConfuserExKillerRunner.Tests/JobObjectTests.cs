@@ -872,10 +872,40 @@ namespace ConfuserExKillerRunner.Tests
             }
         }
 
+        [Fact]
+        public void JobObject_18_WaitAndReadProcess_TimeoutWithHeavyOutput_TerminatesCleanlyWithoutRace()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            var psi = new ProcessStartInfo(
+                "cmd.exe",
+                "/c for /L %i in (1,0,2) do @(echo STDOUT_HEAVY_LINE_%i & echo STDERR_HEAVY_LINE_%i 1>&2)")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            using (var proc = Process.Start(psi))
+            {
+                Assert.NotNull(proc);
+                var (exited, stdout, stderr) = WaitAndReadProcess(proc, timeoutMs: 1000);
+                Assert.False(exited, "Expected process to time out while flooding stdout/stderr.");
+                Assert.True(proc.HasExited, "Process should have been killed and waited on after timeout.");
+                Assert.Contains("STDOUT_HEAVY_LINE_", stdout);
+                Assert.Contains("STDERR_HEAVY_LINE_", stderr);
+            }
+        }
+
         private static (bool exited, string stdout, string stderr) WaitAndReadProcess(Process proc, int timeoutMs)
         {
             var sbOut = new System.Text.StringBuilder();
             var sbErr = new System.Text.StringBuilder();
+            var syncLock = new object();
+            bool readingClosed = false;
+
             using (var outDone = new ManualResetEvent(false))
             using (var errDone = new ManualResetEvent(false))
             {
@@ -887,7 +917,11 @@ namespace ConfuserExKillerRunner.Tests
                     }
                     else
                     {
-                        sbOut.AppendLine(e.Data);
+                        lock (syncLock)
+                        {
+                            if (!readingClosed)
+                                sbOut.AppendLine(e.Data);
+                        }
                     }
                 };
                 proc.ErrorDataReceived += (s, e) =>
@@ -898,7 +932,11 @@ namespace ConfuserExKillerRunner.Tests
                     }
                     else
                     {
-                        sbErr.AppendLine(e.Data);
+                        lock (syncLock)
+                        {
+                            if (!readingClosed)
+                                sbErr.AppendLine(e.Data);
+                        }
                     }
                 };
 
@@ -912,10 +950,23 @@ namespace ConfuserExKillerRunner.Tests
                     try { proc.WaitForExit(5000); } catch { }
                 }
 
-                outDone.WaitOne(2000);
-                errDone.WaitOne(2000);
+                bool outCompleted = outDone.WaitOne(2000);
+                bool errCompleted = errDone.WaitOne(2000);
 
-                return (exited, sbOut.ToString(), sbErr.ToString());
+                if (!outCompleted)
+                {
+                    try { proc.CancelOutputRead(); } catch { }
+                }
+                if (!errCompleted)
+                {
+                    try { proc.CancelErrorRead(); } catch { }
+                }
+
+                lock (syncLock)
+                {
+                    readingClosed = true;
+                    return (exited, sbOut.ToString(), sbErr.ToString());
+                }
             }
         }
     }

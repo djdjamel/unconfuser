@@ -528,6 +528,41 @@ namespace ConfuserExKillerRunner.Tests
 
             Assert.False(WorkerClient.IsWorkerCompatible(x64Worker, TargetArchitecture.X86Required, TargetRuntimeFamily.NetFramework, out string reasonX86));
             Assert.Contains("32-bit", reasonX86, StringComparison.OrdinalIgnoreCase);
+
+            // 8. TargetArchitecture.Unknown MUST be explicitly refused even if runtime family is known
+            Assert.False(WorkerClient.IsWorkerCompatible(x64Worker, TargetArchitecture.Unknown, TargetRuntimeFamily.NetFramework, out string reasonArchUnknown));
+            Assert.Contains("unknown, invalid, or conflicting CPU architecture", reasonArchUnknown, StringComparison.OrdinalIgnoreCase);
+
+            // 9. TargetArchitecture.Arm64 MUST be refused on an x64 worker (64-bit pointer width != ARM64 CPU)
+            Assert.False(WorkerClient.IsWorkerCompatible(x64Worker, TargetArchitecture.Arm64, TargetRuntimeFamily.NetFramework, out string reasonArm64OnX64));
+            Assert.Contains("ARM64", reasonArm64OnX64, StringComparison.OrdinalIgnoreCase);
+            Assert.False(WorkerClient.IsWorkerCompatible(net8Worker, TargetArchitecture.Arm64, TargetRuntimeFamily.ModernDotNet, out string reasonArm64OnNet8X64));
+            Assert.Contains("ARM64", reasonArm64OnNet8X64, StringComparison.OrdinalIgnoreCase);
+
+            // 10. An ARM64 worker MUST be refused for X64 or X86Required targets, and accepted only for ARM64/AnyCPU targets
+            string arm64Worker = Path.Combine(_testDir, "MockWorker_arm64.exe");
+            using (var mod = new ModuleDefUser("MockWorker_arm64.exe"))
+            {
+                var asm = new AssemblyDefUser("MockWorker_arm64", new Version(1, 0, 0, 0));
+                asm.Modules.Add(mod);
+                mod.Kind = ModuleKind.Console;
+                mod.Machine = dnlib.PE.Machine.ARM64;
+                mod.Is32BitRequired = false;
+                var sysRuntimeRef = new AssemblyRefUser("System.Runtime", new Version(8, 0, 0, 0));
+                var tfmType = new TypeRefUser(mod, "System.Runtime.Versioning", "TargetFrameworkAttribute", sysRuntimeRef);
+                var tfmCtor = new MemberRefUser(mod, ".ctor", MethodSig.CreateInstance(mod.CorLibTypes.Void, mod.CorLibTypes.String), tfmType);
+                asm.CustomAttributes.Add(new CustomAttribute(tfmCtor, new[] { new CAArgument(mod.CorLibTypes.String, ".NETCoreApp,Version=v8.0") }));
+                var objRef = new TypeRefUser(mod, "System", "Object", sysRuntimeRef);
+                mod.Types.Add(new TypeDefUser("WorkerNs", "WorkerEntry", objRef));
+                mod.Write(arm64Worker);
+            }
+
+            Assert.True(WorkerClient.IsWorkerCompatible(arm64Worker, TargetArchitecture.Arm64, TargetRuntimeFamily.ModernDotNet, out string reasonArm64Match));
+            Assert.Null(reasonArm64Match);
+            Assert.False(WorkerClient.IsWorkerCompatible(arm64Worker, TargetArchitecture.X64, TargetRuntimeFamily.ModernDotNet, out string reasonX64OnArm64));
+            Assert.Contains("ARM64", reasonX64OnArm64, StringComparison.OrdinalIgnoreCase);
+            Assert.False(WorkerClient.IsWorkerCompatible(arm64Worker, TargetArchitecture.X86Required, TargetRuntimeFamily.ModernDotNet, out string reasonX86OnArm64));
+            Assert.Contains("ARM64", reasonX86OnArm64, StringComparison.OrdinalIgnoreCase);
         }
 
         [Fact]
@@ -607,6 +642,54 @@ namespace ConfuserExKillerRunner.Tests
             Assert.Contains("32-bit", err1, StringComparison.OrdinalIgnoreCase);
             Assert.False(WorkerClient.IsWorkerCompatible(x86ApphostExe, x64Info.Architecture, TargetRuntimeFamily.ModernDotNet, out string err2));
             Assert.Contains("64-bit", err2, StringComparison.OrdinalIgnoreCase);
+
+            // 3. Contradictory pair A: x86 native apphost (0x014C) + x64 managed sibling DLL (0x8664) -> conflict & refused
+            string conflictAExe = Path.Combine(_testDir, "ConflictX86Host_X64Dll.exe");
+            string conflictADll = Path.Combine(_testDir, "ConflictX86Host_X64Dll.dll");
+            File.WriteAllBytes(conflictAExe, CreateSyntheticNativePe(is64Bit: false));
+            using (var mod = new ModuleDefUser("ConflictX86Host_X64Dll.dll"))
+            {
+                var asm = new AssemblyDefUser("ConflictX86Host_X64Dll", new Version(1, 0, 0, 0));
+                asm.Modules.Add(mod);
+                mod.Machine = dnlib.PE.Machine.AMD64;
+                mod.Is32BitRequired = false;
+                var sysRuntimeRef = new AssemblyRefUser("System.Runtime", new Version(8, 0, 0, 0));
+                var objRef = new TypeRefUser(mod, "System", "Object", sysRuntimeRef);
+                mod.Types.Add(new TypeDefUser("AppNs", "AppType", objRef));
+                mod.Write(conflictADll);
+            }
+
+            var conflictAInfo = ArchitectureDetector.Detect(conflictAExe);
+            Assert.True(conflictAInfo.HasArchitectureConflict);
+            Assert.Equal(TargetArchitecture.Unknown, conflictAInfo.Architecture);
+            Assert.False(WorkerClient.IsWorkerCompatible(x64ApphostExe, conflictAInfo.Architecture, TargetRuntimeFamily.ModernDotNet, out string errConflictA));
+            Assert.Contains("conflicting CPU architecture", errConflictA, StringComparison.OrdinalIgnoreCase);
+            Assert.False(WorkerClient.TryResolveCompatibleWorker(conflictAExe, out _, out string errResolveA));
+            Assert.Contains("conflicting CPU architecture", errResolveA, StringComparison.OrdinalIgnoreCase);
+
+            // 4. Contradictory pair B: x64 native apphost (0x8664) + x86 32BITREQUIRED managed sibling DLL -> conflict & refused
+            string conflictBExe = Path.Combine(_testDir, "ConflictX64Host_X86ReqDll.exe");
+            string conflictBDll = Path.Combine(_testDir, "ConflictX64Host_X86ReqDll.dll");
+            File.WriteAllBytes(conflictBExe, CreateSyntheticNativePe(is64Bit: true));
+            using (var mod = new ModuleDefUser("ConflictX64Host_X86ReqDll.dll"))
+            {
+                var asm = new AssemblyDefUser("ConflictX64Host_X86ReqDll", new Version(1, 0, 0, 0));
+                asm.Modules.Add(mod);
+                mod.Machine = dnlib.PE.Machine.I386;
+                mod.Is32BitRequired = true;
+                var sysRuntimeRef = new AssemblyRefUser("System.Runtime", new Version(8, 0, 0, 0));
+                var objRef = new TypeRefUser(mod, "System", "Object", sysRuntimeRef);
+                mod.Types.Add(new TypeDefUser("AppNs", "AppType", objRef));
+                mod.Write(conflictBDll);
+            }
+
+            var conflictBInfo = ArchitectureDetector.Detect(conflictBExe);
+            Assert.True(conflictBInfo.HasArchitectureConflict);
+            Assert.Equal(TargetArchitecture.Unknown, conflictBInfo.Architecture);
+            Assert.False(WorkerClient.IsWorkerCompatible(x86ApphostExe, conflictBInfo.Architecture, TargetRuntimeFamily.ModernDotNet, out string errConflictB));
+            Assert.Contains("conflicting CPU architecture", errConflictB, StringComparison.OrdinalIgnoreCase);
+            Assert.False(WorkerClient.TryResolveCompatibleWorker(conflictBExe, out _, out string errResolveB));
+            Assert.Contains("conflicting CPU architecture", errResolveB, StringComparison.OrdinalIgnoreCase);
         }
 
         private static byte[] CreateSyntheticNativePe(bool is64Bit)

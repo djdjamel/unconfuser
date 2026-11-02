@@ -31,14 +31,17 @@ namespace ConfuserExKillerRunner.Core
         public bool IsIlOnly => (ClrFlags & 0x00000001) != 0;
         public bool Is32BitRequired => (ClrFlags & 0x00000002) != 0;
         public bool Is32BitPreferred => (ClrFlags & 0x00020000) != 0;
+        public bool HasArchitectureConflict { get; set; }
 
         public bool IsCompatibleWithCurrentProcess()
         {
+            if (Architecture == TargetArchitecture.Unknown || HasArchitectureConflict)
+                return false;
             bool is64BitProcess = Environment.Is64BitProcess;
             if (Architecture == TargetArchitecture.X64)
-                return is64BitProcess;
+                return is64BitProcess && System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64;
             if (Architecture == TargetArchitecture.X86Required)
-                return !is64BitProcess;
+                return !is64BitProcess && System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X86;
             if (Architecture == TargetArchitecture.Arm64)
                 return System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.Arm64;
             // AnyCPU or X86Preferred can run in either bitness
@@ -47,7 +50,7 @@ namespace ConfuserExKillerRunner.Core
 
         public override string ToString()
         {
-            return $"{Architecture} (Machine=0x{Machine:X4}, PE32+={IsPe32Plus}, 32BitReq={Is32BitRequired}, 32BitPref={Is32BitPreferred})";
+            return $"{Architecture} (Machine=0x{Machine:X4}, PE32+={IsPe32Plus}, 32BitReq={Is32BitRequired}, 32BitPref={Is32BitPreferred}, Conflict={HasArchitectureConflict})";
         }
     }
 
@@ -66,7 +69,7 @@ namespace ConfuserExKillerRunner.Core
             }
 
             // If filePath is a native apphost (.exe without CLR header) accompanied by a managed sibling .dll,
-            // inspect the sibling .dll to enrich CLR flags while preserving the native host bitness constraints.
+            // inspect the sibling .dll to enrich CLR flags and enforce strict architecture coherence between host and payload.
             if (!info.HasClrHeader && filePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
             {
                 string siblingDll = Path.ChangeExtension(filePath, ".dll");
@@ -81,9 +84,10 @@ namespace ConfuserExKillerRunner.Core
                             if (dllInfo.HasClrHeader)
                             {
                                 info.ClrFlags = dllInfo.ClrFlags;
-                                if (info.Architecture == TargetArchitecture.Unknown)
+                                if (!AreHostAndPayloadArchitecturesCompatible(info.Architecture, dllInfo.Architecture))
                                 {
-                                    info.Architecture = dllInfo.Architecture;
+                                    info.HasArchitectureConflict = true;
+                                    info.Architecture = TargetArchitecture.Unknown;
                                 }
                             }
                         }
@@ -95,6 +99,20 @@ namespace ConfuserExKillerRunner.Core
             }
 
             return info;
+        }
+
+        public static bool AreHostAndPayloadArchitecturesCompatible(TargetArchitecture hostArch, TargetArchitecture payloadArch)
+        {
+            if (hostArch == TargetArchitecture.Unknown || payloadArch == TargetArchitecture.Unknown)
+                return false;
+
+            // A pure-IL AnyCPU or X86Preferred managed payload can be hosted by an x86, x64, or ARM64 native apphost.
+            if (payloadArch == TargetArchitecture.AnyCPU || payloadArch == TargetArchitecture.X86Preferred)
+                return true;
+
+            // If the managed payload requires a specific CPU architecture (X86Required, X64, or Arm64),
+            // the native apphost must match that exact architecture.
+            return hostArch == payloadArch;
         }
 
         public static ArchitectureInfo Detect(byte[] peBytes)

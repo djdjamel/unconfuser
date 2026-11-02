@@ -64,6 +64,51 @@ namespace ConfuserExKillerRunner.Core
 
     public static class WorkerClient
     {
+        private static TargetArchitecture GetHostCpuArchitecture()
+        {
+            var osArch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture;
+            if (osArch == System.Runtime.InteropServices.Architecture.Arm64)
+                return TargetArchitecture.Arm64;
+            if (osArch == System.Runtime.InteropServices.Architecture.X64 || Environment.Is64BitOperatingSystem)
+                return TargetArchitecture.X64;
+            if (osArch == System.Runtime.InteropServices.Architecture.X86)
+                return TargetArchitecture.X86Required;
+            return TargetArchitecture.Unknown;
+        }
+
+        public static TargetArchitecture GetWorkerEffectiveCpuArchitecture(string workerExe, ArchitectureInfo workerArchInfo = null)
+        {
+            if (workerArchInfo == null)
+            {
+                if (string.IsNullOrEmpty(workerExe) || !File.Exists(workerExe))
+                    return TargetArchitecture.Unknown;
+                workerArchInfo = ArchitectureDetector.Detect(workerExe);
+            }
+
+            if (workerArchInfo.HasArchitectureConflict)
+                return TargetArchitecture.Unknown;
+
+            switch (workerArchInfo.Architecture)
+            {
+                case TargetArchitecture.Unknown:
+                    return TargetArchitecture.Unknown;
+                case TargetArchitecture.X86Required:
+                    return TargetArchitecture.X86Required;
+                case TargetArchitecture.X64:
+                    return TargetArchitecture.X64;
+                case TargetArchitecture.Arm64:
+                    return TargetArchitecture.Arm64;
+                case TargetArchitecture.X86Preferred:
+                    if (!string.IsNullOrEmpty(workerExe) && workerExe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                        return TargetArchitecture.X86Required;
+                    return GetHostCpuArchitecture();
+                case TargetArchitecture.AnyCPU:
+                    return GetHostCpuArchitecture();
+                default:
+                    return TargetArchitecture.Unknown;
+            }
+        }
+
         public static bool IsWorker64BitProcess(string workerExe)
         {
             if (string.IsNullOrEmpty(workerExe) || !File.Exists(workerExe))
@@ -71,10 +116,10 @@ namespace ConfuserExKillerRunner.Core
 
             try
             {
-                var arch = ArchitectureDetector.Detect(workerExe);
-                if (arch.Architecture == TargetArchitecture.X64)
+                var effectiveArch = GetWorkerEffectiveCpuArchitecture(workerExe);
+                if (effectiveArch == TargetArchitecture.X64 || effectiveArch == TargetArchitecture.Arm64)
                     return true;
-                if (arch.Architecture == TargetArchitecture.X86Required || arch.Architecture == TargetArchitecture.X86Preferred)
+                if (effectiveArch == TargetArchitecture.X86Required)
                     return false;
             }
             catch
@@ -110,23 +155,48 @@ namespace ConfuserExKillerRunner.Core
                 return false;
             }
 
+            if (targetArch == TargetArchitecture.Unknown)
+            {
+                mismatchReason = "Target assembly has an unknown, invalid, or conflicting CPU architecture.";
+                return false;
+            }
+
             var workerArchInfo = ArchitectureDetector.Detect(workerExe);
-            if (workerArchInfo.Architecture == TargetArchitecture.Unknown)
+            if (workerArchInfo.Architecture == TargetArchitecture.Unknown || workerArchInfo.HasArchitectureConflict)
             {
-                mismatchReason = $"Resolved worker '{Path.GetFileName(workerExe)}' has an unknown or invalid PE architecture.";
+                mismatchReason = $"Resolved worker '{Path.GetFileName(workerExe)}' has an unknown, invalid, or conflicting PE architecture.";
                 return false;
             }
 
-            bool workerIs64Bit = IsWorker64BitProcess(workerExe);
-            if (targetArch == TargetArchitecture.X86Required && workerIs64Bit)
+            TargetArchitecture effectiveWorkerArch = GetWorkerEffectiveCpuArchitecture(workerExe, workerArchInfo);
+            if (effectiveWorkerArch == TargetArchitecture.Unknown)
             {
-                mismatchReason = "Target assembly requires 32-bit execution, but 32-bit worker is not available on this host.";
+                mismatchReason = $"Resolved worker '{Path.GetFileName(workerExe)}' has an indeterminate effective CPU architecture.";
                 return false;
             }
 
-            if (targetArch == TargetArchitecture.X64 && !workerIs64Bit)
+            if (targetArch == TargetArchitecture.Arm64 && effectiveWorkerArch != TargetArchitecture.Arm64)
             {
-                mismatchReason = "Target assembly requires 64-bit (x64) execution, but resolved worker runs as a 32-bit (x86) process.";
+                mismatchReason = $"Target assembly requires ARM64 execution, but resolved worker runs as {effectiveWorkerArch}.";
+                return false;
+            }
+
+            if (effectiveWorkerArch == TargetArchitecture.Arm64 &&
+                (targetArch == TargetArchitecture.X64 || targetArch == TargetArchitecture.X86Required))
+            {
+                mismatchReason = $"Target assembly requires {targetArch} execution, but resolved worker runs as ARM64.";
+                return false;
+            }
+
+            if (targetArch == TargetArchitecture.X86Required && effectiveWorkerArch != TargetArchitecture.X86Required)
+            {
+                mismatchReason = "Target assembly requires 32-bit (x86) execution, but 32-bit worker is not available on this host.";
+                return false;
+            }
+
+            if (targetArch == TargetArchitecture.X64 && effectiveWorkerArch != TargetArchitecture.X64)
+            {
+                mismatchReason = $"Target assembly requires 64-bit (x64) execution, but resolved worker runs as 32-bit ({effectiveWorkerArch}) process.";
                 return false;
             }
 
