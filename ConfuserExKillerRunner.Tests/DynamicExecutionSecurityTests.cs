@@ -444,6 +444,90 @@ namespace ConfuserExKillerRunner.Tests
             Assert.NotEqual(AntiTamperStatus.NotAttempted, result.Status);
         }
 
+        [Fact]
+        public void WorkerClient_IsWorkerCompatible_ValidatesBitnessAndTargetFramework()
+        {
+            string net48Worker = Path.Combine(_testDir, "MockWorkerNet48_x86.exe");
+            using (var mod = new ModuleDefUser("MockWorkerNet48_x86.exe"))
+            {
+                var asm = new AssemblyDefUser("MockWorkerNet48_x86", new Version(1, 0, 0, 0));
+                asm.Modules.Add(mod);
+                mod.Kind = ModuleKind.Console;
+                mod.Machine = dnlib.PE.Machine.I386;
+                mod.Is32BitRequired = true;
+                mod.Write(net48Worker);
+            }
+
+            // 1. 32-bit net48 worker IS compatible with X86Required or AnyCPU .NET Framework target
+            Assert.True(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.X86Required, targetRequiresModernDotNet: false, out string reason1));
+            Assert.Null(reason1);
+            Assert.True(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.AnyCPU, targetRequiresModernDotNet: false, out string reason2));
+            Assert.Null(reason2);
+
+            // 2. 32-bit net48 worker is NOT compatible with 64-bit (X64) target
+            Assert.False(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.X64, targetRequiresModernDotNet: false, out string reasonX64));
+            Assert.Contains("64-bit", reasonX64, StringComparison.OrdinalIgnoreCase);
+
+            // 3. net48 worker is NOT compatible with modern .NET (.NET Core / .NET 8) target
+            Assert.False(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.AnyCPU, targetRequiresModernDotNet: true, out string reasonModern));
+            Assert.Contains("modern .NET runtime", reasonModern, StringComparison.OrdinalIgnoreCase);
+
+            // 4. 64-bit worker is NOT compatible with 32-bit (X86Required) target
+            string x64Worker = Path.Combine(_testDir, "MockWorker_x64.exe");
+            using (var mod = new ModuleDefUser("MockWorker_x64.exe"))
+            {
+                var asm = new AssemblyDefUser("MockWorker_x64", new Version(1, 0, 0, 0));
+                asm.Modules.Add(mod);
+                mod.Kind = ModuleKind.Console;
+                mod.Machine = dnlib.PE.Machine.AMD64;
+                mod.Is32BitRequired = false;
+                mod.Write(x64Worker);
+            }
+
+            Assert.False(WorkerClient.IsWorkerCompatible(x64Worker, TargetArchitecture.X86Required, targetRequiresModernDotNet: false, out string reasonX86));
+            Assert.Contains("32-bit", reasonX86, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public void ArchitectureDetector_RequiresModernDotNetRuntime_DistinguishesNet48FromNet8()
+        {
+            string net48Dll = Path.Combine(_testDir, "Net48Sample.dll");
+            CreateSimpleAssembly(net48Dll);
+            Assert.False(ArchitectureDetector.RequiresModernDotNetRuntime(net48Dll));
+
+            string net8Dll = Path.Combine(_testDir, "Net8Sample.dll");
+            using (var mod = new ModuleDefUser("Net8Sample.dll"))
+            {
+                var asm = new AssemblyDefUser("Net8Sample", new Version(1, 0, 0, 0));
+                asm.Modules.Add(mod);
+                var sysRuntimeRef = new AssemblyRefUser("System.Runtime", new Version(8, 0, 0, 0));
+                var objRef = new TypeRefUser(mod, "System", "Object", sysRuntimeRef);
+                var t = new TypeDefUser("SampleNs", "SampleType", objRef);
+                mod.Types.Add(t);
+                mod.Write(net8Dll);
+            }
+            Assert.True(ArchitectureDetector.RequiresModernDotNetRuntime(net8Dll));
+        }
+
+        [Fact]
+        public void WorkerHost_EscapeJson_EscapesAllControlCharactersAndRoundTripsViaSimpleJson()
+        {
+            string rawMessage = "Error:\tLine1\r\nLine2\b\f\"quoted\"\\backslash\u0001\u001F";
+            string escaped = WorkerHost.EscapeJson(rawMessage);
+            string json = $"{{\"Success\": false, \"Message\": \"{escaped}\"}}";
+
+            var parsed = JsonValue.Parse(json);
+            Assert.True(parsed.IsObject);
+            Assert.False(parsed["Success"].AsBool(true));
+            string roundTripped = parsed["Message"].AsString();
+            Assert.Contains("Line1 Line2", roundTripped);
+            Assert.Contains("\t", roundTripped);
+            Assert.Contains("\"quoted\"", roundTripped);
+            Assert.Contains("\\backslash", roundTripped);
+            Assert.Contains("\u0001", roundTripped);
+            Assert.Contains("\u001F", roundTripped);
+        }
+
         private static string ComputeSha256(byte[] data)
         {
             using (var sha = SHA256.Create())

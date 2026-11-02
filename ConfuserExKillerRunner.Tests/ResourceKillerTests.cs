@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using ConfuserExKillerRunner.Killers;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
@@ -113,6 +113,7 @@ namespace ConfuserExKillerRunner.Tests
 
                 Assert.False(result.ResourcesDecrypted);
                 Assert.False(result.HandlerStripped);
+                Assert.False(string.IsNullOrWhiteSpace(result.Message));
 
                 // Check rollback preserved resources
                 Assert.Single(moduleMD.Resources);

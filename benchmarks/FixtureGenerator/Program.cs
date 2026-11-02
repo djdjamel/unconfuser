@@ -1089,7 +1089,10 @@ namespace FixtureGenerator
                 foreach (var inst in arrayInitInstrs)
                     decrypterMethod.Body.Instructions.Add(inst);
 
-                var asmLoadRef = module.Import(typeof(Assembly).GetMethod("Load", new[] { typeof(byte[]) }));
+                var asmTypeRef = new TypeRefUser(module, "System.Reflection", "Assembly", module.CorLibTypes.AssemblyRef);
+                var asmLoadRef = new MemberRefUser(module, "Load",
+                    MethodSig.CreateStatic(new ClassSig(asmTypeRef), new SZArraySig(module.CorLibTypes.Byte)),
+                    asmTypeRef);
 
                 decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Call, asmLoadRef));
                 decrypterMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
@@ -1133,7 +1136,10 @@ namespace FixtureGenerator
                 {
                     Body = new CilBody()
                 };
-                var asmLoadRef = stubMod.Import(typeof(Assembly).GetMethod("Load", new[] { typeof(byte[]) }));
+                var asmTypeRef = new TypeRefUser(stubMod, "System.Reflection", "Assembly", stubMod.CorLibTypes.AssemblyRef);
+                var asmLoadRef = new MemberRefUser(stubMod, "Load",
+                    MethodSig.CreateStatic(new ClassSig(asmTypeRef), new SZArraySig(stubMod.CorLibTypes.Byte)),
+                    asmTypeRef);
 
                 ep.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
                 ep.Body.Instructions.Add(Instruction.Create(OpCodes.Call, asmLoadRef));
@@ -1221,13 +1227,20 @@ namespace FixtureGenerator
 
         private static List<Instruction> CreateArrayInitializer(ModuleDef module, ITypeDefOrRef arrayType, int arrayLength, FieldDef dataField)
         {
+            var runtimeHelpersTypeRef = new TypeRefUser(module, "System.Runtime.CompilerServices", "RuntimeHelpers", module.CorLibTypes.AssemblyRef);
+            var systemArrayTypeRef = new TypeRefUser(module, "System", "Array", module.CorLibTypes.AssemblyRef);
+            var runtimeFieldHandleTypeRef = new TypeRefUser(module, "System", "RuntimeFieldHandle", module.CorLibTypes.AssemblyRef);
+            var initArrayRef = new MemberRefUser(module, "InitializeArray",
+                MethodSig.CreateStatic(module.CorLibTypes.Void, new ClassSig(systemArrayTypeRef), new ValueTypeSig(runtimeFieldHandleTypeRef)),
+                runtimeHelpersTypeRef);
+
             var instructions = new List<Instruction>
             {
                 new Instruction(OpCodes.Ldc_I4, arrayLength),
                 new Instruction(OpCodes.Newarr, arrayType),
                 new Instruction(OpCodes.Dup),
                 new Instruction(OpCodes.Ldtoken, dataField),
-                new Instruction(OpCodes.Call, module.Import(typeof(RuntimeHelpers).GetMethod("InitializeArray"))),
+                new Instruction(OpCodes.Call, initArrayRef),
             };
             return instructions;
         }

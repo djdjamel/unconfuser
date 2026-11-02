@@ -374,6 +374,9 @@ namespace ConfuserExKillerRunner.Core
             }
         }
 
+        private static readonly object _resolverLock = new object();
+        private static ResolveEventHandler _activeResolver;
+
         public static void SetupRestrictedResolver(string targetAssemblyPath, IEnumerable<string> allowedDirectories, bool allowTargetDir)
         {
             var allowedDirSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -401,9 +404,12 @@ namespace ConfuserExKillerRunner.Core
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"[WorkerHost] Could not statically read AssemblyRefs from '{targetAssemblyPath}': {ex.Message}");
+            }
 
-            AppDomain.CurrentDomain.AssemblyResolve += (sender, args) =>
+            ResolveEventHandler handler = (sender, args) =>
             {
                 try
                 {
@@ -459,6 +465,16 @@ namespace ConfuserExKillerRunner.Core
 
                 return null;
             };
+
+            lock (_resolverLock)
+            {
+                if (_activeResolver != null)
+                {
+                    AppDomain.CurrentDomain.AssemblyResolve -= _activeResolver;
+                }
+                _activeResolver = handler;
+                AppDomain.CurrentDomain.AssemblyResolve += _activeResolver;
+            }
         }
 
         private static void WriteAntiTamperMeta(string path, AntiTamperStatus status, bool modified, string message, List<string> sections)
@@ -528,7 +544,7 @@ namespace ConfuserExKillerRunner.Core
                 }
                 return HandleComparisonResult.Error;
             }
-            catch (EntryPointNotFoundException)
+            catch (Exception ex) when (ex is EntryPointNotFoundException || ex is DllNotFoundException)
             {
                 try
                 {
@@ -543,7 +559,7 @@ namespace ConfuserExKillerRunner.Core
                     }
                     return HandleComparisonResult.Error;
                 }
-                catch (EntryPointNotFoundException)
+                catch (Exception innerEx) when (innerEx is EntryPointNotFoundException || innerEx is DllNotFoundException)
                 {
                     return HandleComparisonResult.ApiUnavailable;
                 }
@@ -688,10 +704,34 @@ namespace ConfuserExKillerRunner.Core
             }
         }
 
-        private static string EscapeJson(string s)
+        internal static string EscapeJson(string s)
         {
             if (string.IsNullOrEmpty(s)) return string.Empty;
-            return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", " ");
+            var sb = new StringBuilder(s.Length + 8);
+            foreach (char c in s)
+            {
+                switch (c)
+                {
+                    case '\\': sb.Append("\\\\"); break;
+                    case '"': sb.Append("\\\""); break;
+                    case '\r': break;
+                    case '\n': sb.Append(' '); break;
+                    case '\t': sb.Append("\\t"); break;
+                    case '\b': sb.Append("\\b"); break;
+                    case '\f': sb.Append("\\f"); break;
+                    default:
+                        if (c < 0x20)
+                        {
+                            sb.AppendFormat(System.Globalization.CultureInfo.InvariantCulture, "\\u{0:X4}", (int)c);
+                        }
+                        else
+                        {
+                            sb.Append(c);
+                        }
+                        break;
+                }
+            }
+            return sb.ToString();
         }
     }
 }

@@ -27,7 +27,12 @@ namespace ConfuserExKillerRunner.Killers
 
     public static class ResourceKiller
     {
-        public static ResourceKillerResult Execute(ModuleDefMD module, Module reflModule = null, bool resourcesAlreadyDecrypted = false)
+        public static bool HasResourceDecrypterMethod(ModuleDefMD module)
+        {
+            return module != null && FindResourceDecrypterMethod(module) != null;
+        }
+
+        public static ResourceKillerResult Execute(ModuleDefMD module, Module reflModule = null, bool resourcesAlreadyDecrypted = false, bool dynamicAttemptedInWorker = false)
         {
             if (module == null) throw new ArgumentNullException(nameof(module));
 
@@ -49,7 +54,7 @@ namespace ConfuserExKillerRunner.Killers
                     Logger.LogWarning($"[ResourceKiller] Dynamic resource decryption warning: {ex.Message}");
                 }
             }
-            else if (!result.ResourcesDecrypted)
+            else if (!result.ResourcesDecrypted && !dynamicAttemptedInWorker)
             {
                 Logger.LogInfo("[ResourceKiller] Dynamic execution disabled; skipping resource decryption & re-embedding.");
             }
@@ -76,7 +81,10 @@ namespace ConfuserExKillerRunner.Killers
         {
             var decrypterMethod = FindResourceDecrypterMethod(module);
             if (decrypterMethod == null || !decrypterMethod.HasBody)
+            {
+                result.Message = "No ConfuserEx resource decrypter method identified in module.";
                 return;
+            }
 
             Logger.LogInfo($"[ResourceKiller] Found ConfuserEx resource decrypter: {decrypterMethod.FullName}");
 
@@ -137,6 +145,7 @@ namespace ConfuserExKillerRunner.Killers
                 {
                     Logger.LogWarning("[ResourceKiller] Could not locate Assembly.Load call in decrypter method. Rolling back.");
                     Rollback();
+                    result.Message = "Could not locate Assembly.Load call in decrypter method.";
                     return;
                 }
 
@@ -172,6 +181,7 @@ namespace ConfuserExKillerRunner.Killers
                 if (moduleBytes == null || moduleBytes.Length == 0)
                 {
                     Rollback();
+                    result.Message = "Failed to serialize temporary module for in-memory resource decryption.";
                     return;
                 }
 
@@ -182,6 +192,7 @@ namespace ConfuserExKillerRunner.Killers
                 {
                     Logger.LogWarning($"[ResourceKiller] Could not locate rewritten static decrypter method {decrypterMethod.Name} in memory assembly. Rolling back.");
                     Rollback();
+                    result.Message = $"Could not locate rewritten static decrypter method {decrypterMethod.Name} in memory assembly.";
                     return;
                 }
 
@@ -235,13 +246,15 @@ namespace ConfuserExKillerRunner.Killers
                         result.DecryptedResourcesCount = count;
                         result.ExtractedResourcesCount = count;
                         result.ResourcesDecrypted = true;
-                        Logger.LogInfo($"[ResourceKiller] Successfully extracted and re-embedded {count} decrypted resources from {resModule.Name}.");
+                        result.Message = $"Successfully extracted and re-embedded {count} decrypted resources from {resModule.Name}.";
+                        Logger.LogInfo($"[ResourceKiller] {result.Message}");
                     }
                 }
                 else
                 {
                     Logger.LogWarning("[ResourceKiller] Decrypter method returned null or empty bytes. Rolling back.");
                     Rollback();
+                    result.Message = "Decrypter method returned null or empty resource payload bytes.";
                     return;
                 }
 
@@ -278,9 +291,10 @@ namespace ConfuserExKillerRunner.Killers
             }
             catch (Exception ex)
             {
-                string innerDetail = ex.InnerException != null ? $"{ex.Message} -> {ex.InnerException.GetType().Name}: {ex.InnerException.Message}" : ex.Message;
+                string innerDetail = ex.InnerException != null ? $"{ex.Message} -> {ex.InnerException.GetType().Name}: {ex.InnerException.Message}" : $"{ex.GetType().Name}: {ex.Message}";
                 Logger.LogWarning($"[ResourceKiller] Method rewrite decryption failed: {innerDetail}. Rolling back decrypter method.");
                 Rollback();
+                result.Message = $"Method rewrite decryption failed: {innerDetail}";
             }
         }
 

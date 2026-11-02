@@ -202,6 +202,23 @@ namespace ConfuserExKillerRunner.Core
             }
             catch
             {
+                if (filePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    string siblingDll = Path.ChangeExtension(filePath, ".dll");
+                    if (File.Exists(siblingDll))
+                    {
+                        try
+                        {
+                            using (var mod = dnlib.DotNet.ModuleDefMD.Load(siblingDll))
+                            {
+                                return DetectTargetFramework(mod);
+                            }
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }
                 return "Unknown";
             }
         }
@@ -239,6 +256,108 @@ namespace ConfuserExKillerRunner.Core
             }
 
             return "Unknown";
+        }
+
+        /// <summary>
+        /// Determines whether the specified assembly or executable requires a modern .NET runtime
+        /// (.NET Core / .NET 5+) rather than .NET Framework 4.x.
+        /// </summary>
+        public static bool RequiresModernDotNetRuntime(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+                return false;
+
+            try
+            {
+                using (var mod = dnlib.DotNet.ModuleDefMD.Load(filePath))
+                {
+                    return RequiresModernDotNetRuntime(mod);
+                }
+            }
+            catch
+            {
+                if (filePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    string siblingDll = Path.ChangeExtension(filePath, ".dll");
+                    if (File.Exists(siblingDll))
+                    {
+                        try
+                        {
+                            using (var mod = dnlib.DotNet.ModuleDefMD.Load(siblingDll))
+                            {
+                                return RequiresModernDotNetRuntime(mod);
+                            }
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }
+                return false;
+            }
+        }
+
+        public static bool RequiresModernDotNetRuntime(byte[] peBytes)
+        {
+            if (peBytes == null || peBytes.Length == 0)
+                return false;
+
+            try
+            {
+                using (var mod = dnlib.DotNet.ModuleDefMD.Load(peBytes))
+                {
+                    return RequiresModernDotNetRuntime(mod);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool RequiresModernDotNetRuntime(dnlib.DotNet.ModuleDef module)
+        {
+            if (module == null)
+                return false;
+
+            try
+            {
+                string tfm = DetectTargetFramework(module);
+                if (!string.IsNullOrEmpty(tfm))
+                {
+                    if (tfm.StartsWith(".NETCoreApp", StringComparison.OrdinalIgnoreCase) ||
+                        tfm.StartsWith(".NETStandard,Version=v2.1", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+
+                foreach (var asmRef in module.GetAssemblyRefs())
+                {
+                    if (asmRef == null || string.IsNullOrEmpty(asmRef.Name))
+                        continue;
+
+                    string name = asmRef.Name.String;
+                    if (string.Equals(name, "System.Private.CoreLib", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(name, "Microsoft.NETCore.App", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+
+                    if ((string.Equals(name, "System.Runtime", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(name, "System.Console", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(name, "System.Collections", StringComparison.OrdinalIgnoreCase)) &&
+                        asmRef.Version != null && asmRef.Version.Major >= 5)
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
         }
     }
 }

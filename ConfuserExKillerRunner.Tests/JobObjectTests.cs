@@ -506,9 +506,7 @@ namespace ConfuserExKillerRunner.Tests
                 using (var proc = Process.Start(psi))
                 {
                     Assert.NotNull(proc);
-                    string stdout = proc.StandardOutput.ReadToEnd();
-                    string stderr = proc.StandardError.ReadToEnd();
-                    bool exited = proc.WaitForExit(15000);
+                    var (exited, stdout, stderr) = WaitAndReadProcess(proc, 15000);
                     Assert.True(exited, "Control process timed out.");
 
                     // Expected Failure: Child detected kernel object identity via CompareObjectHandles and exited with code 42
@@ -583,9 +581,7 @@ namespace ConfuserExKillerRunner.Tests
                 using (var proc = Process.Start(psi))
                 {
                     Assert.NotNull(proc);
-                    string stdout = proc.StandardOutput.ReadToEnd();
-                    string stderr = proc.StandardError.ReadToEnd();
-                    bool exited = proc.WaitForExit(15000);
+                    var (exited, stdout, stderr) = WaitAndReadProcess(proc, 15000);
                     Assert.True(exited, "Process timed out.");
 
                     // Expected: Child detected kernel object identity (exit code 42)
@@ -659,9 +655,7 @@ namespace ConfuserExKillerRunner.Tests
                 using (var proc = Process.Start(psi))
                 {
                     Assert.NotNull(proc);
-                    string stdout = proc.StandardOutput.ReadToEnd();
-                    string stderr = proc.StandardError.ReadToEnd();
-                    bool exited = proc.WaitForExit(15000);
+                    var (exited, stdout, stderr) = WaitAndReadProcess(proc, 15000);
                     Assert.True(exited, "Process timed out.");
 
                     // Mandatory Requirement: When parent event cannot be opened, comparison cannot be made.
@@ -736,9 +730,7 @@ namespace ConfuserExKillerRunner.Tests
                 using (var proc = Process.Start(psi))
                 {
                     Assert.NotNull(proc);
-                    string stdout = proc.StandardOutput.ReadToEnd();
-                    string stderr = proc.StandardError.ReadToEnd();
-                    bool exited = proc.WaitForExit(15000);
+                    var (exited, stdout, stderr) = WaitAndReadProcess(proc, 15000);
                     Assert.True(exited, "Process timed out.");
 
                     _output?.WriteLine($"[JobObject_14_NegativeControl] Child stdout:\n{stdout}");
@@ -877,6 +869,42 @@ namespace ConfuserExKillerRunner.Tests
             finally
             {
                 Environment.SetEnvironmentVariable(sensitiveKey, null);
+            }
+        }
+
+        private static (bool exited, string stdout, string stderr) WaitAndReadProcess(Process proc, int timeoutMs)
+        {
+            var sbOut = new System.Text.StringBuilder();
+            var sbErr = new System.Text.StringBuilder();
+            using (var outDone = new ManualResetEvent(false))
+            using (var errDone = new ManualResetEvent(false))
+            {
+                proc.OutputDataReceived += (s, e) =>
+                {
+                    if (e.Data == null) outDone.Set();
+                    else sbOut.AppendLine(e.Data);
+                };
+                proc.ErrorDataReceived += (s, e) =>
+                {
+                    if (e.Data == null) errDone.Set();
+                    else sbErr.AppendLine(e.Data);
+                };
+
+                proc.BeginOutputReadLine();
+                proc.BeginErrorReadLine();
+
+                bool exited = proc.WaitForExit(timeoutMs);
+                if (!exited)
+                {
+                    try { proc.Kill(); } catch { }
+                }
+                else
+                {
+                    outDone.WaitOne(2000);
+                    errDone.WaitOne(2000);
+                }
+
+                return (exited, sbOut.ToString(), sbErr.ToString());
             }
         }
     }

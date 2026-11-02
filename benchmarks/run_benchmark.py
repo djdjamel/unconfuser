@@ -361,7 +361,15 @@ def run_benchmark_case(
         record["audit_status"] = record["metrics"].get("audit_status", "NONE")
 
         if proc.returncode != 0:
-            record["error"] = f"Deobfuscator exited with error code {proc.returncode}: {runner_stderr.strip()[:200]}"
+            err_detail = runner_stderr.strip()
+            if not err_detail and runner_stdout:
+                warn_lines = [
+                    ln.strip()
+                    for ln in runner_stdout.splitlines()
+                    if ln.strip().startswith("[!]") or ln.strip().startswith("[-]") or "Error" in ln or "failed" in ln
+                ]
+                err_detail = " | ".join(warn_lines[-3:]) if warn_lines else runner_stdout.strip()[-200:]
+            record["error"] = f"Deobfuscator exited with error code {proc.returncode}: {err_detail[:250]}"
             record["verdict"] = fail_verdict
             if clean_output.exists():
                 try:
@@ -390,12 +398,24 @@ def run_benchmark_case(
 
         # 2. Behavioral verification in separate process with 5s execution limit
         runtime_config_dest = fixture_path.parent / f"{clean_output.stem}.runtimeconfig.json"
-        if BENIGN_CONFIG.exists():
-            shutil.copy2(BENIGN_CONFIG, runtime_config_dest)
+        temp_net48_exe = fixture_path.parent / f"{clean_output.stem}_net48_exec.exe"
+        use_net48_exe_host = (
+            baseline_dll_path is not None
+            and baseline_dll_path.suffix.lower() == ".exe"
+            and clean_output.suffix.lower() == ".dll"
+        )
+
+        if use_net48_exe_host:
+            shutil.copy2(clean_output, temp_net48_exe)
+            exec_cmd = [str(temp_net48_exe), "test"]
+        else:
+            if BENIGN_CONFIG.exists() and clean_output.suffix.lower() == ".dll":
+                shutil.copy2(BENIGN_CONFIG, runtime_config_dest)
+            exec_cmd = get_exec_command(clean_output) + ["test"]
 
         try:
             exec_proc = subprocess.run(
-                get_exec_command(clean_output) + ["test"],
+                exec_cmd,
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",
@@ -419,6 +439,11 @@ def run_benchmark_case(
             if runtime_config_dest.exists():
                 try:
                     runtime_config_dest.unlink()
+                except Exception:
+                    pass
+            if temp_net48_exe.exists():
+                try:
+                    temp_net48_exe.unlink()
                 except Exception:
                     pass
 
@@ -456,6 +481,7 @@ def run_all_benchmarks(
     fixtures_dir: Path = FIXTURES_DIR,
     runner_path: Optional[Path] = None,
     output_report_path: Optional[Path] = None,
+    baseline_dll_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     # Validate ConfuserEx pin configuration upfront so invalid configuration fails immediately
     pinned_release, expected_sha = get_confuserex_pin_configuration()
@@ -463,12 +489,14 @@ def run_all_benchmarks(
     if runner_path is None:
         runner_path = find_runner()
 
+    active_baseline = baseline_dll_path if baseline_dll_path is not None else BENIGN_DLL
+
     # Auto-generate fixtures if missing and generator is available
     if not (fixtures_dir / "fixture_constants.dll").exists():
         generator = find_generator()
-        if generator and BENIGN_DLL.exists():
+        if generator and active_baseline.exists():
             fixtures_dir.mkdir(parents=True, exist_ok=True)
-            gen_cmd = get_exec_command(generator) + ["--input", str(BENIGN_DLL), "--output-dir", str(fixtures_dir)]
+            gen_cmd = get_exec_command(generator) + ["--input", str(active_baseline), "--output-dir", str(fixtures_dir)]
             subprocess.run(gen_cmd, check=False, capture_output=True)
 
     expected_baseline = get_benign_baseline()
@@ -515,7 +543,7 @@ def run_all_benchmarks(
             scenario,
             runner_path,
             expected_baseline,
-            baseline_dll_path=BENIGN_DLL,
+            baseline_dll_path=active_baseline,
             is_synthetic=True,
         )
         results.append(res)
@@ -719,8 +747,35 @@ def print_console_summary(summary: Dict[str, Any]):
 
 
 if __name__ == "__main__":
-    report_file = BENCHMARKS_DIR / "benchmark_report.md"
-    summary = run_all_benchmarks(output_report_path=report_file)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run end-to-end deobfuscation benchmark suite.")
+    parser.add_argument("--tfm", choices=["net8.0-windows", "net48"], default=None, help="Target framework runner & baseline to benchmark.")
+    parser.add_argument("--runner", type=Path, default=None, help="Explicit path to ConfuserExKillerRunner binary.")
+    parser.add_argument("--fixtures-dir", type=Path, default=None, help="Directory containing synthetic fixtures.")
+    parser.add_argument("--report", type=Path, default=None, help="Output Markdown report path.")
+    args = parser.parse_args()
+
+    selected_runner = args.runner
+    selected_baseline = None
+    selected_fixtures_dir = args.fixtures_dir if args.fixtures_dir is not None else FIXTURES_DIR
+    report_file = args.report if args.report is not None else (BENCHMARKS_DIR / "benchmark_report.md")
+
+    if args.tfm == "net48":
+        if selected_runner is None:
+            selected_runner = WORKSPACE_ROOT / "ConfuserExKillerRunner" / "bin" / "Release" / "net48" / "ConfuserExKillerRunner.exe"
+        selected_baseline = BENIGN_NET48_EXE
+        if args.fixtures_dir is None:
+            selected_fixtures_dir = FIXTURES_DIR / "net48"
+        if args.report is None:
+            report_file = BENCHMARKS_DIR / "benchmark_report_net48.md"
+
+    summary = run_all_benchmarks(
+        fixtures_dir=selected_fixtures_dir,
+        runner_path=selected_runner,
+        output_report_path=report_file,
+        baseline_dll_path=selected_baseline,
+    )
     print_console_summary(summary)
     print(f"[+] Detailed Markdown report generated at: {report_file}")
     sys.exit(0 if summary["synthetic_fail"] == 0 and summary["real_protector_fail"] == 0 and summary["unverified"] == 0 else 1)

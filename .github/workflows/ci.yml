@@ -61,6 +61,9 @@ jobs:
     - name: Run Deobfuscation Benchmark Suite
       run: python benchmarks/run_benchmark.py
 
+    - name: Run Deobfuscation Benchmark Suite (.NET Framework 4.8 Runner & Target)
+      run: python benchmarks/run_benchmark.py --tfm net48
+
     - name: Verify Real Deobfuscated Output Safely
       run: powershell -ExecutionPolicy Bypass -File scripts/Verify-DeobfuscatedBinary.ps1 -Target benchmarks/fixtures/real_confuserex/BenignSample_clean.exe -ReportJson benchmarks/verify_deobfuscated_report.json -CommitHash "${{ github.sha }}"
 
@@ -87,6 +90,8 @@ jobs:
           **/TestResults/*.trx
           benchmarks/benchmark_report.md
           benchmarks/benchmark_report.json
+          benchmarks/benchmark_report_net48.md
+          benchmarks/benchmark_report_net48.json
           benchmarks/verify_benign_report.json
           benchmarks/verify_deobfuscated_report.json
           benchmarks/peverify_runner_verification.log

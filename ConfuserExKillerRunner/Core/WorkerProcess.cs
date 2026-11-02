@@ -64,7 +64,85 @@ namespace ConfuserExKillerRunner.Core
 
     public static class WorkerClient
     {
-        public static string ResolveWorkerExecutable(TargetArchitecture targetArch = TargetArchitecture.Unknown)
+        public static bool IsWorker64BitProcess(string workerExe)
+        {
+            if (string.IsNullOrEmpty(workerExe) || !File.Exists(workerExe))
+                return Environment.Is64BitProcess;
+
+            try
+            {
+                var arch = ArchitectureDetector.Detect(workerExe);
+                if (arch.Architecture == TargetArchitecture.X64)
+                    return true;
+                if (arch.Architecture == TargetArchitecture.X86Required || arch.Architecture == TargetArchitecture.X86Preferred)
+                    return false;
+            }
+            catch
+            {
+            }
+
+            return Environment.Is64BitOperatingSystem;
+        }
+
+        public static bool IsWorkerCompatible(
+            string workerExe,
+            TargetArchitecture targetArch,
+            bool targetRequiresModernDotNet,
+            out string mismatchReason)
+        {
+            mismatchReason = null;
+
+            if (string.IsNullOrEmpty(workerExe) || !File.Exists(workerExe))
+            {
+                mismatchReason = "Isolated worker executable could not be resolved.";
+                return false;
+            }
+
+            bool workerIs64Bit = IsWorker64BitProcess(workerExe);
+            if (targetArch == TargetArchitecture.X86Required && workerIs64Bit)
+            {
+                mismatchReason = "Target assembly requires 32-bit execution, but 32-bit worker is not available on this host.";
+                return false;
+            }
+
+            if (targetArch == TargetArchitecture.X64 && !workerIs64Bit)
+            {
+                mismatchReason = "Target assembly requires 64-bit (x64) execution, but resolved worker runs as a 32-bit (x86) process.";
+                return false;
+            }
+
+            if (targetRequiresModernDotNet && !ArchitectureDetector.RequiresModernDotNetRuntime(workerExe))
+            {
+                mismatchReason = $"Target assembly requires a modern .NET runtime (.NET Core / .NET 5+), but resolved worker '{Path.GetFileName(workerExe)}' targets .NET Framework.";
+                return false;
+            }
+
+            return true;
+        }
+
+        public static bool TryResolveCompatibleWorker(
+            string targetAssemblyPath,
+            out string workerExe,
+            out string mismatchReason)
+        {
+            var archInfo = ArchitectureDetector.Detect(targetAssemblyPath);
+            bool requiresModernDotNet = ArchitectureDetector.RequiresModernDotNetRuntime(targetAssemblyPath);
+            workerExe = ResolveWorkerExecutable(archInfo.Architecture, requiresModernDotNet);
+            return IsWorkerCompatible(workerExe, archInfo.Architecture, requiresModernDotNet, out mismatchReason);
+        }
+
+        public static bool TryResolveCompatibleWorker(
+            byte[] peBytes,
+            out string workerExe,
+            out string mismatchReason)
+        {
+            var archInfo = ArchitectureDetector.Detect(peBytes);
+            bool requiresModernDotNet = ArchitectureDetector.RequiresModernDotNetRuntime(peBytes);
+            workerExe = ResolveWorkerExecutable(archInfo.Architecture, requiresModernDotNet);
+            return IsWorkerCompatible(workerExe, archInfo.Architecture, requiresModernDotNet, out mismatchReason);
+        }
+
+        public static string ResolveWorkerExecutable(TargetArchitecture targetArch = TargetArchitecture.Unknown, bool targetRequiresModernDotNet = false)
         {
             string envWorker = Environment.GetEnvironmentVariable("UNCONFUSER_WORKER_PATH");
             if (!string.IsNullOrEmpty(envWorker) && File.Exists(envWorker))
@@ -84,42 +162,52 @@ namespace ConfuserExKillerRunner.Core
 
             string appDir = AppDomain.CurrentDomain.BaseDirectory;
 
-            // If target specifically requires 32-bit x86 on a 64-bit machine, search for 32-bit x86 worker executable
-            if (targetArch == TargetArchitecture.X86Required && Environment.Is64BitProcess)
-            {
-                var x86Candidates = new List<string>
-                {
-                    Path.Combine(appDir, "x86", "ConfuserExKillerRunner.exe"),
-                    Path.Combine(appDir, "..", "net48", "ConfuserExKillerRunner.exe"),
-                    Path.Combine(appDir, "..", "..", "net48", "ConfuserExKillerRunner.exe"),
-                    Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Release", "net48", "ConfuserExKillerRunner.exe"),
-                    Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Debug", "net48", "ConfuserExKillerRunner.exe")
-                };
+            var candidates = new List<string>();
 
-                foreach (var c in x86Candidates)
+            // If target specifically requires 32-bit x86, prioritize 32-bit x86 worker candidates first
+            if (targetArch == TargetArchitecture.X86Required)
+            {
+                candidates.Add(Path.Combine(appDir, "x86", "ConfuserExKillerRunner.exe"));
+                candidates.Add(Path.Combine(appDir, "..", "net48", "ConfuserExKillerRunner.exe"));
+                candidates.Add(Path.Combine(appDir, "..", "..", "net48", "ConfuserExKillerRunner.exe"));
+                candidates.Add(Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Release", "net48", "ConfuserExKillerRunner.exe"));
+                candidates.Add(Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Debug", "net48", "ConfuserExKillerRunner.exe"));
+            }
+
+            // If running directly as ConfuserExKillerRunner (not inside test host) and currentExe is compatible with the target, use it directly
+            if (!isTestHost && !string.IsNullOrEmpty(currentExe) && File.Exists(currentExe))
+            {
+                if (IsWorkerCompatible(currentExe, targetArch, targetRequiresModernDotNet, out _))
+                    return currentExe;
+            }
+
+            candidates.Add(Path.Combine(appDir, "ConfuserExKillerRunner.dll"));
+            candidates.Add(Path.Combine(appDir, "ConfuserExKillerRunner.exe"));
+            candidates.Add(Path.Combine(appDir, "..", "net8.0-windows", "ConfuserExKillerRunner.dll"));
+            candidates.Add(Path.Combine(appDir, "..", "net8.0-windows", "ConfuserExKillerRunner.exe"));
+            candidates.Add(Path.Combine(appDir, "..", "net6.0-windows", "ConfuserExKillerRunner.dll"));
+            candidates.Add(Path.Combine(appDir, "..", "net48", "ConfuserExKillerRunner.exe"));
+            candidates.Add(Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Release", "net8.0-windows", "ConfuserExKillerRunner.dll"));
+            candidates.Add(Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Release", "net8.0-windows", "ConfuserExKillerRunner.exe"));
+            candidates.Add(Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Debug", "net8.0-windows", "ConfuserExKillerRunner.dll"));
+            candidates.Add(Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Release", "net48", "ConfuserExKillerRunner.exe"));
+
+            // First pass: return the first existing candidate that is strictly compatible with both target architecture and runtime
+            foreach (var c in candidates)
+            {
+                if (File.Exists(c))
                 {
-                    if (File.Exists(c))
-                        return Path.GetFullPath(c);
+                    string fullPath = Path.GetFullPath(c);
+                    if (IsWorkerCompatible(fullPath, targetArch, targetRequiresModernDotNet, out _))
+                        return fullPath;
                 }
             }
 
-            if (isTestHost || string.IsNullOrEmpty(currentExe) || !File.Exists(currentExe))
+            // Second pass fallback: return first existing candidate so caller can report exact incompatibility reason
+            foreach (var c in candidates)
             {
-                var candidates = new List<string>
-                {
-                    Path.Combine(appDir, "ConfuserExKillerRunner.dll"),
-                    Path.Combine(appDir, "ConfuserExKillerRunner.exe"),
-                    Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Release", "net8.0-windows", "ConfuserExKillerRunner.dll"),
-                    Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Release", "net8.0-windows", "ConfuserExKillerRunner.exe"),
-                    Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Debug", "net8.0-windows", "ConfuserExKillerRunner.dll"),
-                    Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Release", "net48", "ConfuserExKillerRunner.exe")
-                };
-
-                foreach (var c in candidates)
-                {
-                    if (File.Exists(c))
-                        return Path.GetFullPath(c);
-                }
+                if (File.Exists(c))
+                    return Path.GetFullPath(c);
             }
 
             return currentExe;
@@ -138,20 +226,9 @@ namespace ConfuserExKillerRunner.Core
                 Message = "Worker initialization failed"
             };
 
-            var archInfo = ArchitectureDetector.Detect(targetAssemblyPath);
-            string workerExe = ResolveWorkerExecutable(archInfo.Architecture);
-
-            if (string.IsNullOrEmpty(workerExe) || !File.Exists(workerExe))
+            if (!TryResolveCompatibleWorker(targetAssemblyPath, out string workerExe, out string mismatchReason))
             {
-                result.Message = "Isolated worker executable could not be resolved.";
-                Logger.LogError($"[WorkerClient] {result.Message}");
-                return result;
-            }
-
-            if (archInfo.Architecture == TargetArchitecture.X86Required && Environment.Is64BitProcess &&
-                !workerExe.Contains("net48") && !workerExe.Contains("x86"))
-            {
-                result.Message = "Target assembly requires 32-bit execution, but 32-bit worker is not available on this host.";
+                result.Message = mismatchReason;
                 Logger.LogWarning($"[WorkerClient] {result.Message}");
                 return result;
             }
@@ -245,12 +322,10 @@ namespace ConfuserExKillerRunner.Core
         public static DynamicResourceResult ExecuteResourceExtraction(string targetAssemblyPath, WorkerOptions options)
         {
             var res = new DynamicResourceResult { Success = false };
-            var archInfo = ArchitectureDetector.Detect(targetAssemblyPath);
-            string workerExe = ResolveWorkerExecutable(archInfo.Architecture);
-
-            if (string.IsNullOrEmpty(workerExe) || !File.Exists(workerExe))
+            if (!TryResolveCompatibleWorker(targetAssemblyPath, out string workerExe, out string mismatchReason))
             {
-                res.Message = "Worker executable not resolved for dynamic resource extraction.";
+                res.Message = mismatchReason;
+                Logger.LogWarning($"[WorkerClient] {res.Message}");
                 return res;
             }
 
@@ -328,12 +403,10 @@ namespace ConfuserExKillerRunner.Core
         public static DynamicCompressorResult ExecuteCompressorUnpack(string targetAssemblyPath, WorkerOptions options)
         {
             var res = new DynamicCompressorResult { Success = false };
-            var archInfo = ArchitectureDetector.Detect(targetAssemblyPath);
-            string workerExe = ResolveWorkerExecutable(archInfo.Architecture);
-
-            if (string.IsNullOrEmpty(workerExe) || !File.Exists(workerExe))
+            if (!TryResolveCompatibleWorker(targetAssemblyPath, out string workerExe, out string mismatchReason))
             {
-                res.Message = "Worker executable not resolved for compressor unpacking.";
+                res.Message = mismatchReason;
+                Logger.LogWarning($"[WorkerClient] {res.Message}");
                 return res;
             }
 
@@ -412,12 +485,10 @@ namespace ConfuserExKillerRunner.Core
         {
             if (peBytes == null) throw new ArgumentNullException(nameof(peBytes));
 
-            var archInfo = ArchitectureDetector.Detect(peBytes);
-            string workerExe = ResolveWorkerExecutable(archInfo.Architecture);
-
-            if (string.IsNullOrEmpty(workerExe) || !File.Exists(workerExe))
+            if (!TryResolveCompatibleWorker(peBytes, out string workerExe, out string mismatchReason))
             {
-                return (false, peBytes, 0, false, $"Worker executable not found for architecture '{archInfo.Architecture}'");
+                Logger.LogWarning($"[WorkerClient] {mismatchReason}");
+                return (false, peBytes, 0, false, mismatchReason);
             }
 
             string tempDir = !string.IsNullOrEmpty(options?.TempDirectory) && Directory.Exists(options.TempDirectory)
@@ -503,11 +574,9 @@ namespace ConfuserExKillerRunner.Core
         {
             if (peBytes == null) throw new ArgumentNullException(nameof(peBytes));
 
-            var archInfo = ArchitectureDetector.Detect(peBytes);
-            string workerExe = ResolveWorkerExecutable(archInfo.Architecture);
-
-            if (string.IsNullOrEmpty(workerExe) || !File.Exists(workerExe))
+            if (!TryResolveCompatibleWorker(peBytes, out string workerExe, out string mismatchReason))
             {
+                Logger.LogWarning($"[WorkerClient] {mismatchReason}");
                 return (false, peBytes, 0);
             }
 

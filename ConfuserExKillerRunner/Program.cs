@@ -515,7 +515,8 @@ namespace ConfuserExKillerRunner
                     {
                         // Step 2.1: In-memory Resource Extraction & Re-Embedding (runs before method AST deletions)
                         Console.WriteLine("[*] Step 2.1: Running ResourceKiller (Extracting decrypted resources)...");
-                        if (allowExecution)
+                        bool hasResourceDecrypter = ResourceKiller.HasResourceDecrypterMethod(module);
+                        if (allowExecution && hasResourceDecrypter)
                         {
                             var workerOpts = new WorkerOptions
                             {
@@ -561,6 +562,10 @@ namespace ConfuserExKillerRunner
                                         Console.WriteLine($"[+] ResourceKiller: Extracted & re-embedded {reEmbeddedCount} decrypted resources via isolated worker ({module.Resources.Count} total in manifest)");
                                     }
                                 }
+                                else
+                                {
+                                    Console.WriteLine($"[!] ResourceKiller: Isolated worker failed to decrypt resources: {dynamicRes.Message ?? "Unknown error"}");
+                                }
                             }
                             catch (Exception ex)
                             {
@@ -575,7 +580,7 @@ namespace ConfuserExKillerRunner
                             }
                         }
 
-                        var resResult = ResourceKiller.Execute(module, reflModule: null, resourcesAlreadyDecrypted: resourcesDecrypted);
+                        var resResult = ResourceKiller.Execute(module, reflModule: null, resourcesAlreadyDecrypted: resourcesDecrypted, dynamicAttemptedInWorker: allowExecution);
                         if (resResult.HandlerStripped)
                         {
                             totalCleanerHooks++;
