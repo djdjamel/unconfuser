@@ -2146,20 +2146,6 @@ namespace ConfuserExKillerRunner.Tests
                 allSymbols.Add(key, (asm, type, kind, name, isPublic));
             }
 
-            static bool IsTypeEffectivelyPublic(TypeDef type)
-            {
-                if (type == null) return false;
-                var curr = type;
-                while (curr.IsNested)
-                {
-                    if (!curr.IsNestedPublic)
-                        return false;
-                    curr = curr.DeclaringType;
-                    if (curr == null) return false;
-                }
-                return curr.IsPublic;
-            }
-
             // Process pinned assemblies first and assert exact hash verification
             foreach (var pinned in pinnedManifest)
             {
@@ -2274,9 +2260,8 @@ namespace ConfuserExKillerRunner.Tests
                         if (string.IsNullOrEmpty(prop.Name) || SemanticRenamer.IsCompilerGeneratedIdentifier(prop.Name))
                             continue;
 
-                        // Classify property by its getter/setter visibility (Public, Family, FamilyOrAssembly; excludes FamilyAndAssembly)
-                        bool isPropPublic = ((prop.GetMethod != null && (prop.GetMethod.IsPublic || prop.GetMethod.IsFamily || prop.GetMethod.IsFamilyOrAssembly)) ||
-                                             (prop.SetMethod != null && (prop.SetMethod.IsPublic || prop.SetMethod.IsFamily || prop.SetMethod.IsFamilyOrAssembly))) && isTypePublic;
+                        // Classify property by its getter/setter visibility using centralized helper (Public, Family, FamilyOrAssembly; excludes FamilyAndAssembly)
+                        bool isPropPublic = ClassifyProperty(prop, isTypePublic);
 
                         allTextualNames.Add(prop.Name.String);
                         if (isPropPublic) publicTextualNames.Add(prop.Name.String); else nonPublicTextualNames.Add(prop.Name.String);
@@ -2291,9 +2276,8 @@ namespace ConfuserExKillerRunner.Tests
                         if (string.IsNullOrEmpty(ev.Name) || SemanticRenamer.IsCompilerGeneratedIdentifier(ev.Name))
                             continue;
 
-                        // Classify event by its add/remove method visibility (Public, Family, FamilyOrAssembly; excludes FamilyAndAssembly)
-                        bool isEventPublic = ((ev.AddMethod != null && (ev.AddMethod.IsPublic || ev.AddMethod.IsFamily || ev.AddMethod.IsFamilyOrAssembly)) ||
-                                              (ev.RemoveMethod != null && (ev.RemoveMethod.IsPublic || ev.RemoveMethod.IsFamily || ev.RemoveMethod.IsFamilyOrAssembly))) && isTypePublic;
+                        // Classify event by its add/remove method visibility using centralized helper (Public, Family, FamilyOrAssembly; excludes FamilyAndAssembly)
+                        bool isEventPublic = ClassifyEvent(ev, isTypePublic);
 
                         allTextualNames.Add(ev.Name.String);
                         if (isEventPublic) publicTextualNames.Add(ev.Name.String); else nonPublicTextualNames.Add(ev.Name.String);
@@ -2580,20 +2564,6 @@ namespace ConfuserExKillerRunner.Tests
             internalOuter.NestedTypes.Add(nestedPublic);
 
             // Verify effective visibility logic: nested public within internal outer is NOT effectively public
-            static bool IsTypeEffectivelyPublic(TypeDef type)
-            {
-                if (type == null) return false;
-                var curr = type;
-                while (curr.IsNested)
-                {
-                    if (!curr.IsNestedPublic)
-                        return false;
-                    curr = curr.DeclaringType;
-                    if (curr == null) return false;
-                }
-                return curr.IsPublic;
-            }
-
             Assert.True(nestedPublic.IsNestedPublic);
             Assert.False(internalOuter.IsPublic);
             Assert.False(IsTypeEffectivelyPublic(nestedPublic), "Public type nested in non-public container must NOT be effectively public.");
@@ -2647,33 +2617,6 @@ namespace ConfuserExKillerRunner.Tests
         public void C10_35_PropertyAndEvent_FamilyOrAssembly_VisibilityClassification()
         {
             var module = new ModuleDefUser("VisibilityRulesTest.dll");
-
-            static bool IsTypeEffectivelyPublic(TypeDef type)
-            {
-                if (type == null) return false;
-                var curr = type;
-                while (curr.IsNested)
-                {
-                    if (!curr.IsNestedPublic)
-                        return false;
-                    curr = curr.DeclaringType;
-                    if (curr == null) return false;
-                }
-                return curr.IsPublic;
-            }
-
-            // Helper matching the exact visibility rules used in C10_32
-            static bool ClassifyProperty(PropertyDef prop, bool isTypePublic)
-            {
-                return ((prop.GetMethod != null && (prop.GetMethod.IsPublic || prop.GetMethod.IsFamily || prop.GetMethod.IsFamilyOrAssembly)) ||
-                        (prop.SetMethod != null && (prop.SetMethod.IsPublic || prop.SetMethod.IsFamily || prop.SetMethod.IsFamilyOrAssembly))) && isTypePublic;
-            }
-
-            static bool ClassifyEvent(EventDef ev, bool isTypePublic)
-            {
-                return ((ev.AddMethod != null && (ev.AddMethod.IsPublic || ev.AddMethod.IsFamily || ev.AddMethod.IsFamilyOrAssembly)) ||
-                        (ev.RemoveMethod != null && (ev.RemoveMethod.IsPublic || ev.RemoveMethod.IsFamily || ev.RemoveMethod.IsFamilyOrAssembly))) && isTypePublic;
-            }
 
             // 1. Public enclosing type
             var publicType = new TypeDefUser("TestApp", "PublicEntity", module.CorLibTypes.Object.TypeDefOrRef)
@@ -2765,6 +2708,55 @@ namespace ConfuserExKillerRunner.Tests
             Assert.False(ClassifyProperty(propInNested, isNestedEffectivelyPublic),
                 "Member on a type nested in non-public container must NOT be classified as Public regardless of member attributes.");
         }
+
+        #region Metadata Visibility Classification Helpers
+
+        /// <summary>
+        /// Centralized helper determining whether a type is effectively public (accessible outside the assembly).
+        /// For top-level types, checks IsPublic.
+        /// For nested types, recursively verifies that the type is IsNestedPublic and all declaring types are effectively public.
+        /// </summary>
+        internal static bool IsTypeEffectivelyPublic(TypeDef type)
+        {
+            if (type == null) return false;
+            var curr = type;
+            while (curr.IsNested)
+            {
+                if (!curr.IsNestedPublic)
+                    return false;
+                curr = curr.DeclaringType;
+                if (curr == null) return false;
+            }
+            return curr.IsPublic;
+        }
+
+        /// <summary>
+        /// Centralized helper classifying a property as Public or NonPublic.
+        /// A property is classified as Public if its enclosing type is effectively public AND
+        /// at least one accessor (getter or setter) is accessible externally (IsPublic, IsFamily, or IsFamilyOrAssembly).
+        /// Note: IsFamilyAndAssembly (private protected) is strictly excluded as it is not accessible to external deriving assemblies.
+        /// </summary>
+        internal static bool ClassifyProperty(PropertyDef prop, bool isTypePublic)
+        {
+            if (prop == null) return false;
+            return ((prop.GetMethod != null && (prop.GetMethod.IsPublic || prop.GetMethod.IsFamily || prop.GetMethod.IsFamilyOrAssembly)) ||
+                    (prop.SetMethod != null && (prop.SetMethod.IsPublic || prop.SetMethod.IsFamily || prop.SetMethod.IsFamilyOrAssembly))) && isTypePublic;
+        }
+
+        /// <summary>
+        /// Centralized helper classifying an event as Public or NonPublic.
+        /// An event is classified as Public if its enclosing type is effectively public AND
+        /// at least one accessor (add or remove) is accessible externally (IsPublic, IsFamily, or IsFamilyOrAssembly).
+        /// Note: IsFamilyAndAssembly (private protected) is strictly excluded as it is not accessible to external deriving assemblies.
+        /// </summary>
+        internal static bool ClassifyEvent(EventDef ev, bool isTypePublic)
+        {
+            if (ev == null) return false;
+            return ((ev.AddMethod != null && (ev.AddMethod.IsPublic || ev.AddMethod.IsFamily || ev.AddMethod.IsFamilyOrAssembly)) ||
+                    (ev.RemoveMethod != null && (ev.RemoveMethod.IsPublic || ev.RemoveMethod.IsFamily || ev.RemoveMethod.IsFamilyOrAssembly))) && isTypePublic;
+        }
+
+        #endregion
 
         #endregion
     }
