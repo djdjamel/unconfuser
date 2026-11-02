@@ -455,24 +455,63 @@ namespace ConfuserExKillerRunner.Tests
                 mod.Kind = ModuleKind.Console;
                 mod.Machine = dnlib.PE.Machine.I386;
                 mod.Is32BitRequired = true;
+                var tfmType = new TypeRefUser(mod, "System.Runtime.Versioning", "TargetFrameworkAttribute", mod.CorLibTypes.AssemblyRef);
+                var tfmCtor = new MemberRefUser(mod, ".ctor", MethodSig.CreateInstance(mod.CorLibTypes.Void, mod.CorLibTypes.String), tfmType);
+                asm.CustomAttributes.Add(new CustomAttribute(tfmCtor, new[] { new CAArgument(mod.CorLibTypes.String, ".NETFramework,Version=v4.8") }));
                 mod.Write(net48Worker);
             }
 
+            string net8Worker = Path.Combine(_testDir, "MockWorkerNet8_x64.dll");
+            using (var mod = new ModuleDefUser("MockWorkerNet8_x64.dll"))
+            {
+                var asm = new AssemblyDefUser("MockWorkerNet8_x64", new Version(1, 0, 0, 0));
+                asm.Modules.Add(mod);
+                mod.Kind = ModuleKind.Dll;
+                mod.Machine = dnlib.PE.Machine.AMD64;
+                mod.Is32BitRequired = false;
+                var sysRuntimeRef = new AssemblyRefUser("System.Runtime", new Version(8, 0, 0, 0));
+                var tfmType = new TypeRefUser(mod, "System.Runtime.Versioning", "TargetFrameworkAttribute", sysRuntimeRef);
+                var tfmCtor = new MemberRefUser(mod, ".ctor", MethodSig.CreateInstance(mod.CorLibTypes.Void, mod.CorLibTypes.String), tfmType);
+                asm.CustomAttributes.Add(new CustomAttribute(tfmCtor, new[] { new CAArgument(mod.CorLibTypes.String, ".NETCoreApp,Version=v8.0") }));
+                var objRef = new TypeRefUser(mod, "System", "Object", sysRuntimeRef);
+                mod.Types.Add(new TypeDefUser("WorkerNs", "WorkerEntry", objRef));
+                mod.Write(net8Worker);
+            }
+
             // 1. 32-bit net48 worker IS compatible with X86Required or AnyCPU .NET Framework target
-            Assert.True(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.X86Required, targetRequiresModernDotNet: false, out string reason1));
+            Assert.True(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.X86Required, TargetRuntimeFamily.NetFramework, out string reason1));
             Assert.Null(reason1);
-            Assert.True(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.AnyCPU, targetRequiresModernDotNet: false, out string reason2));
+            Assert.True(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.AnyCPU, TargetRuntimeFamily.NetFramework, out string reason2));
             Assert.Null(reason2);
 
             // 2. 32-bit net48 worker is NOT compatible with 64-bit (X64) target
-            Assert.False(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.X64, targetRequiresModernDotNet: false, out string reasonX64));
+            Assert.False(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.X64, TargetRuntimeFamily.NetFramework, out string reasonX64));
             Assert.Contains("64-bit", reasonX64, StringComparison.OrdinalIgnoreCase);
 
             // 3. net48 worker is NOT compatible with modern .NET (.NET Core / .NET 8) target
-            Assert.False(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.AnyCPU, targetRequiresModernDotNet: true, out string reasonModern));
+            Assert.False(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.AnyCPU, TargetRuntimeFamily.ModernDotNet, out string reasonModern));
             Assert.Contains("modern .NET runtime", reasonModern, StringComparison.OrdinalIgnoreCase);
 
-            // 4. 64-bit worker is NOT compatible with 32-bit (X86Required) target
+            // 4. BIDIRECTIONAL CHECK: modern .NET (.NET 8) worker MUST BE REFUSED for a .NET Framework (net48) target!
+            Assert.False(WorkerClient.IsWorkerCompatible(net8Worker, TargetArchitecture.AnyCPU, TargetRuntimeFamily.NetFramework, out string reasonNet8OnNet48));
+            Assert.Contains("targets .NET Framework", reasonNet8OnNet48, StringComparison.OrdinalIgnoreCase);
+            Assert.False(WorkerClient.IsWorkerCompatible(net8Worker, TargetArchitecture.X64, targetRequiresModernDotNet: false, out string reasonBoolOverload));
+            Assert.Contains("targets .NET Framework", reasonBoolOverload, StringComparison.OrdinalIgnoreCase);
+
+            // 5. modern .NET (.NET 8) worker IS compatible with AnyCPU/X64 modern .NET target
+            Assert.True(WorkerClient.IsWorkerCompatible(net8Worker, TargetArchitecture.AnyCPU, TargetRuntimeFamily.ModernDotNet, out string reasonNet8Valid));
+            Assert.Null(reasonNet8Valid);
+
+            // 6. Unknown runtime family on target or worker MUST be refused
+            Assert.False(WorkerClient.IsWorkerCompatible(net48Worker, TargetArchitecture.AnyCPU, TargetRuntimeFamily.Unknown, out string reasonUnknownTarget));
+            Assert.Contains("unknown or indeterminate", reasonUnknownTarget, StringComparison.OrdinalIgnoreCase);
+
+            string unknownRuntimeWorker = Path.Combine(_testDir, "CorruptWorker.exe");
+            File.WriteAllBytes(unknownRuntimeWorker, CreateSyntheticNativePe(is64Bit: false));
+            Assert.False(WorkerClient.IsWorkerCompatible(unknownRuntimeWorker, TargetArchitecture.X86Required, TargetRuntimeFamily.NetFramework, out string reasonUnknownWorker));
+            Assert.Contains("unknown or indeterminate", reasonUnknownWorker, StringComparison.OrdinalIgnoreCase);
+
+            // 7. 64-bit worker is NOT compatible with 32-bit (X86Required) target
             string x64Worker = Path.Combine(_testDir, "MockWorker_x64.exe");
             using (var mod = new ModuleDefUser("MockWorker_x64.exe"))
             {
@@ -481,11 +520,125 @@ namespace ConfuserExKillerRunner.Tests
                 mod.Kind = ModuleKind.Console;
                 mod.Machine = dnlib.PE.Machine.AMD64;
                 mod.Is32BitRequired = false;
+                var tfmType = new TypeRefUser(mod, "System.Runtime.Versioning", "TargetFrameworkAttribute", mod.CorLibTypes.AssemblyRef);
+                var tfmCtor = new MemberRefUser(mod, ".ctor", MethodSig.CreateInstance(mod.CorLibTypes.Void, mod.CorLibTypes.String), tfmType);
+                asm.CustomAttributes.Add(new CustomAttribute(tfmCtor, new[] { new CAArgument(mod.CorLibTypes.String, ".NETFramework,Version=v4.8") }));
                 mod.Write(x64Worker);
             }
 
-            Assert.False(WorkerClient.IsWorkerCompatible(x64Worker, TargetArchitecture.X86Required, targetRequiresModernDotNet: false, out string reasonX86));
+            Assert.False(WorkerClient.IsWorkerCompatible(x64Worker, TargetArchitecture.X86Required, TargetRuntimeFamily.NetFramework, out string reasonX86));
             Assert.Contains("32-bit", reasonX86, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public void WorkerClient_ResolveWorkerExecutable_NeverSelectsNet8WorkerForNet48Target()
+        {
+            string prevEnv = Environment.GetEnvironmentVariable("UNCONFUSER_WORKER_PATH");
+            try
+            {
+                Environment.SetEnvironmentVariable("UNCONFUSER_WORKER_PATH", null);
+
+                string net48Target = Path.Combine(_testDir, "TargetNet48.dll");
+                CreateSimpleAssembly(net48Target);
+
+                bool resolvedNet48 = WorkerClient.TryResolveCompatibleWorker(net48Target, out string workerForNet48, out string mismatchNet48);
+                Assert.True(resolvedNet48, $"Expected compatible net48 worker, got mismatch: {mismatchNet48}");
+                Assert.Equal(TargetRuntimeFamily.NetFramework, ArchitectureDetector.DetectRuntimeFamily(workerForNet48));
+
+                string net8Target = Path.Combine(_testDir, "TargetNet8.dll");
+                using (var mod = new ModuleDefUser("TargetNet8.dll"))
+                {
+                    var asm = new AssemblyDefUser("TargetNet8", new Version(1, 0, 0, 0));
+                    asm.Modules.Add(mod);
+                    var sysRuntimeRef = new AssemblyRefUser("System.Runtime", new Version(8, 0, 0, 0));
+                    var objRef = new TypeRefUser(mod, "System", "Object", sysRuntimeRef);
+                    mod.Types.Add(new TypeDefUser("SampleNs", "SampleType", objRef));
+                    mod.Write(net8Target);
+                }
+
+                bool resolvedNet8 = WorkerClient.TryResolveCompatibleWorker(net8Target, out string workerForNet8, out string mismatchNet8);
+                Assert.True(resolvedNet8, $"Expected compatible net8 worker, got mismatch: {mismatchNet8}");
+                Assert.Equal(TargetRuntimeFamily.ModernDotNet, ArchitectureDetector.DetectRuntimeFamily(workerForNet8));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("UNCONFUSER_WORKER_PATH", prevEnv);
+            }
+        }
+
+        [Fact]
+        public void ArchitectureDetector_NativeApphosts_DetectsExactBitnessAndSiblingRuntimeFamily()
+        {
+            // 1. x86 native apphost (Machine = 0x014C, HasClrHeader = false) + managed AnyCPU .NET 8 sibling DLL
+            string x86ApphostExe = Path.Combine(_testDir, "NativeAppX86.exe");
+            string x86ApphostDll = Path.Combine(_testDir, "NativeAppX86.dll");
+            File.WriteAllBytes(x86ApphostExe, CreateSyntheticNativePe(is64Bit: false));
+            using (var mod = new ModuleDefUser("NativeAppX86.dll"))
+            {
+                var asm = new AssemblyDefUser("NativeAppX86", new Version(1, 0, 0, 0));
+                asm.Modules.Add(mod);
+                var sysRuntimeRef = new AssemblyRefUser("System.Runtime", new Version(8, 0, 0, 0));
+                var objRef = new TypeRefUser(mod, "System", "Object", sysRuntimeRef);
+                mod.Types.Add(new TypeDefUser("AppNs", "AppType", objRef));
+                mod.Write(x86ApphostDll);
+            }
+
+            var x86Info = ArchitectureDetector.Detect(x86ApphostExe);
+            Assert.False(x86Info.HasClrHeader);
+            // Critical assertion: x86 native apphost must NEVER be classified as AnyCPU; it is strictly X86Required!
+            Assert.Equal(TargetArchitecture.X86Required, x86Info.Architecture);
+            Assert.Equal(TargetRuntimeFamily.ModernDotNet, ArchitectureDetector.DetectRuntimeFamily(x86ApphostExe));
+            Assert.False(WorkerClient.IsWorker64BitProcess(x86ApphostExe));
+
+            // 2. x64 native apphost (Machine = 0x8664, HasClrHeader = false) + managed AnyCPU .NET 8 sibling DLL
+            string x64ApphostExe = Path.Combine(_testDir, "NativeAppX64.exe");
+            string x64ApphostDll = Path.Combine(_testDir, "NativeAppX64.dll");
+            File.WriteAllBytes(x64ApphostExe, CreateSyntheticNativePe(is64Bit: true));
+            File.Copy(x86ApphostDll, x64ApphostDll, overwrite: true);
+
+            var x64Info = ArchitectureDetector.Detect(x64ApphostExe);
+            Assert.False(x64Info.HasClrHeader);
+            Assert.Equal(TargetArchitecture.X64, x64Info.Architecture);
+            Assert.Equal(TargetRuntimeFamily.ModernDotNet, ArchitectureDetector.DetectRuntimeFamily(x64ApphostExe));
+            Assert.True(WorkerClient.IsWorker64BitProcess(x64ApphostExe));
+
+            // Cross-bitness rejection between x86 apphost and x64 worker (and vice versa)
+            Assert.False(WorkerClient.IsWorkerCompatible(x64ApphostExe, x86Info.Architecture, TargetRuntimeFamily.ModernDotNet, out string err1));
+            Assert.Contains("32-bit", err1, StringComparison.OrdinalIgnoreCase);
+            Assert.False(WorkerClient.IsWorkerCompatible(x86ApphostExe, x64Info.Architecture, TargetRuntimeFamily.ModernDotNet, out string err2));
+            Assert.Contains("64-bit", err2, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static byte[] CreateSyntheticNativePe(bool is64Bit)
+        {
+            byte[] pe = new byte[512];
+            // MZ header
+            pe[0] = 0x4D; // 'M'
+            pe[1] = 0x5A; // 'Z'
+            // e_lfanew at 0x3C = 0x80
+            BitConverter.GetBytes((uint)0x80).CopyTo(pe, 0x3C);
+            // PE signature at 0x80: "PE\0\0"
+            pe[0x80] = 0x50;
+            pe[0x81] = 0x45;
+            pe[0x82] = 0x00;
+            pe[0x83] = 0x00;
+            // Machine at 0x84: 0x8664 (AMD64) or 0x014C (i386)
+            ushort machine = is64Bit ? (ushort)0x8664 : (ushort)0x014C;
+            BitConverter.GetBytes(machine).CopyTo(pe, 0x84);
+            // NumberOfSections at 0x86 = 0
+            BitConverter.GetBytes((ushort)0).CopyTo(pe, 0x86);
+            // SizeOfOptionalHeader at 0x94 = 240 (PE32+) or 224 (PE32)
+            ushort optSize = is64Bit ? (ushort)240 : (ushort)224;
+            BitConverter.GetBytes(optSize).CopyTo(pe, 0x94);
+            // Characteristics at 0x96 = 0x0002 (EXECUTABLE_IMAGE)
+            BitConverter.GetBytes((ushort)0x0002).CopyTo(pe, 0x96);
+            // OptionalHeader at 0x98: Magic = 0x020B (PE32+) or 0x010B (PE32)
+            ushort magic = is64Bit ? (ushort)0x020B : (ushort)0x010B;
+            BitConverter.GetBytes(magic).CopyTo(pe, 0x98);
+            // NumberOfRvaAndSizes = 16 (with COM+ directory zeroed -> HasClrHeader = false)
+            int numRvaOffset = 0x98 + (is64Bit ? 108 : 92);
+            BitConverter.GetBytes((uint)16).CopyTo(pe, numRvaOffset);
+            return pe;
         }
 
         [Fact]
@@ -494,6 +647,7 @@ namespace ConfuserExKillerRunner.Tests
             string net48Dll = Path.Combine(_testDir, "Net48Sample.dll");
             CreateSimpleAssembly(net48Dll);
             Assert.False(ArchitectureDetector.RequiresModernDotNetRuntime(net48Dll));
+            Assert.Equal(TargetRuntimeFamily.NetFramework, ArchitectureDetector.DetectRuntimeFamily(net48Dll));
 
             string net8Dll = Path.Combine(_testDir, "Net8Sample.dll");
             using (var mod = new ModuleDefUser("Net8Sample.dll"))
@@ -507,6 +661,7 @@ namespace ConfuserExKillerRunner.Tests
                 mod.Write(net8Dll);
             }
             Assert.True(ArchitectureDetector.RequiresModernDotNetRuntime(net8Dll));
+            Assert.Equal(TargetRuntimeFamily.ModernDotNet, ArchitectureDetector.DetectRuntimeFamily(net8Dll));
         }
 
         [Fact]
@@ -520,12 +675,7 @@ namespace ConfuserExKillerRunner.Tests
             Assert.True(parsed.IsObject);
             Assert.False(parsed["Success"].AsBool(true));
             string roundTripped = parsed["Message"].AsString();
-            Assert.Contains("Line1 Line2", roundTripped);
-            Assert.Contains("\t", roundTripped);
-            Assert.Contains("\"quoted\"", roundTripped);
-            Assert.Contains("\\backslash", roundTripped);
-            Assert.Contains("\u0001", roundTripped);
-            Assert.Contains("\u001F", roundTripped);
+            Assert.Equal(rawMessage, roundTripped);
         }
 
         private static string ComputeSha256(byte[] data)

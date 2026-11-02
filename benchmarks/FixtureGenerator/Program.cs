@@ -1121,10 +1121,31 @@ namespace FixtureGenerator
                 compressed = ms.ToArray();
             }
 
+            using (var inputMod = ModuleDefMD.Load(rawBytes))
             using (var stubMod = new ModuleDefUser("CompressorStub"))
             {
                 var stubAsm = new AssemblyDefUser("CompressorStubAsm");
                 stubAsm.Modules.Add(stubMod);
+
+                // Propagate TargetFrameworkAttribute from input module so the compressor stub carries the exact runtime family of its payload
+                if (inputMod.Assembly != null && inputMod.Assembly.HasCustomAttributes)
+                {
+                    foreach (var ca in inputMod.Assembly.CustomAttributes)
+                    {
+                        if (ca != null && ca.TypeFullName == "System.Runtime.Versioning.TargetFrameworkAttribute" &&
+                            ca.ConstructorArguments.Count > 0 && ca.ConstructorArguments[0].Value != null)
+                        {
+                            string tfm = ca.ConstructorArguments[0].Value.ToString();
+                            if (!string.IsNullOrWhiteSpace(tfm))
+                            {
+                                var tfmType = new TypeRefUser(stubMod, "System.Runtime.Versioning", "TargetFrameworkAttribute", stubMod.CorLibTypes.AssemblyRef);
+                                var tfmCtor = new MemberRefUser(stubMod, ".ctor", MethodSig.CreateInstance(stubMod.CorLibTypes.Void, stubMod.CorLibTypes.String), tfmType);
+                                stubAsm.CustomAttributes.Add(new CustomAttribute(tfmCtor, new[] { new CAArgument(stubMod.CorLibTypes.String, tfm) }));
+                            }
+                            break;
+                        }
+                    }
+                }
 
                 // Embed compressed bytes
                 stubMod.Resources.Add(new EmbeddedResource("ConfuserEx.CompressedPayload", compressed));

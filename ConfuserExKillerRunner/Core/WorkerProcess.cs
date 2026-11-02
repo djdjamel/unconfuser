@@ -90,11 +90,30 @@ namespace ConfuserExKillerRunner.Core
             bool targetRequiresModernDotNet,
             out string mismatchReason)
         {
+            var targetRuntime = targetRequiresModernDotNet
+                ? TargetRuntimeFamily.ModernDotNet
+                : TargetRuntimeFamily.NetFramework;
+            return IsWorkerCompatible(workerExe, targetArch, targetRuntime, out mismatchReason);
+        }
+
+        public static bool IsWorkerCompatible(
+            string workerExe,
+            TargetArchitecture targetArch,
+            TargetRuntimeFamily targetRuntime,
+            out string mismatchReason)
+        {
             mismatchReason = null;
 
             if (string.IsNullOrEmpty(workerExe) || !File.Exists(workerExe))
             {
                 mismatchReason = "Isolated worker executable could not be resolved.";
+                return false;
+            }
+
+            var workerArchInfo = ArchitectureDetector.Detect(workerExe);
+            if (workerArchInfo.Architecture == TargetArchitecture.Unknown)
+            {
+                mismatchReason = $"Resolved worker '{Path.GetFileName(workerExe)}' has an unknown or invalid PE architecture.";
                 return false;
             }
 
@@ -111,9 +130,28 @@ namespace ConfuserExKillerRunner.Core
                 return false;
             }
 
-            if (targetRequiresModernDotNet && !ArchitectureDetector.RequiresModernDotNetRuntime(workerExe))
+            if (targetRuntime == TargetRuntimeFamily.Unknown)
+            {
+                mismatchReason = "Target assembly has an unknown or indeterminate .NET runtime family.";
+                return false;
+            }
+
+            TargetRuntimeFamily workerRuntime = ArchitectureDetector.DetectRuntimeFamily(workerExe);
+            if (workerRuntime == TargetRuntimeFamily.Unknown)
+            {
+                mismatchReason = $"Resolved worker '{Path.GetFileName(workerExe)}' has an unknown or indeterminate .NET runtime family.";
+                return false;
+            }
+
+            if (targetRuntime == TargetRuntimeFamily.ModernDotNet && workerRuntime != TargetRuntimeFamily.ModernDotNet)
             {
                 mismatchReason = $"Target assembly requires a modern .NET runtime (.NET Core / .NET 5+), but resolved worker '{Path.GetFileName(workerExe)}' targets .NET Framework.";
+                return false;
+            }
+
+            if (targetRuntime == TargetRuntimeFamily.NetFramework && workerRuntime != TargetRuntimeFamily.NetFramework)
+            {
+                mismatchReason = $"Target assembly targets .NET Framework, but resolved worker '{Path.GetFileName(workerExe)}' targets a modern .NET runtime.";
                 return false;
             }
 
@@ -126,9 +164,9 @@ namespace ConfuserExKillerRunner.Core
             out string mismatchReason)
         {
             var archInfo = ArchitectureDetector.Detect(targetAssemblyPath);
-            bool requiresModernDotNet = ArchitectureDetector.RequiresModernDotNetRuntime(targetAssemblyPath);
-            workerExe = ResolveWorkerExecutable(archInfo.Architecture, requiresModernDotNet);
-            return IsWorkerCompatible(workerExe, archInfo.Architecture, requiresModernDotNet, out mismatchReason);
+            TargetRuntimeFamily targetRuntime = ArchitectureDetector.DetectRuntimeFamily(targetAssemblyPath);
+            workerExe = ResolveWorkerExecutable(archInfo.Architecture, targetRuntime);
+            return IsWorkerCompatible(workerExe, archInfo.Architecture, targetRuntime, out mismatchReason);
         }
 
         public static bool TryResolveCompatibleWorker(
@@ -137,12 +175,22 @@ namespace ConfuserExKillerRunner.Core
             out string mismatchReason)
         {
             var archInfo = ArchitectureDetector.Detect(peBytes);
-            bool requiresModernDotNet = ArchitectureDetector.RequiresModernDotNetRuntime(peBytes);
-            workerExe = ResolveWorkerExecutable(archInfo.Architecture, requiresModernDotNet);
-            return IsWorkerCompatible(workerExe, archInfo.Architecture, requiresModernDotNet, out mismatchReason);
+            TargetRuntimeFamily targetRuntime = ArchitectureDetector.DetectRuntimeFamily(peBytes);
+            workerExe = ResolveWorkerExecutable(archInfo.Architecture, targetRuntime);
+            return IsWorkerCompatible(workerExe, archInfo.Architecture, targetRuntime, out mismatchReason);
         }
 
-        public static string ResolveWorkerExecutable(TargetArchitecture targetArch = TargetArchitecture.Unknown, bool targetRequiresModernDotNet = false)
+        public static string ResolveWorkerExecutable(TargetArchitecture targetArch, bool targetRequiresModernDotNet)
+        {
+            var targetRuntime = targetRequiresModernDotNet
+                ? TargetRuntimeFamily.ModernDotNet
+                : TargetRuntimeFamily.NetFramework;
+            return ResolveWorkerExecutable(targetArch, targetRuntime);
+        }
+
+        public static string ResolveWorkerExecutable(
+            TargetArchitecture targetArch = TargetArchitecture.Unknown,
+            TargetRuntimeFamily targetRuntime = TargetRuntimeFamily.Unknown)
         {
             string envWorker = Environment.GetEnvironmentVariable("UNCONFUSER_WORKER_PATH");
             if (!string.IsNullOrEmpty(envWorker) && File.Exists(envWorker))
@@ -164,8 +212,8 @@ namespace ConfuserExKillerRunner.Core
 
             var candidates = new List<string>();
 
-            // If target specifically requires 32-bit x86, prioritize 32-bit x86 worker candidates first
-            if (targetArch == TargetArchitecture.X86Required)
+            // If target specifically requires 32-bit x86 or targets .NET Framework, prioritize net48/x86 worker candidates first
+            if (targetArch == TargetArchitecture.X86Required || targetRuntime == TargetRuntimeFamily.NetFramework)
             {
                 candidates.Add(Path.Combine(appDir, "x86", "ConfuserExKillerRunner.exe"));
                 candidates.Add(Path.Combine(appDir, "..", "net48", "ConfuserExKillerRunner.exe"));
@@ -174,11 +222,19 @@ namespace ConfuserExKillerRunner.Core
                 candidates.Add(Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Debug", "net48", "ConfuserExKillerRunner.exe"));
             }
 
-            // If running directly as ConfuserExKillerRunner (not inside test host) and currentExe is compatible with the target, use it directly
+            // If running directly as ConfuserExKillerRunner (not inside test host):
+            // When targetRuntime is specified, only reuse currentExe if it is strictly compatible with both targetArch and targetRuntime.
             if (!isTestHost && !string.IsNullOrEmpty(currentExe) && File.Exists(currentExe))
             {
-                if (IsWorkerCompatible(currentExe, targetArch, targetRequiresModernDotNet, out _))
+                if (targetRuntime != TargetRuntimeFamily.Unknown)
+                {
+                    if (IsWorkerCompatible(currentExe, targetArch, targetRuntime, out _))
+                        return currentExe;
+                }
+                else if (targetArch != TargetArchitecture.X86Required || !IsWorker64BitProcess(currentExe))
+                {
                     return currentExe;
+                }
             }
 
             candidates.Add(Path.Combine(appDir, "ConfuserExKillerRunner.dll"));
@@ -191,15 +247,19 @@ namespace ConfuserExKillerRunner.Core
             candidates.Add(Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Release", "net8.0-windows", "ConfuserExKillerRunner.exe"));
             candidates.Add(Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Debug", "net8.0-windows", "ConfuserExKillerRunner.dll"));
             candidates.Add(Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Release", "net48", "ConfuserExKillerRunner.exe"));
+            candidates.Add(Path.Combine(appDir, "..", "..", "..", "..", "ConfuserExKillerRunner", "bin", "Debug", "net48", "ConfuserExKillerRunner.exe"));
 
-            // First pass: return the first existing candidate that is strictly compatible with both target architecture and runtime
-            foreach (var c in candidates)
+            // First pass: if targetRuntime is known, return the first existing candidate that is strictly compatible with both target architecture and runtime
+            if (targetRuntime != TargetRuntimeFamily.Unknown)
             {
-                if (File.Exists(c))
+                foreach (var c in candidates)
                 {
-                    string fullPath = Path.GetFullPath(c);
-                    if (IsWorkerCompatible(fullPath, targetArch, targetRequiresModernDotNet, out _))
-                        return fullPath;
+                    if (File.Exists(c))
+                    {
+                        string fullPath = Path.GetFullPath(c);
+                        if (IsWorkerCompatible(fullPath, targetArch, targetRuntime, out _))
+                            return fullPath;
+                    }
                 }
             }
 

@@ -42,15 +42,19 @@ namespace ConfuserExKillerRunner.Killers
                 result.ResourcesDecrypted = true;
             }
 
+            string stage1Diagnostic = null;
+
             // Stage 1: Try in-memory method-rewrite resource decryption (NoFuserEx technique)
             if (reflModule != null && !result.ResourcesDecrypted)
             {
                 try
                 {
                     TryDecryptAndReEmbedResources(module, result);
+                    stage1Diagnostic = result.Message;
                 }
                 catch (Exception ex)
                 {
+                    stage1Diagnostic = $"Dynamic resource decryption exception: {ex.Message}";
                     Logger.LogWarning($"[ResourceKiller] Dynamic resource decryption warning: {ex.Message}");
                 }
             }
@@ -73,7 +77,10 @@ namespace ConfuserExKillerRunner.Killers
             }
 
             result.TotalManifestResourcesCount = result.ResourceNames.Count;
-            result.Message = $"Audited {result.TotalManifestResourcesCount} manifest resources ({result.DecryptedResourcesCount} decrypted and re-embedded). Hook stripped: {result.HandlerStripped}";
+            string auditSummary = $"Audited {result.TotalManifestResourcesCount} manifest resources ({result.DecryptedResourcesCount} decrypted and re-embedded). Hook stripped: {result.HandlerStripped}";
+            result.Message = !string.IsNullOrWhiteSpace(stage1Diagnostic)
+                ? $"{auditSummary} | {stage1Diagnostic}"
+                : auditSummary;
             return result;
         }
 

@@ -13,6 +13,13 @@ namespace ConfuserExKillerRunner.Core
         Arm64
     }
 
+    public enum TargetRuntimeFamily
+    {
+        Unknown = 0,
+        NetFramework = 1,
+        ModernDotNet = 2
+    }
+
     public sealed class ArchitectureInfo
     {
         public TargetArchitecture Architecture { get; set; }
@@ -51,11 +58,43 @@ namespace ConfuserExKillerRunner.Core
             if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
                 throw new FileNotFoundException("File not found", filePath);
 
+            ArchitectureInfo info;
             using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             using (var reader = new BinaryReader(fs))
             {
-                return Detect(reader);
+                info = Detect(reader);
             }
+
+            // If filePath is a native apphost (.exe without CLR header) accompanied by a managed sibling .dll,
+            // inspect the sibling .dll to enrich CLR flags while preserving the native host bitness constraints.
+            if (!info.HasClrHeader && filePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                string siblingDll = Path.ChangeExtension(filePath, ".dll");
+                if (File.Exists(siblingDll))
+                {
+                    try
+                    {
+                        using (var dllFs = new FileStream(siblingDll, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                        using (var dllReader = new BinaryReader(dllFs))
+                        {
+                            var dllInfo = Detect(dllReader);
+                            if (dllInfo.HasClrHeader)
+                            {
+                                info.ClrFlags = dllInfo.ClrFlags;
+                                if (info.Architecture == TargetArchitecture.Unknown)
+                                {
+                                    info.Architecture = dllInfo.Architecture;
+                                }
+                            }
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+
+            return info;
         }
 
         public static ArchitectureInfo Detect(byte[] peBytes)
@@ -173,7 +212,8 @@ namespace ConfuserExKillerRunner.Core
             }
             else if (info.Machine == 0x014C) // i386
             {
-                if (info.Is32BitRequired)
+                // A native i386 PE without a CLR header (e.g., an x86 native apphost) is strictly 32-bit x86, never AnyCPU.
+                if (!info.HasClrHeader || info.Is32BitRequired)
                     info.Architecture = TargetArchitecture.X86Required;
                 else if (info.Is32BitPreferred)
                     info.Architecture = TargetArchitecture.X86Preferred;
@@ -259,19 +299,18 @@ namespace ConfuserExKillerRunner.Core
         }
 
         /// <summary>
-        /// Determines whether the specified assembly or executable requires a modern .NET runtime
-        /// (.NET Core / .NET 5+) rather than .NET Framework 4.x.
+        /// Classifies the target runtime family (.NET Framework, Modern .NET, or Unknown) of the specified assembly or apphost.
         /// </summary>
-        public static bool RequiresModernDotNetRuntime(string filePath)
+        public static TargetRuntimeFamily DetectRuntimeFamily(string filePath)
         {
             if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
-                return false;
+                return TargetRuntimeFamily.Unknown;
 
             try
             {
                 using (var mod = dnlib.DotNet.ModuleDefMD.Load(filePath))
                 {
-                    return RequiresModernDotNetRuntime(mod);
+                    return DetectRuntimeFamily(mod);
                 }
             }
             catch
@@ -285,7 +324,7 @@ namespace ConfuserExKillerRunner.Core
                         {
                             using (var mod = dnlib.DotNet.ModuleDefMD.Load(siblingDll))
                             {
-                                return RequiresModernDotNetRuntime(mod);
+                                return DetectRuntimeFamily(mod);
                             }
                         }
                         catch
@@ -293,44 +332,36 @@ namespace ConfuserExKillerRunner.Core
                         }
                     }
                 }
-                return false;
+                return TargetRuntimeFamily.Unknown;
             }
         }
 
-        public static bool RequiresModernDotNetRuntime(byte[] peBytes)
+        public static TargetRuntimeFamily DetectRuntimeFamily(byte[] peBytes)
         {
             if (peBytes == null || peBytes.Length == 0)
-                return false;
+                return TargetRuntimeFamily.Unknown;
 
             try
             {
                 using (var mod = dnlib.DotNet.ModuleDefMD.Load(peBytes))
                 {
-                    return RequiresModernDotNetRuntime(mod);
+                    return DetectRuntimeFamily(mod);
                 }
             }
             catch
             {
-                return false;
+                return TargetRuntimeFamily.Unknown;
             }
         }
 
-        public static bool RequiresModernDotNetRuntime(dnlib.DotNet.ModuleDef module)
+        public static TargetRuntimeFamily DetectRuntimeFamily(dnlib.DotNet.ModuleDef module)
         {
             if (module == null)
-                return false;
+                return TargetRuntimeFamily.Unknown;
 
             try
             {
-                string tfm = DetectTargetFramework(module);
-                if (!string.IsNullOrEmpty(tfm))
-                {
-                    if (tfm.StartsWith(".NETCoreApp", StringComparison.OrdinalIgnoreCase) ||
-                        tfm.StartsWith(".NETStandard,Version=v2.1", StringComparison.OrdinalIgnoreCase))
-                    {
-                        return true;
-                    }
-                }
+                bool hasNetFrameworkCorLib = false;
 
                 foreach (var asmRef in module.GetAssemblyRefs())
                 {
@@ -341,7 +372,7 @@ namespace ConfuserExKillerRunner.Core
                     if (string.Equals(name, "System.Private.CoreLib", StringComparison.OrdinalIgnoreCase) ||
                         string.Equals(name, "Microsoft.NETCore.App", StringComparison.OrdinalIgnoreCase))
                     {
-                        return true;
+                        return TargetRuntimeFamily.ModernDotNet;
                     }
 
                     if ((string.Equals(name, "System.Runtime", StringComparison.OrdinalIgnoreCase) ||
@@ -349,15 +380,70 @@ namespace ConfuserExKillerRunner.Core
                          string.Equals(name, "System.Collections", StringComparison.OrdinalIgnoreCase)) &&
                         asmRef.Version != null && asmRef.Version.Major >= 5)
                     {
-                        return true;
+                        return TargetRuntimeFamily.ModernDotNet;
                     }
+
+                    if (string.Equals(name, "mscorlib", StringComparison.OrdinalIgnoreCase) &&
+                        (asmRef.Version == null || asmRef.Version.Major <= 4))
+                    {
+                        hasNetFrameworkCorLib = true;
+                    }
+                }
+
+                string tfm = DetectTargetFramework(module);
+                if (!string.IsNullOrEmpty(tfm))
+                {
+                    if (tfm.StartsWith(".NETCoreApp", StringComparison.OrdinalIgnoreCase) ||
+                        tfm.StartsWith(".NETStandard,Version=v2.1", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return TargetRuntimeFamily.ModernDotNet;
+                    }
+
+                    if (tfm.StartsWith(".NETFramework", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return TargetRuntimeFamily.NetFramework;
+                    }
+                }
+
+                if (hasNetFrameworkCorLib)
+                {
+                    return TargetRuntimeFamily.NetFramework;
+                }
+
+                var corLibRef = module.CorLibTypes?.AssemblyRef;
+                if (corLibRef != null && string.Equals(corLibRef.Name, "mscorlib", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(module.RuntimeVersion) &&
+                    (module.RuntimeVersion.StartsWith("v4.", StringComparison.OrdinalIgnoreCase) ||
+                     module.RuntimeVersion.StartsWith("v2.", StringComparison.OrdinalIgnoreCase) ||
+                     module.RuntimeVersion.StartsWith("v1.", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return TargetRuntimeFamily.NetFramework;
                 }
             }
             catch
             {
             }
 
-            return false;
+            return TargetRuntimeFamily.Unknown;
+        }
+
+        /// <summary>
+        /// Determines whether the specified assembly or executable requires a modern .NET runtime
+        /// (.NET Core / .NET 5+) rather than .NET Framework 4.x.
+        /// </summary>
+        public static bool RequiresModernDotNetRuntime(string filePath)
+        {
+            return DetectRuntimeFamily(filePath) == TargetRuntimeFamily.ModernDotNet;
+        }
+
+        public static bool RequiresModernDotNetRuntime(byte[] peBytes)
+        {
+            return DetectRuntimeFamily(peBytes) == TargetRuntimeFamily.ModernDotNet;
+        }
+
+        public static bool RequiresModernDotNetRuntime(dnlib.DotNet.ModuleDef module)
+        {
+            return DetectRuntimeFamily(module) == TargetRuntimeFamily.ModernDotNet;
         }
     }
 }

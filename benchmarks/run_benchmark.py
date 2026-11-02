@@ -145,13 +145,14 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def get_benign_baseline() -> str:
+def get_benign_baseline(baseline_path: Optional[Path] = None) -> str:
     """Executes the benign baseline in a restricted process to capture expected output."""
-    if not BENIGN_DLL.exists():
-        raise FileNotFoundError(f"BenignSample binary not found at {BENIGN_DLL}. Run dotnet build first.")
+    target_baseline = baseline_path if baseline_path is not None else BENIGN_DLL
+    if not target_baseline.exists():
+        raise FileNotFoundError(f"BenignSample binary not found at {target_baseline}. Run dotnet build first.")
 
     res = subprocess.run(
-        get_exec_command(BENIGN_DLL) + ["test"],
+        get_exec_command(target_baseline) + ["test"],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -499,7 +500,7 @@ def run_all_benchmarks(
             gen_cmd = get_exec_command(generator) + ["--input", str(active_baseline), "--output-dir", str(fixtures_dir)]
             subprocess.run(gen_cmd, check=False, capture_output=True)
 
-    expected_baseline = get_benign_baseline()
+    expected_baseline = get_benign_baseline(active_baseline)
 
     # Defined deterministic benchmark cases (8 synthetic patterns)
     cases = [
@@ -575,15 +576,16 @@ def run_all_benchmarks(
                 "verdict": "REAL_PROTECTOR_FAIL",
             })
         else:
-            real_target_module = BENIGN_NET48_EXE if BENIGN_NET48_EXE.exists() else BENIGN_DLL
+            real_target_module = BENIGN_NET48_EXE if BENIGN_NET48_EXE.exists() else active_baseline
             try:
+                real_expected_baseline = get_benign_baseline(real_target_module)
                 cli_output_file = prepare_real_confuserex_fixture(force=False)
                 res = run_benchmark_case(
                     real_case_name,
                     cli_output_file,
                     "real_confuserex",
                     runner_path,
-                    expected_baseline,
+                    real_expected_baseline,
                     baseline_dll_path=real_target_module,
                     is_synthetic=False,
                     timeout_sec=60,

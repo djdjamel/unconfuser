@@ -115,6 +115,13 @@ namespace ConfuserExKillerRunner.Tests
                 Assert.False(result.HandlerStripped);
                 Assert.False(string.IsNullOrWhiteSpace(result.Message));
 
+                // Also verify that public ResourceKiller.Execute preserves the Stage 1 failure diagnostic in result.Message
+                var execResult = ResourceKiller.Execute(moduleMD, reflModule: typeof(ResourceKillerTests).Module);
+                Assert.False(execResult.ResourcesDecrypted);
+                Assert.Contains("Audited 1 manifest resources", execResult.Message);
+                Assert.Contains("|", execResult.Message);
+                Assert.Contains(result.Message, execResult.Message);
+
                 // Check rollback preserved resources
                 Assert.Single(moduleMD.Resources);
                 Assert.Equal("TestResource", moduleMD.Resources[0].Name);

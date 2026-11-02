@@ -881,13 +881,25 @@ namespace ConfuserExKillerRunner.Tests
             {
                 proc.OutputDataReceived += (s, e) =>
                 {
-                    if (e.Data == null) outDone.Set();
-                    else sbOut.AppendLine(e.Data);
+                    if (e.Data == null)
+                    {
+                        try { outDone.Set(); } catch (ObjectDisposedException) { }
+                    }
+                    else
+                    {
+                        sbOut.AppendLine(e.Data);
+                    }
                 };
                 proc.ErrorDataReceived += (s, e) =>
                 {
-                    if (e.Data == null) errDone.Set();
-                    else sbErr.AppendLine(e.Data);
+                    if (e.Data == null)
+                    {
+                        try { errDone.Set(); } catch (ObjectDisposedException) { }
+                    }
+                    else
+                    {
+                        sbErr.AppendLine(e.Data);
+                    }
                 };
 
                 proc.BeginOutputReadLine();
@@ -897,12 +909,11 @@ namespace ConfuserExKillerRunner.Tests
                 if (!exited)
                 {
                     try { proc.Kill(); } catch { }
+                    try { proc.WaitForExit(5000); } catch { }
                 }
-                else
-                {
-                    outDone.WaitOne(2000);
-                    errDone.WaitOne(2000);
-                }
+
+                outDone.WaitOne(2000);
+                errDone.WaitOne(2000);
 
                 return (exited, sbOut.ToString(), sbErr.ToString());
             }
