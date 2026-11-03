@@ -297,10 +297,30 @@ namespace ConfuserExKillerRunner.Core
             out string workerExe,
             out string mismatchReason)
         {
+            return TryResolveCompatibleWorker(targetAssemblyPath, out workerExe, out _, out mismatchReason, dotnetHostPath: null);
+        }
+
+        public static bool TryResolveCompatibleWorker(
+            string targetAssemblyPath,
+            out string workerExe,
+            out string runnerExecutable,
+            out string mismatchReason,
+            string dotnetHostPath = null)
+        {
             var archInfo = ArchitectureDetector.Detect(targetAssemblyPath);
             TargetRuntimeFamily targetRuntime = ArchitectureDetector.DetectRuntimeFamily(targetAssemblyPath);
-            workerExe = ResolveWorkerExecutable(archInfo.Architecture, targetRuntime);
-            return IsWorkerCompatible(workerExe, archInfo.Architecture, targetRuntime, out mismatchReason);
+            string pinnedDotNetHost = ResolveDotNetHostExecutable(dotnetHostPath);
+            workerExe = ResolveWorkerExecutable(archInfo.Architecture, targetRuntime, pinnedDotNetHost);
+            bool compatible = IsWorkerCompatible(workerExe, archInfo.Architecture, targetRuntime, out mismatchReason, pinnedDotNetHost);
+            runnerExecutable = !string.IsNullOrEmpty(workerExe) && workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+                ? pinnedDotNetHost
+                : workerExe;
+            if (compatible && (string.IsNullOrEmpty(runnerExecutable) || !File.Exists(runnerExecutable)))
+            {
+                mismatchReason = "Resolved worker runner executable could not be located on disk.";
+                return false;
+            }
+            return compatible;
         }
 
         public static bool TryResolveCompatibleWorker(
@@ -308,10 +328,30 @@ namespace ConfuserExKillerRunner.Core
             out string workerExe,
             out string mismatchReason)
         {
+            return TryResolveCompatibleWorker(peBytes, out workerExe, out _, out mismatchReason, dotnetHostPath: null);
+        }
+
+        public static bool TryResolveCompatibleWorker(
+            byte[] peBytes,
+            out string workerExe,
+            out string runnerExecutable,
+            out string mismatchReason,
+            string dotnetHostPath = null)
+        {
             var archInfo = ArchitectureDetector.Detect(peBytes);
             TargetRuntimeFamily targetRuntime = ArchitectureDetector.DetectRuntimeFamily(peBytes);
-            workerExe = ResolveWorkerExecutable(archInfo.Architecture, targetRuntime);
-            return IsWorkerCompatible(workerExe, archInfo.Architecture, targetRuntime, out mismatchReason);
+            string pinnedDotNetHost = ResolveDotNetHostExecutable(dotnetHostPath);
+            workerExe = ResolveWorkerExecutable(archInfo.Architecture, targetRuntime, pinnedDotNetHost);
+            bool compatible = IsWorkerCompatible(workerExe, archInfo.Architecture, targetRuntime, out mismatchReason, pinnedDotNetHost);
+            runnerExecutable = !string.IsNullOrEmpty(workerExe) && workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+                ? pinnedDotNetHost
+                : workerExe;
+            if (compatible && (string.IsNullOrEmpty(runnerExecutable) || !File.Exists(runnerExecutable)))
+            {
+                mismatchReason = "Resolved worker runner executable could not be located on disk.";
+                return false;
+            }
+            return compatible;
         }
 
         public static string ResolveWorkerExecutable(TargetArchitecture targetArch, bool targetRequiresModernDotNet)
@@ -319,13 +359,16 @@ namespace ConfuserExKillerRunner.Core
             var targetRuntime = targetRequiresModernDotNet
                 ? TargetRuntimeFamily.ModernDotNet
                 : TargetRuntimeFamily.NetFramework;
-            return ResolveWorkerExecutable(targetArch, targetRuntime);
+            return ResolveWorkerExecutable(targetArch, targetRuntime, dotnetHostPath: null);
         }
 
         public static string ResolveWorkerExecutable(
             TargetArchitecture targetArch = TargetArchitecture.Unknown,
-            TargetRuntimeFamily targetRuntime = TargetRuntimeFamily.Unknown)
+            TargetRuntimeFamily targetRuntime = TargetRuntimeFamily.Unknown,
+            string dotnetHostPath = null)
         {
+            string pinnedDotNetHost = ResolveDotNetHostExecutable(dotnetHostPath);
+
             string envWorker = Environment.GetEnvironmentVariable("UNCONFUSER_WORKER_PATH");
             if (!string.IsNullOrEmpty(envWorker) && File.Exists(envWorker))
                 return Path.GetFullPath(envWorker);
@@ -362,7 +405,7 @@ namespace ConfuserExKillerRunner.Core
             {
                 if (targetRuntime != TargetRuntimeFamily.Unknown)
                 {
-                    if (IsWorkerCompatible(currentExe, targetArch, targetRuntime, out _))
+                    if (IsWorkerCompatible(currentExe, targetArch, targetRuntime, out _, pinnedDotNetHost))
                         return currentExe;
                 }
                 else if (targetArch != TargetArchitecture.X86Required || !IsWorker64BitProcess(currentExe))
@@ -391,7 +434,7 @@ namespace ConfuserExKillerRunner.Core
                     if (File.Exists(c))
                     {
                         string fullPath = Path.GetFullPath(c);
-                        if (IsWorkerCompatible(fullPath, targetArch, targetRuntime, out _))
+                        if (IsWorkerCompatible(fullPath, targetArch, targetRuntime, out _, pinnedDotNetHost))
                             return fullPath;
                     }
                 }
@@ -420,7 +463,7 @@ namespace ConfuserExKillerRunner.Core
                 Message = "Worker initialization failed"
             };
 
-            if (!TryResolveCompatibleWorker(targetAssemblyPath, out string workerExe, out string mismatchReason))
+            if (!TryResolveCompatibleWorker(targetAssemblyPath, out string workerExe, out string runnerBin, out string mismatchReason))
             {
                 result.Message = mismatchReason;
                 Logger.LogWarning($"[WorkerClient] {result.Message}");
@@ -460,7 +503,6 @@ namespace ConfuserExKillerRunner.Core
                     }
                 }
 
-                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? (ResolveDotNetHostExecutable() ?? "dotnet") : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
                 Logger.LogInfo($"[WorkerClient] Spawning isolated worker ({Path.GetFileName(runnerBin)}) for AntiTamper (Timeout: {timeoutMs}ms)...");
@@ -516,7 +558,7 @@ namespace ConfuserExKillerRunner.Core
         public static DynamicResourceResult ExecuteResourceExtraction(string targetAssemblyPath, WorkerOptions options)
         {
             var res = new DynamicResourceResult { Success = false };
-            if (!TryResolveCompatibleWorker(targetAssemblyPath, out string workerExe, out string mismatchReason))
+            if (!TryResolveCompatibleWorker(targetAssemblyPath, out string workerExe, out string runnerBin, out string mismatchReason))
             {
                 res.Message = mismatchReason;
                 Logger.LogWarning($"[WorkerClient] {res.Message}");
@@ -551,7 +593,6 @@ namespace ConfuserExKillerRunner.Core
                     }
                 }
 
-                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? (ResolveDotNetHostExecutable() ?? "dotnet") : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
                 var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
@@ -597,7 +638,7 @@ namespace ConfuserExKillerRunner.Core
         public static DynamicCompressorResult ExecuteCompressorUnpack(string targetAssemblyPath, WorkerOptions options)
         {
             var res = new DynamicCompressorResult { Success = false };
-            if (!TryResolveCompatibleWorker(targetAssemblyPath, out string workerExe, out string mismatchReason))
+            if (!TryResolveCompatibleWorker(targetAssemblyPath, out string workerExe, out string runnerBin, out string mismatchReason))
             {
                 res.Message = mismatchReason;
                 Logger.LogWarning($"[WorkerClient] {res.Message}");
@@ -632,7 +673,6 @@ namespace ConfuserExKillerRunner.Core
                     }
                 }
 
-                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? (ResolveDotNetHostExecutable() ?? "dotnet") : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
                 var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
@@ -679,7 +719,7 @@ namespace ConfuserExKillerRunner.Core
         {
             if (peBytes == null) throw new ArgumentNullException(nameof(peBytes));
 
-            if (!TryResolveCompatibleWorker(peBytes, out string workerExe, out string mismatchReason))
+            if (!TryResolveCompatibleWorker(peBytes, out string workerExe, out string runnerBin, out string mismatchReason))
             {
                 Logger.LogWarning($"[WorkerClient] {mismatchReason}");
                 return (false, peBytes, 0, false, mismatchReason);
@@ -716,7 +756,6 @@ namespace ConfuserExKillerRunner.Core
                     }
                 }
 
-                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? (ResolveDotNetHostExecutable() ?? "dotnet") : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
                 var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
@@ -768,7 +807,7 @@ namespace ConfuserExKillerRunner.Core
         {
             if (peBytes == null) throw new ArgumentNullException(nameof(peBytes));
 
-            if (!TryResolveCompatibleWorker(peBytes, out string workerExe, out string mismatchReason))
+            if (!TryResolveCompatibleWorker(peBytes, out string workerExe, out string runnerBin, out string mismatchReason))
             {
                 Logger.LogWarning($"[WorkerClient] {mismatchReason}");
                 return (false, peBytes, 0);
@@ -805,7 +844,6 @@ namespace ConfuserExKillerRunner.Core
                     }
                 }
 
-                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? (ResolveDotNetHostExecutable() ?? "dotnet") : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
                 var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);

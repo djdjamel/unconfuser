@@ -780,18 +780,31 @@ namespace ConfuserExKillerRunner.Tests
             Assert.False(WorkerClient.IsWorkerCompatible(anyCpuWorkerDll, TargetArchitecture.X64, TargetRuntimeFamily.ModernDotNet, out string errX64OnX86Host, dotnetHostPath: dotnetX86));
             Assert.Contains("64-bit", errX64OnX86Host, StringComparison.OrdinalIgnoreCase);
 
-            // Scenario 4: Verify UNCONFUSER_DOTNET_HOST_PATH resolution without explicit parameter
+            // Scenario 4: Verify UNCONFUSER_DOTNET_HOST_PATH resolution without explicit parameter and single-resolution pinning of runnerExecutable
             string prevHostEnv = Environment.GetEnvironmentVariable("UNCONFUSER_DOTNET_HOST_PATH");
+            string prevWorkerEnv = Environment.GetEnvironmentVariable("UNCONFUSER_WORKER_PATH");
             try
             {
                 Environment.SetEnvironmentVariable("UNCONFUSER_DOTNET_HOST_PATH", dotnetArm64);
+                Environment.SetEnvironmentVariable("UNCONFUSER_WORKER_PATH", anyCpuWorkerDll);
                 Assert.Equal(TargetArchitecture.Arm64, WorkerClient.GetWorkerEffectiveCpuArchitecture(anyCpuWorkerDll));
                 Assert.False(WorkerClient.IsWorkerCompatible(anyCpuWorkerDll, TargetArchitecture.X64, TargetRuntimeFamily.ModernDotNet, out _));
                 Assert.True(WorkerClient.IsWorkerCompatible(anyCpuWorkerDll, TargetArchitecture.Arm64, TargetRuntimeFamily.ModernDotNet, out _));
+
+                // Verify TryResolveCompatibleWorker pins and returns the exact validated dotnet host executable path as runnerExecutable
+                bool resolvedWithPinnedHost = WorkerClient.TryResolveCompatibleWorker(
+                    anyCpuWorkerDll,
+                    out string resolvedWorkerDll,
+                    out string pinnedRunnerExecutable,
+                    out string resolveErr);
+                Assert.True(resolvedWithPinnedHost, $"Expected compatible resolution, got: {resolveErr}");
+                Assert.Equal(Path.GetFullPath(anyCpuWorkerDll), resolvedWorkerDll);
+                Assert.Equal(Path.GetFullPath(dotnetArm64), pinnedRunnerExecutable);
             }
             finally
             {
                 Environment.SetEnvironmentVariable("UNCONFUSER_DOTNET_HOST_PATH", prevHostEnv);
+                Environment.SetEnvironmentVariable("UNCONFUSER_WORKER_PATH", prevWorkerEnv);
             }
         }
 
