@@ -110,6 +110,8 @@ namespace ConfuserExKillerRunner.Core
 
                 var safeOut = new SafeFileHandle(hStdOut, ownsHandle: true);
                 var safeErr = new SafeFileHandle(hStdErr, ownsHandle: true);
+                var syncLock = new object();
+                bool readingClosed = false;
 
                 var outTask = Task.Run(() =>
                 {
@@ -121,7 +123,11 @@ namespace ConfuserExKillerRunner.Core
                             string line;
                             while ((line = reader.ReadLine()) != null)
                             {
-                                lock (outputBuilder) outputBuilder.AppendLine(line);
+                                lock (syncLock)
+                                {
+                                    if (!readingClosed)
+                                        outputBuilder.AppendLine(line);
+                                }
                             }
                         }
                     }
@@ -138,7 +144,11 @@ namespace ConfuserExKillerRunner.Core
                             string line;
                             while ((line = reader.ReadLine()) != null)
                             {
-                                lock (errorBuilder) errorBuilder.AppendLine(line);
+                                lock (syncLock)
+                                {
+                                    if (!readingClosed)
+                                        errorBuilder.AppendLine(line);
+                                }
                             }
                         }
                     }
@@ -164,13 +174,13 @@ namespace ConfuserExKillerRunner.Core
                     JobObject.SafeCloseHandle(procInfo.hThread);
                     JobObject.SafeCloseHandle(procInfo.hProcess);
 
-                    try { Task.WaitAll(new[] { outTask, errTask }, 1000); } catch { }
+                    var (stdOut, stdErr) = DrainAndSnapshotBuffers(outTask, errTask, safeOut, safeErr, syncLock, outputBuilder, errorBuilder, ref readingClosed, 1000);
 
                     return new ProcessResult
                     {
                         ExitCode = -1,
-                        StandardOutput = outputBuilder.ToString(),
-                        StandardError = (errorBuilder.ToString() + $"\n[!] WaitForSingleObject failed with Win32 error {waitErr}").Trim(),
+                        StandardOutput = stdOut,
+                        StandardError = (stdErr + $"\n[!] WaitForSingleObject failed with Win32 error {waitErr}").Trim(),
                         Duration = stopwatch.Elapsed,
                         TimedOut = false
                     };
@@ -191,13 +201,13 @@ namespace ConfuserExKillerRunner.Core
                     JobObject.SafeCloseHandle(procInfo.hThread);
                     JobObject.SafeCloseHandle(procInfo.hProcess);
 
-                    try { Task.WaitAll(new[] { outTask, errTask }, 1000); } catch { }
+                    var (stdOut, stdErr) = DrainAndSnapshotBuffers(outTask, errTask, safeOut, safeErr, syncLock, outputBuilder, errorBuilder, ref readingClosed, 1000);
 
                     return new ProcessResult
                     {
                         ExitCode = -1,
-                        StandardOutput = outputBuilder.ToString(),
-                        StandardError = errorBuilder.ToString(),
+                        StandardOutput = stdOut,
+                        StandardError = stdErr,
                         Duration = stopwatch.Elapsed,
                         TimedOut = true
                     };
@@ -219,13 +229,13 @@ namespace ConfuserExKillerRunner.Core
                     JobObject.SafeCloseHandle(procInfo.hThread);
                     JobObject.SafeCloseHandle(procInfo.hProcess);
 
-                    try { Task.WaitAll(new[] { outTask, errTask }, 1000); } catch { }
+                    var (stdOut, stdErr) = DrainAndSnapshotBuffers(outTask, errTask, safeOut, safeErr, syncLock, outputBuilder, errorBuilder, ref readingClosed, 1000);
 
                     return new ProcessResult
                     {
                         ExitCode = -1,
-                        StandardOutput = outputBuilder.ToString(),
-                        StandardError = (errorBuilder.ToString() + $"\n[!] WaitForSingleObject returned unexpected status 0x{waitRes:X8} (Win32 error {waitErr})").Trim(),
+                        StandardOutput = stdOut,
+                        StandardError = (stdErr + $"\n[!] WaitForSingleObject returned unexpected status 0x{waitRes:X8} (Win32 error {waitErr})").Trim(),
                         Duration = stopwatch.Elapsed,
                         TimedOut = false
                     };
@@ -237,15 +247,15 @@ namespace ConfuserExKillerRunner.Core
                 JobObject.SafeCloseHandle(procInfo.hThread);
                 JobObject.SafeCloseHandle(procInfo.hProcess);
 
-                try { Task.WaitAll(new[] { outTask, errTask }, 2000); } catch { }
+                var (finalStdOut, finalStdErr) = DrainAndSnapshotBuffers(outTask, errTask, safeOut, safeErr, syncLock, outputBuilder, errorBuilder, ref readingClosed, 2000);
 
                 if (!gotExitCode)
                 {
                     return new ProcessResult
                     {
                         ExitCode = -1,
-                        StandardOutput = outputBuilder.ToString(),
-                        StandardError = (errorBuilder.ToString() + $"\n[!] GetExitCodeProcess failed with Win32 error {lastWin32Err}").Trim(),
+                        StandardOutput = finalStdOut,
+                        StandardError = (finalStdErr + $"\n[!] GetExitCodeProcess failed with Win32 error {lastWin32Err}").Trim(),
                         Duration = stopwatch.Elapsed,
                         TimedOut = false
                     };
@@ -254,11 +264,43 @@ namespace ConfuserExKillerRunner.Core
                 return new ProcessResult
                 {
                     ExitCode = (int)exitCode,
-                    StandardOutput = outputBuilder.ToString(),
-                    StandardError = errorBuilder.ToString(),
+                    StandardOutput = finalStdOut,
+                    StandardError = finalStdErr,
                     Duration = stopwatch.Elapsed,
                     TimedOut = false
                 };
+            }
+        }
+
+        private static (string stdOut, string stdErr) DrainAndSnapshotBuffers(
+            Task outTask,
+            Task errTask,
+            SafeFileHandle safeOut,
+            SafeFileHandle safeErr,
+            object syncLock,
+            StringBuilder outputBuilder,
+            StringBuilder errorBuilder,
+            ref bool readingClosed,
+            int drainTimeoutMs)
+        {
+            bool drained = false;
+            try
+            {
+                drained = Task.WaitAll(new[] { outTask, errTask }, drainTimeoutMs);
+            }
+            catch { }
+
+            if (!drained)
+            {
+                try { safeOut?.Dispose(); } catch { }
+                try { safeErr?.Dispose(); } catch { }
+                try { Task.WaitAll(new[] { outTask, errTask }, 250); } catch { }
+            }
+
+            lock (syncLock)
+            {
+                readingClosed = true;
+                return (outputBuilder.ToString(), errorBuilder.ToString());
             }
         }
 
@@ -269,6 +311,8 @@ namespace ConfuserExKillerRunner.Core
 
             var outputBuilder = new StringBuilder();
             var errorBuilder = new StringBuilder();
+            var syncLock = new object();
+            bool readingClosed = false;
             var stopwatch = Stopwatch.StartNew();
 
             var psi = new ProcessStartInfo(fileName, arguments)
@@ -284,18 +328,40 @@ namespace ConfuserExKillerRunner.Core
                 psi.WorkingDirectory = workingDirectory;
             }
 
+            using (var outDone = new System.Threading.ManualResetEvent(false))
+            using (var errDone = new System.Threading.ManualResetEvent(false))
             using (var job = Environment.OSVersion.Platform == PlatformID.Win32NT ? new JobObject(limits: new JobLimits()) : null)
             using (var proc = new Process { StartInfo = psi })
             {
                 proc.OutputDataReceived += (sender, e) =>
                 {
-                    if (e.Data != null)
-                        lock (outputBuilder) outputBuilder.AppendLine(e.Data);
+                    if (e.Data == null)
+                    {
+                        try { outDone.Set(); } catch (ObjectDisposedException) { }
+                    }
+                    else
+                    {
+                        lock (syncLock)
+                        {
+                            if (!readingClosed)
+                                outputBuilder.AppendLine(e.Data);
+                        }
+                    }
                 };
                 proc.ErrorDataReceived += (sender, e) =>
                 {
-                    if (e.Data != null)
-                        lock (errorBuilder) errorBuilder.AppendLine(e.Data);
+                    if (e.Data == null)
+                    {
+                        try { errDone.Set(); } catch (ObjectDisposedException) { }
+                    }
+                    else
+                    {
+                        lock (syncLock)
+                        {
+                            if (!readingClosed)
+                                errorBuilder.AppendLine(e.Data);
+                        }
+                    }
                 };
 
                 proc.Start();
@@ -317,11 +383,27 @@ namespace ConfuserExKillerRunner.Core
                 {
                     job?.Terminate(1);
                     KillProcessTree(proc);
+                    try { proc.WaitForExit(5000); } catch { }
+
+                    bool outFinished = outDone.WaitOne(2000);
+                    bool errFinished = errDone.WaitOne(2000);
+                    if (!outFinished) { try { proc.CancelOutputRead(); } catch { } }
+                    if (!errFinished) { try { proc.CancelErrorRead(); } catch { } }
+
+                    string timedOutStdOut;
+                    string timedOutStdErr;
+                    lock (syncLock)
+                    {
+                        readingClosed = true;
+                        timedOutStdOut = outputBuilder.ToString();
+                        timedOutStdErr = errorBuilder.ToString();
+                    }
+
                     return new ProcessResult
                     {
                         ExitCode = -1,
-                        StandardOutput = outputBuilder.ToString(),
-                        StandardError = errorBuilder.ToString(),
+                        StandardOutput = timedOutStdOut,
+                        StandardError = timedOutStdErr,
                         Duration = stopwatch.Elapsed,
                         TimedOut = true
                     };
@@ -329,12 +411,25 @@ namespace ConfuserExKillerRunner.Core
 
                 // Ensure asynchronous output buffers have flushed
                 proc.WaitForExit();
+                bool normalOutFinished = outDone.WaitOne(2000);
+                bool normalErrFinished = errDone.WaitOne(2000);
+                if (!normalOutFinished) { try { proc.CancelOutputRead(); } catch { } }
+                if (!normalErrFinished) { try { proc.CancelErrorRead(); } catch { } }
+
+                string normalStdOut;
+                string normalStdErr;
+                lock (syncLock)
+                {
+                    readingClosed = true;
+                    normalStdOut = outputBuilder.ToString();
+                    normalStdErr = errorBuilder.ToString();
+                }
 
                 return new ProcessResult
                 {
                     ExitCode = proc.ExitCode,
-                    StandardOutput = outputBuilder.ToString(),
-                    StandardError = errorBuilder.ToString(),
+                    StandardOutput = normalStdOut,
+                    StandardError = normalStdErr,
                     Duration = stopwatch.Elapsed,
                     TimedOut = false
                 };

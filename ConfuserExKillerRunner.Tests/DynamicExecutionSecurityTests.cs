@@ -694,6 +694,12 @@ namespace ConfuserExKillerRunner.Tests
 
         private static byte[] CreateSyntheticNativePe(bool is64Bit)
         {
+            ushort machine = is64Bit ? (ushort)0x8664 : (ushort)0x014C;
+            return CreateSyntheticNativePe(machine, is64Bit);
+        }
+
+        private static byte[] CreateSyntheticNativePe(ushort machine, bool is64Bit)
+        {
             byte[] pe = new byte[512];
             // MZ header
             pe[0] = 0x4D; // 'M'
@@ -705,8 +711,7 @@ namespace ConfuserExKillerRunner.Tests
             pe[0x81] = 0x45;
             pe[0x82] = 0x00;
             pe[0x83] = 0x00;
-            // Machine at 0x84: 0x8664 (AMD64) or 0x014C (i386)
-            ushort machine = is64Bit ? (ushort)0x8664 : (ushort)0x014C;
+            // Machine at 0x84: 0x8664 (AMD64), 0xAA64 (ARM64), or 0x014C (i386)
             BitConverter.GetBytes(machine).CopyTo(pe, 0x84);
             // NumberOfSections at 0x86 = 0
             BitConverter.GetBytes((ushort)0).CopyTo(pe, 0x86);
@@ -722,6 +727,72 @@ namespace ConfuserExKillerRunner.Tests
             int numRvaOffset = 0x98 + (is64Bit ? 108 : 92);
             BitConverter.GetBytes((uint)16).CopyTo(pe, numRvaOffset);
             return pe;
+        }
+
+        [Fact]
+        public void WorkerClient_DllWorker_InspectsActualDotNetHostArchitecture_Arm64AndX64AndX86()
+        {
+            // Create an AnyCPU .NET 8 managed worker DLL
+            string anyCpuWorkerDll = Path.Combine(_testDir, "WorkerAnyCpuNet8.dll");
+            using (var mod = new ModuleDefUser("WorkerAnyCpuNet8.dll"))
+            {
+                var asm = new AssemblyDefUser("WorkerAnyCpuNet8", new Version(1, 0, 0, 0));
+                asm.Modules.Add(mod);
+                mod.Kind = ModuleKind.Dll;
+                mod.Machine = dnlib.PE.Machine.I386;
+                mod.Is32BitRequired = false;
+                mod.Is32BitPreferred = false;
+                var sysRuntimeRef = new AssemblyRefUser("System.Runtime", new Version(8, 0, 0, 0));
+                var tfmType = new TypeRefUser(mod, "System.Runtime.Versioning", "TargetFrameworkAttribute", sysRuntimeRef);
+                var tfmCtor = new MemberRefUser(mod, ".ctor", MethodSig.CreateInstance(mod.CorLibTypes.Void, mod.CorLibTypes.String), tfmType);
+                asm.CustomAttributes.Add(new CustomAttribute(tfmCtor, new[] { new CAArgument(mod.CorLibTypes.String, ".NETCoreApp,Version=v8.0") }));
+                var objRef = new TypeRefUser(mod, "System", "Object", sysRuntimeRef);
+                mod.Types.Add(new TypeDefUser("WorkerNs", "WorkerEntry", objRef));
+                mod.Write(anyCpuWorkerDll);
+            }
+
+            // Create synthetic native dotnet.exe hosts for ARM64 (0xAA64), x64 (0x8664), and x86 (0x014C)
+            string dotnetArm64 = Path.Combine(_testDir, "dotnet_arm64.exe");
+            string dotnetX64 = Path.Combine(_testDir, "dotnet_x64.exe");
+            string dotnetX86 = Path.Combine(_testDir, "dotnet_x86.exe");
+            File.WriteAllBytes(dotnetArm64, CreateSyntheticNativePe(machine: 0xAA64, is64Bit: true));
+            File.WriteAllBytes(dotnetX64, CreateSyntheticNativePe(machine: 0x8664, is64Bit: true));
+            File.WriteAllBytes(dotnetX86, CreateSyntheticNativePe(machine: 0x014C, is64Bit: false));
+
+            // Scenario 1: AnyCPU worker DLL launched with ARM64 dotnet.exe host -> effective architecture is Arm64
+            Assert.Equal(TargetArchitecture.Arm64, WorkerClient.GetWorkerEffectiveCpuArchitecture(anyCpuWorkerDll, dotnetHostPath: dotnetArm64));
+            Assert.True(WorkerClient.IsWorkerCompatible(anyCpuWorkerDll, TargetArchitecture.Arm64, TargetRuntimeFamily.ModernDotNet, out string errArm64Ok, dotnetHostPath: dotnetArm64));
+            Assert.Null(errArm64Ok);
+            Assert.False(WorkerClient.IsWorkerCompatible(anyCpuWorkerDll, TargetArchitecture.X64, TargetRuntimeFamily.ModernDotNet, out string errX64OnArm64Host, dotnetHostPath: dotnetArm64));
+            Assert.Contains("ARM64", errX64OnArm64Host, StringComparison.OrdinalIgnoreCase);
+
+            // Scenario 2: AnyCPU worker DLL launched with x64 dotnet.exe host (e.g. x64 .NET on Windows ARM64) -> effective architecture is X64, NOT Arm64!
+            Assert.Equal(TargetArchitecture.X64, WorkerClient.GetWorkerEffectiveCpuArchitecture(anyCpuWorkerDll, dotnetHostPath: dotnetX64));
+            Assert.True(WorkerClient.IsWorkerCompatible(anyCpuWorkerDll, TargetArchitecture.X64, TargetRuntimeFamily.ModernDotNet, out string errX64Ok, dotnetHostPath: dotnetX64));
+            Assert.Null(errX64Ok);
+            Assert.False(WorkerClient.IsWorkerCompatible(anyCpuWorkerDll, TargetArchitecture.Arm64, TargetRuntimeFamily.ModernDotNet, out string errArm64OnX64Host, dotnetHostPath: dotnetX64));
+            Assert.Contains("ARM64", errArm64OnX64Host, StringComparison.OrdinalIgnoreCase);
+
+            // Scenario 3: AnyCPU worker DLL launched with x86 dotnet.exe host -> effective architecture is X86Required
+            Assert.Equal(TargetArchitecture.X86Required, WorkerClient.GetWorkerEffectiveCpuArchitecture(anyCpuWorkerDll, dotnetHostPath: dotnetX86));
+            Assert.True(WorkerClient.IsWorkerCompatible(anyCpuWorkerDll, TargetArchitecture.X86Required, TargetRuntimeFamily.ModernDotNet, out string errX86Ok, dotnetHostPath: dotnetX86));
+            Assert.Null(errX86Ok);
+            Assert.False(WorkerClient.IsWorkerCompatible(anyCpuWorkerDll, TargetArchitecture.X64, TargetRuntimeFamily.ModernDotNet, out string errX64OnX86Host, dotnetHostPath: dotnetX86));
+            Assert.Contains("64-bit", errX64OnX86Host, StringComparison.OrdinalIgnoreCase);
+
+            // Scenario 4: Verify UNCONFUSER_DOTNET_HOST_PATH resolution without explicit parameter
+            string prevHostEnv = Environment.GetEnvironmentVariable("UNCONFUSER_DOTNET_HOST_PATH");
+            try
+            {
+                Environment.SetEnvironmentVariable("UNCONFUSER_DOTNET_HOST_PATH", dotnetArm64);
+                Assert.Equal(TargetArchitecture.Arm64, WorkerClient.GetWorkerEffectiveCpuArchitecture(anyCpuWorkerDll));
+                Assert.False(WorkerClient.IsWorkerCompatible(anyCpuWorkerDll, TargetArchitecture.X64, TargetRuntimeFamily.ModernDotNet, out _));
+                Assert.True(WorkerClient.IsWorkerCompatible(anyCpuWorkerDll, TargetArchitecture.Arm64, TargetRuntimeFamily.ModernDotNet, out _));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("UNCONFUSER_DOTNET_HOST_PATH", prevHostEnv);
+            }
         }
 
         [Fact]

@@ -64,7 +64,7 @@ namespace ConfuserExKillerRunner.Core
 
     public static class WorkerClient
     {
-        private static TargetArchitecture GetHostCpuArchitecture()
+        private static TargetArchitecture GetOsLoaderArchitectureForAnyCpuExe()
         {
             var osArch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture;
             if (osArch == System.Runtime.InteropServices.Architecture.Arm64)
@@ -76,7 +76,50 @@ namespace ConfuserExKillerRunner.Core
             return TargetArchitecture.Unknown;
         }
 
-        public static TargetArchitecture GetWorkerEffectiveCpuArchitecture(string workerExe, ArchitectureInfo workerArchInfo = null)
+        public static string ResolveDotNetHostExecutable(string explicitDotNetHostPath = null)
+        {
+            if (!string.IsNullOrEmpty(explicitDotNetHostPath) && File.Exists(explicitDotNetHostPath))
+                return Path.GetFullPath(explicitDotNetHostPath);
+
+            string envHost = Environment.GetEnvironmentVariable("UNCONFUSER_DOTNET_HOST_PATH");
+            if (!string.IsNullOrEmpty(envHost) && File.Exists(envHost))
+                return Path.GetFullPath(envHost);
+
+            // Resolve "dotnet.exe" in the exact same order ProcessRunner.RunIsolated uses
+            string pathDotNet = ProcessRunner.ResolveExecutablePath("dotnet.exe") ?? ProcessRunner.ResolveExecutablePath("dotnet");
+            if (!string.IsNullOrEmpty(pathDotNet) && File.Exists(pathDotNet))
+                return Path.GetFullPath(pathDotNet);
+
+            string dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+            if (!string.IsNullOrEmpty(dotnetRoot))
+            {
+                string candidate = Path.Combine(dotnetRoot, "dotnet.exe");
+                if (File.Exists(candidate))
+                    return Path.GetFullPath(candidate);
+            }
+
+            try
+            {
+                string currentMain = Process.GetCurrentProcess().MainModule?.FileName;
+                if (!string.IsNullOrEmpty(currentMain) &&
+                    (currentMain.EndsWith("dotnet.exe", StringComparison.OrdinalIgnoreCase) ||
+                     currentMain.EndsWith("/dotnet", StringComparison.OrdinalIgnoreCase)) &&
+                    File.Exists(currentMain))
+                {
+                    return Path.GetFullPath(currentMain);
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        public static TargetArchitecture GetWorkerEffectiveCpuArchitecture(
+            string workerExe,
+            ArchitectureInfo workerArchInfo = null,
+            string dotnetHostPath = null)
         {
             if (workerArchInfo == null)
             {
@@ -85,13 +128,35 @@ namespace ConfuserExKillerRunner.Core
                 workerArchInfo = ArchitectureDetector.Detect(workerExe);
             }
 
-            if (workerArchInfo.HasArchitectureConflict)
+            if (workerArchInfo.HasArchitectureConflict || workerArchInfo.Architecture == TargetArchitecture.Unknown)
                 return TargetArchitecture.Unknown;
+
+            // When workerExe is a managed .dll, it is launched by the resolved dotnet.exe host process.
+            // Its effective process architecture is determined by the actual dotnet.exe host binary (never assumed from OSArchitecture).
+            if (!string.IsNullOrEmpty(workerExe) && workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+            {
+                string resolvedDotNetHost = ResolveDotNetHostExecutable(dotnetHostPath);
+                if (string.IsNullOrEmpty(resolvedDotNetHost) || !File.Exists(resolvedDotNetHost))
+                    return TargetArchitecture.Unknown;
+
+                ArchitectureInfo hostArchInfo;
+                try
+                {
+                    hostArchInfo = ArchitectureDetector.Detect(resolvedDotNetHost);
+                }
+                catch
+                {
+                    return TargetArchitecture.Unknown;
+                }
+
+                if (!ArchitectureDetector.AreHostAndPayloadArchitecturesCompatible(hostArchInfo.Architecture, workerArchInfo.Architecture))
+                    return TargetArchitecture.Unknown;
+
+                return hostArchInfo.Architecture;
+            }
 
             switch (workerArchInfo.Architecture)
             {
-                case TargetArchitecture.Unknown:
-                    return TargetArchitecture.Unknown;
                 case TargetArchitecture.X86Required:
                     return TargetArchitecture.X86Required;
                 case TargetArchitecture.X64:
@@ -99,11 +164,9 @@ namespace ConfuserExKillerRunner.Core
                 case TargetArchitecture.Arm64:
                     return TargetArchitecture.Arm64;
                 case TargetArchitecture.X86Preferred:
-                    if (!string.IsNullOrEmpty(workerExe) && workerExe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-                        return TargetArchitecture.X86Required;
-                    return GetHostCpuArchitecture();
+                    return TargetArchitecture.X86Required;
                 case TargetArchitecture.AnyCPU:
-                    return GetHostCpuArchitecture();
+                    return GetOsLoaderArchitectureForAnyCpuExe();
                 default:
                     return TargetArchitecture.Unknown;
             }
@@ -138,14 +201,15 @@ namespace ConfuserExKillerRunner.Core
             var targetRuntime = targetRequiresModernDotNet
                 ? TargetRuntimeFamily.ModernDotNet
                 : TargetRuntimeFamily.NetFramework;
-            return IsWorkerCompatible(workerExe, targetArch, targetRuntime, out mismatchReason);
+            return IsWorkerCompatible(workerExe, targetArch, targetRuntime, out mismatchReason, dotnetHostPath: null);
         }
 
         public static bool IsWorkerCompatible(
             string workerExe,
             TargetArchitecture targetArch,
             TargetRuntimeFamily targetRuntime,
-            out string mismatchReason)
+            out string mismatchReason,
+            string dotnetHostPath = null)
         {
             mismatchReason = null;
 
@@ -168,10 +232,10 @@ namespace ConfuserExKillerRunner.Core
                 return false;
             }
 
-            TargetArchitecture effectiveWorkerArch = GetWorkerEffectiveCpuArchitecture(workerExe, workerArchInfo);
+            TargetArchitecture effectiveWorkerArch = GetWorkerEffectiveCpuArchitecture(workerExe, workerArchInfo, dotnetHostPath);
             if (effectiveWorkerArch == TargetArchitecture.Unknown)
             {
-                mismatchReason = $"Resolved worker '{Path.GetFileName(workerExe)}' has an indeterminate effective CPU architecture.";
+                mismatchReason = $"Resolved worker '{Path.GetFileName(workerExe)}' has an indeterminate or conflicting host/payload CPU architecture.";
                 return false;
             }
 
@@ -396,7 +460,7 @@ namespace ConfuserExKillerRunner.Core
                     }
                 }
 
-                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : workerExe;
+                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? (ResolveDotNetHostExecutable() ?? "dotnet") : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
                 Logger.LogInfo($"[WorkerClient] Spawning isolated worker ({Path.GetFileName(runnerBin)}) for AntiTamper (Timeout: {timeoutMs}ms)...");
@@ -487,7 +551,7 @@ namespace ConfuserExKillerRunner.Core
                     }
                 }
 
-                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : workerExe;
+                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? (ResolveDotNetHostExecutable() ?? "dotnet") : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
                 var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
@@ -568,7 +632,7 @@ namespace ConfuserExKillerRunner.Core
                     }
                 }
 
-                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : workerExe;
+                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? (ResolveDotNetHostExecutable() ?? "dotnet") : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
                 var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
@@ -652,7 +716,7 @@ namespace ConfuserExKillerRunner.Core
                     }
                 }
 
-                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : workerExe;
+                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? (ResolveDotNetHostExecutable() ?? "dotnet") : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
                 var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);
@@ -741,7 +805,7 @@ namespace ConfuserExKillerRunner.Core
                     }
                 }
 
-                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : workerExe;
+                string runnerBin = workerExe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? (ResolveDotNetHostExecutable() ?? "dotnet") : workerExe;
                 int timeoutMs = options != null && options.TimeoutMs > 0 ? options.TimeoutMs : 30000;
 
                 var procResult = ProcessRunner.RunIsolated(runnerBin, sbArgs.ToString(), tempDir, timeoutMs);

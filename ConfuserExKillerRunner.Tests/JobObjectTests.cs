@@ -899,6 +899,29 @@ namespace ConfuserExKillerRunner.Tests
             }
         }
 
+        [Fact]
+        public void JobObject_19_ProcessRunner_RunIsolatedAndRun_TimeoutWithHeavyOutput_SynchronizesBuffersSafely()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return;
+
+            string floodArgs = "/c for /L %i in (1,0,2) do @(echo ISOLATED_STDOUT_FLOOD_%i & echo ISOLATED_STDERR_FLOOD_%i 1>&2)";
+
+            // 1. Production ProcessRunner.RunIsolated timeout path under heavy concurrent stdout/stderr flood
+            var isolatedResult = ProcessRunner.RunIsolated("cmd.exe", floodArgs, timeoutMs: 1000);
+            Assert.True(isolatedResult.TimedOut, "Expected ProcessRunner.RunIsolated to time out.");
+            Assert.Equal(-1, isolatedResult.ExitCode);
+            Assert.Contains("ISOLATED_STDOUT_FLOOD_", isolatedResult.StandardOutput);
+            Assert.Contains("ISOLATED_STDERR_FLOOD_", isolatedResult.StandardError);
+
+            // 2. Production ProcessRunner.Run timeout path under heavy concurrent stdout/stderr flood
+            var runResult = ProcessRunner.Run("cmd.exe", floodArgs, timeoutMs: 1000);
+            Assert.True(runResult.TimedOut, "Expected ProcessRunner.Run to time out.");
+            Assert.Equal(-1, runResult.ExitCode);
+            Assert.Contains("ISOLATED_STDOUT_FLOOD_", runResult.StandardOutput);
+            Assert.Contains("ISOLATED_STDERR_FLOOD_", runResult.StandardError);
+        }
+
         private static (bool exited, string stdout, string stderr) WaitAndReadProcess(Process proc, int timeoutMs)
         {
             var sbOut = new System.Text.StringBuilder();
